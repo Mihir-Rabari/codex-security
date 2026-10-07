@@ -2117,6 +2117,31 @@ def merge_saved_results(
             and field != "reviews"
         ):
             item = project_missing_record(field, item, index, worker, source, relative)
+        elif (
+            reviewed
+            and field == "deferred"
+            and isinstance(item, dict)
+            and isinstance(item.get("surfaceIds"), list)
+        ):
+            surface_ids: dict[str, list[str]] = {}
+            source_surfaces = source.get("surfaces", [])
+            for surface in source_surfaces if isinstance(source_surfaces, list) else []:
+                if not isinstance(surface, dict) or not isinstance(surface.get("id"), str):
+                    continue
+                retained = retained_coverage_record("surfaces", surface, worker, relative)
+                if retained is not None and isinstance(retained.get("id"), str):
+                    surface_ids.setdefault(surface["id"], []).append(retained["id"])
+            if surface_ids:
+                item = {
+                    **item,
+                    "surfaceIds": [
+                        target
+                        for value in item["surfaceIds"]
+                        for target in (
+                            surface_ids.get(value, [value]) if isinstance(value, str) else [value]
+                        )
+                    ],
+                }
         elif field == "surfaces" and worker is not None and isinstance(item, dict):
             saved = unreviewed_surfaces.setdefault(worker["id"], [])
             if item in saved:

@@ -159,6 +159,17 @@ for (const history of [
         }
       }
       if (readableHistory) {
+        const receipt = path.join(
+          workerRoot,
+          "attempts",
+          "attempt-01",
+          "artifacts",
+          "prior.txt",
+        );
+        await mkdir(path.dirname(receipt), { recursive: true });
+        const receiptBytes = "Synthetic prior receipt.\n";
+        await writeFile(receipt, receiptBytes);
+        files.set(receipt, receiptBytes);
         const old = structuredClone(retained);
         old.surfaces.push({
           id: "same-id",

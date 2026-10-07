@@ -3,7 +3,10 @@ from __future__ import annotations
 import copy
 import json
 import os
+import shutil
+import subprocess
 from argparse import Namespace
+from pathlib import Path
 
 import pytest
 from test_deep_scan_successful_publication import add_worker, complete
@@ -1613,3 +1616,95 @@ def test_stopped_recovery_binds_reducer_projection_to_host_checkpoint(
             for row in coverage["deferred"]
         )
         assert all(path.read_bytes() == contents for path, contents in saved.items())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="directory access modes require POSIX")
+@pytest.mark.parametrize("merge_state", ["merging", "buffered", "merged"])
+@pytest.mark.parametrize("variant", ["retained", "additional", "changed"])
+def test_precommit_deferred_links_keep_actual_host_surface(
+    workbench_api, workbench_db, publication_scan, merge_state, variant
+):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the real checkpoint producer")
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = 'deep-security-scan/v2' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        (scan.scan_dir / name).unlink()
+    discovery = add_worker(workbench_db, scan)
+    reducer = add_worker(workbench_db, scan)
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET merge_state = ? WHERE result_manifest_path = ?",
+            (merge_state, str(discovery)),
+        )
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET kind = 'dedup', status = 'failed', merge_state = 'none' WHERE result_manifest_path = ?",
+            (str(reducer),),
+        )
+    reducer.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": [],
+                "sourceCoverage": {
+                    "completeness": "complete",
+                    "surfaces": [],
+                    "explicitExclusions": [],
+                    "deferred": [],
+                    "reviews": [],
+                },
+            }
+        )
+    )
+    command = [
+        node,
+        "--experimental-strip-types",
+        str(Path(__file__).resolve().parents[1] / "mcp-app/tests/precommit_reducer_fixture.mjs"),
+        str(scan.scan_dir),
+        str(discovery),
+        str(reducer),
+        variant,
+        scan.scan_id,
+    ]
+    result = subprocess.run(command, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    proof = json.loads(result.stdout)
+    saved = {p: p.read_bytes() for p in (scan.scan_dir / "workers").rglob("*.json")}
+    api = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+    api.fail_scan(
+        context,
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id,
+            claim_token=None,
+            cost_json=None,
+            message="Synthetic stopped publication.",
+        ),
+    )
+    for replay in (False, True):
+        if replay:
+            api.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+        surfaces = {
+            row["id"]
+            for row in coverage["surfaces"]
+            if isinstance(row, dict) and isinstance(row.get("id"), str)
+        }
+        pending = [
+            row
+            for row in coverage["deferred"]
+            if row.get("reason") == "Accepted later review remains."
+        ]
+        assert pending
+        for row in pending:
+            assert set(row["surfaceIds"]) <= surfaces, (row, surfaces)
+            if variant != "changed":
+                assert proof["retainedHostSurface"] in row["surfaceIds"]
+        assert all(path.read_bytes() == value for path, value in saved.items())
