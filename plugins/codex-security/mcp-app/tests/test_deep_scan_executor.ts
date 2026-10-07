@@ -2189,9 +2189,10 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
               workerLaunch.environment!.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
               process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
             );
-            assert.equal(
-              workerPermissionProfileOverride(workerLaunch.args),
-              'permissions.codex_security_deep_scan_worker={extends=":read-only",filesystem={":root"="read","/repo/.env"="deny","/repo/**/.secret"="deny","/repo/**/*.pem"="deny",glob_scan_max_depth=3},network={enabled=false}}',
+            assert.deepEqual(
+              parseToml(workerPermissionProfileOverride(workerLaunch.args)!)
+                .permissions,
+              { codex_security_deep_scan_worker: deniedWorkerPermissionProfile },
             );
             const invocation = await readJson(workerLaunch.markerPath);
             assert.equal(invocation.providerKey, providerKeys[index]);
