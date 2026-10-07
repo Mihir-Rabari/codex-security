@@ -483,26 +483,29 @@ async function preserveScanDraft(
         typeof row.id === "string" ? [row.id] : [],
       ),
     );
-    source.coverage.deferred = normalizeDeferred(
-      (source.coverage.deferred as JsonObject[]).map((row) => {
-        if (
-          typeof row.id === "string" ||
-          "candidateId" in row ||
-          "candidate" in row ||
-          "finding" in row
-        )
-          return row;
-        const matching = savedDeferred.find(
-          ({ id, ...content }) =>
-            typeof id === "string" &&
-            !reservedIds.has(id) &&
-            isDeepStrictEqual(content, row),
-        );
-        if (matching === undefined) return row;
-        const id = matching.id as string;
-        reservedIds.add(id);
-        return { ...row, id };
-      }),
+    const deferred = (source.coverage.deferred as JsonObject[]).map((row) => {
+      if (
+        typeof row.id === "string" ||
+        "candidateId" in row ||
+        "candidate" in row ||
+        "finding" in row
+      )
+        return row;
+      const matching = savedDeferred.find(
+        ({ id, ...content }) =>
+          typeof id === "string" &&
+          !reservedIds.has(id) &&
+          isDeepStrictEqual(content, row),
+      );
+      if (matching === undefined) return row;
+      const id = matching.id as string;
+      reservedIds.add(id);
+      return { ...row, id };
+    });
+    const normalizedDeferred = normalizeDeferred(deferred);
+    // Historical explicit IDs still identify ambiguous generic work.
+    source.coverage.deferred = deferred.map((row, index) =>
+      typeof row.id === "string" ? row : normalizedDeferred[index]!,
     );
   }
   const ambiguousDeferredIds = ambiguousGenericDeferredIds(sources);
@@ -2693,7 +2696,10 @@ function normalizeCoverageEntries(
           ),
         }
       : item;
-    if (typeof item.id === "string" && !assignedDeferredIds.has(item.id)) {
+    if (
+      typeof item.id === "string" &&
+      (genericDeferred(item) || !assignedDeferredIds.has(item.id))
+    ) {
       assignedDeferredIds.add(item.id);
       return linked;
     }
@@ -2776,7 +2782,10 @@ function normalizeDeferred(rows: JsonObject[]): JsonObject[] {
   );
   const assignedIds = new Set<string>();
   return rows.map((item) => {
-    if (typeof item.id === "string" && !assignedIds.has(item.id)) {
+    if (
+      typeof item.id === "string" &&
+      (genericDeferred(item) || !assignedIds.has(item.id))
+    ) {
       assignedIds.add(item.id);
       return item;
     }
