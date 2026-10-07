@@ -1677,7 +1677,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             assert.equal(invocation.codexHome, await realpath(codexHome));
             assert.equal(invocation.sqliteHome, sqliteHomes[index]);
-            assert.equal(invocation.cwd, workerCwd);
+            assertFlagPair(invocation.argv, "--cd", workerCwd);
             assert.equal(invocation.providerKey, providerKeys[index]);
             assert.equal(invocation.providerHeader, providerHeaders[index]);
             assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
