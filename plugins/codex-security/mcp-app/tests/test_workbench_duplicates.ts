@@ -269,6 +269,8 @@ test("Python and Node retries preserve Unicode group identities and timestamps",
       process.env.PYTHON ?? "python",
       [
         "-I",
+        "-X",
+        "utf8",
         "-c",
         `import json, sqlite3, sys
 sys.path.insert(0, sys.argv[1])
