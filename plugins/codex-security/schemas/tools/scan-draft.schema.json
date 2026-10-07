@@ -773,7 +773,8 @@
                 "$ref": "#/$defs/text"
               },
               "candidateId": {
-                "$ref": "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/candidateId"
+                "$ref": "#/$defs/text",
+                "description": "Preserve the saved candidate's semantic identity exactly, including names such as review/auth."
               },
               "reason": {
                 "$ref": "#/$defs/text"

@@ -3101,6 +3101,56 @@ The extraction root is not enforced.
                         self.assertNotIn(candidate_rows[0]["id"], {row["id"] for row in closures})
                         self.assertEqual(candidate_rows[0]["candidate"], surface["candidate"])
 
+    def test_parent_receipt_recovery_keeps_independent_valid_closures(self) -> None:
+        original = copy.deepcopy(self.coverage)
+        for malformed in (None, "duplicate", "missing-reason", "already-active"):
+            for valid_receipt in (False, True):
+                with self.subTest(malformed=malformed, valid_receipt=valid_receipt):
+                    self.coverage = copy.deepcopy(original)
+                    surface = self.coverage["surfaces"][0]
+                    surface.update(
+                        candidateId="review/auth",
+                        disposition="rejected",
+                        receiptRefs=["artifacts/receipt.txt"],
+                    )
+                    closures = [
+                        {"id": "review/auth", "reason": "Candidate review completed."},
+                        {"id": "independent-review", "reason": "Independent review completed."},
+                    ]
+                    if malformed == "duplicate":
+                        closures.append(copy.deepcopy(closures[1]))
+                    elif malformed == "missing-reason":
+                        closures[0].pop("reason")
+                    elif malformed == "already-active":
+                        self.coverage["completeness"] = "partial"
+                        self.coverage["deferred"] = [
+                            {"id": "independent-review", "reason": "Still active."}
+                        ]
+                    self.coverage["resolvedDeferred"] = closures
+                    self.write_scan()
+                    receipt = self.scan_dir / "artifacts/receipt.txt"
+                    receipt.parent.mkdir(exist_ok=True)
+                    if valid_receipt:
+                        receipt.write_bytes(b"Synthetic completed review evidence.")
+                    else:
+                        receipt.unlink(missing_ok=True)
+                    source_bytes = (self.scan_dir / "coverage.json").read_bytes()
+                    prepared = FINALIZER._prepare_scan_finalization(
+                        self.scan_dir, completion_warnings=[]
+                    )
+                    self.assertEqual((self.scan_dir / "coverage.json").read_bytes(), source_bytes)
+                    expected = None if malformed else closures if valid_receipt else closures[1:]
+                    self.assertEqual(prepared[4].get("resolvedDeferred"), expected)
+                    _, _, published = FINALIZER._write_prepared_scan_finalization(prepared)
+                    _, _, sealed = FINALIZER.finalize_scan(self.scan_dir)
+                    self.assertEqual(sealed, published)
+                    self.assertEqual(sealed.get("resolvedDeferred"), expected)
+                    pending = [
+                        row for row in sealed["deferred"] if row.get("candidateId") == "review/auth"
+                    ]
+                    self.assertEqual(len(pending), int(not valid_receipt))
+                    self.assertEqual(FINALIZER.finalize_scan(self.scan_dir)[2], sealed)
+
 
 if __name__ == "__main__":
     unittest.main()

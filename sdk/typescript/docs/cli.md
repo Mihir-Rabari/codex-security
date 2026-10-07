@@ -604,8 +604,9 @@ thresholds. JSON results and the SDK expose `unresolvedCandidateCount` and
 follow-up. Detailed saved-scan context includes the unresolved count; scan and
 repository listings stay lightweight and do not load candidate artifacts.
 
-Candidates are counted once by `candidateId` within each logical Deep worker,
-including resumed workers. Rejected and not-applicable candidates, generic
+Candidate IDs use non-empty semantic text, so deferred entries preserve names
+such as `review/auth` exactly. Candidates are counted once by `candidateId` within
+each logical Deep worker, including resumed workers. Rejected and not-applicable candidates, generic
 unfinished review work, and superseded checkpoints are excluded. Different
 workers may save candidates for the same underlying issue, so this is a candidate
 count, not a count of unique vulnerabilities. Older artifacts without candidate

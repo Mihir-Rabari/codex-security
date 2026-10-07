@@ -828,8 +828,14 @@ describe("custom validation", () => {
     dispositions: Parameters<typeof result>;
     siblings?: boolean;
     staleDeferred?: boolean;
+    semanticIdentity?: string;
   }> = [
     { scenario: "standard", dispositions: ["reportable"] },
+    {
+      scenario: "semantic-candidate-identity",
+      dispositions: ["deferred"],
+      semanticIdentity: "review/auth",
+    },
     { scenario: "diff", dispositions: ["reportable"] },
     { scenario: "empty", dispositions: [] },
     { scenario: "incomplete", dispositions: ["reportable"] },
@@ -887,6 +893,7 @@ describe("custom validation", () => {
       dispositions,
       siblings = false,
       staleDeferred = false,
+      semanticIdentity,
     }) => {
       const diff = scenario === "diff";
       const count = dispositions.length;
@@ -1026,6 +1033,11 @@ describe("custom validation", () => {
                         count,
                         diff,
                       );
+                      if (semanticIdentity !== undefined) {
+                        provisional.findings[0]!.provenance["candidateId"] =
+                          semanticIdentity;
+                        await save(join(scanDir, "findings.json"), provisional);
+                      }
                       if (siblings) {
                         for (const [
                           index,
@@ -1220,6 +1232,13 @@ describe("custom validation", () => {
           commands.indexOf("complete-scan"),
         );
         expect(completed.findings.findings).toHaveLength(expectedReported);
+        if (semanticIdentity !== undefined) {
+          expect(completed.unresolvedCandidates).toHaveLength(1);
+          expect(completed.unresolvedCandidates[0]!.candidateId).toBe(
+            semanticIdentity,
+          );
+          expect(completed.coverage.completeness).toBe("partial");
+        }
         if (staleDeferred) {
           const expectedPending = dispositions.filter(
             (value) => value === "deferred",

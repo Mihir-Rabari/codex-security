@@ -1371,38 +1371,6 @@ try {
     ],
   ];
 
-  for (const [description, candidateId] of [
-    ["path traversal", ".."],
-    ["forward slash", "candidate/nested"],
-    ["backslash", "candidate\\nested"],
-    ["control character", "candidate\u0001nested"],
-    ["oversized identity", "a".repeat(513)],
-  ] as const) {
-    rejectedDraftInputs.push([
-      `deferred candidate identities reject ${description}`,
-      coverageInput({
-        completeness: "partial",
-        deferred: [
-          { candidateId, reason: "The candidate identity must remain safe." },
-        ],
-      }),
-    ]);
-    rejectedDraftInputs.push([
-      `explicit deferred identities do not bypass invalid candidate ${description}`,
-      coverageInput({
-        completeness: "partial",
-        deferred: [
-          {
-            id: "deferred-explicit-archive",
-            candidateId,
-            reason:
-              "The candidate identity must remain safe even with an explicit identity.",
-          },
-        ],
-      }),
-    ]);
-  }
-
   assert.equal(scanDraftInputSchema.safeParse(input).success, true);
   assert.equal(
     scanDraftInputSchema.safeParse(semanticInput).success,

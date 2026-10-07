@@ -10,13 +10,14 @@ import { readJson } from "./support/json.ts";
 const { recordCodexSecurityWorkerScanDraft } = await importSource(
   new URL("../src/artifact-scan-draft.ts", import.meta.url).pathname,
 );
-const { recordCodexSecurityDeepReduction } = await importSource(
-  new URL("../src/artifact-deep-reducer.ts", import.meta.url).pathname,
-);
-const { archiveDirectory } = await importSource(
+const { recordCodexSecurityDeepReduction, getCodexSecurityDeepReducerInputs } =
+  await importSource(
+    new URL("../src/artifact-deep-reducer.ts", import.meta.url).pathname,
+  );
+const { archiveDirectory, createDeepScanArtifacts } = await importSource(
   new URL("../src/deep-scan/artifacts.ts", import.meta.url).pathname,
 );
-const { deepReductionScanDraft } = await importSource(
+const { deepReductionScanDraft, validateReducerArtifacts } = await importSource(
   new URL("../src/deep-scan/artifact-validation.ts", import.meta.url).pathname,
 );
 const { unresolvedCandidates } = await importSource(
@@ -507,6 +508,76 @@ for (const archived of [false, true]) {
         assert.deepEqual(
           await readFile(path.join(source, "artifacts/review.txt")),
           contents,
+        );
+      } finally {
+        await rm(f.root, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
+for (const archived of [false, true]) {
+  for (const candidateId of [
+    "review/auth",
+    "review\\auth",
+    "candidate-review",
+  ]) {
+    test(`recovered semantic candidate identity remains readable: archived=${archived}, id=${candidateId}`, async () => {
+      const f = await fixture();
+      try {
+        await recordCodexSecurityWorkerScanDraft(
+          f.worker,
+          workerDraft([], {
+            coverage: {
+              completeness: "complete",
+              surfaces: [
+                {
+                  id: "review",
+                  label: "Reviewed candidate",
+                  candidateId,
+                  disposition: "rejected",
+                  receiptRefs: ["artifacts/missing.txt"],
+                },
+              ],
+              explicitExclusions: [],
+              deferred: [],
+            },
+          }),
+        );
+        const source = archived
+          ? path.join(f.workerRoot, "attempts", "attempt-01")
+          : f.output;
+        if (archived) await archiveDirectory(f.output, source);
+        const original = await readFile(path.join(source, "result.json"));
+        if (archived)
+          await recordCodexSecurityWorkerScanDraft(f.worker, workerDraft([]));
+        const sources = await getCodexSecurityDeepReducerInputs(f.reducer);
+        await recordCodexSecurityDeepReduction(f.reducer, {
+          scanId,
+          findings: [],
+        });
+        const accepted = await validateReducerArtifacts(
+          {
+            artifacts: createDeepScanArtifacts(f.root),
+            artifactDir: f.reducerRoot,
+            resultPath: path.join(f.reducerRoot, "result.json"),
+            reducerId: "reducer",
+            sources,
+          },
+          scanId,
+        );
+        assert.equal(accepted.result.unresolvedCandidates.length, 1);
+        assert.equal(
+          accepted.result.unresolvedCandidates[0].candidateId,
+          candidateId,
+        );
+        assert.equal(
+          accepted.result.unresolvedCandidates[0].sourceWorkerId,
+          "worker-a",
+        );
+        assert.deepEqual(
+          await readFile(path.join(source, "result.json")),
+          original,
         );
       } finally {
         await rm(f.root, { recursive: true, force: true });
