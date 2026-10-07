@@ -1,7 +1,17 @@
 import { execFileSync } from "node:child_process";
-import { accessSync, constants, realpathSync, statSync } from "node:fs";
+import {
+  accessSync,
+  constants,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import path from "node:path";
 import type { ApiProvider, ProviderOptions } from "promptfoo";
+import {
+  bundledCodexSdkEnvironment,
+  resolveBundledCodexExecutable,
+} from "../../../sdk/typescript/dist/codex-sdk-environment.js";
 
 type CodexProvider = ApiProvider & {
   getCodexInstanceForTurn(
@@ -91,10 +101,32 @@ export default class TriageProvider implements ApiProvider {
         const executable = realpathSync.native(
           resolveCommand(executablePath, process.cwd(), environment),
         );
+        const directories = [path.dirname(executable), ...pathDirs];
+        if (path.basename(executable) === "codex.js") {
+          try {
+            const packageJson = path.join(
+              path.dirname(executable),
+              "..",
+              "package.json",
+            );
+            if (
+              JSON.parse(readFileSync(packageJson, "utf8")).name ===
+              "@openai/codex"
+            ) {
+              const native = resolveBundledCodexExecutable(packageJson);
+              directories.push(
+                path.dirname(native),
+                ...Object.values(bundledCodexSdkEnvironment(native, {})),
+              );
+            }
+          } catch {
+            // Other launcher layouts keep their configured directories and
+            // report their own dependency errors when the SDK starts them.
+          }
+        }
         config.additional_directories = [
           ...(config.additional_directories ?? []),
-          path.dirname(executable),
-          ...pathDirs,
+          ...directories,
         ];
         return instance;
       };

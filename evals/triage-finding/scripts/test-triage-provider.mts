@@ -608,6 +608,72 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
     } finally {
       await selectedCodex.cleanup?.();
     }
+    const packages = ["first", "second", "vendored"].map((name) => {
+      const modules = path.join(root, name, "node_modules", "@openai");
+      const packageRoot = path.join(modules, "codex");
+      const nativePackage =
+        name === "vendored"
+          ? packageRoot
+          : path.join(modules, `codex-${process.platform}-${process.arch}`);
+      const nativeRoot = path.join(nativePackage, "vendor", "synthetic-target");
+      const native = path.join(nativeRoot, "bin", "codex");
+      const tools = path.join(nativeRoot, "codex-path");
+      const launcher = path.join(packageRoot, "bin", "codex.js");
+      fs.mkdirSync(path.dirname(launcher), { recursive: true });
+      fs.mkdirSync(path.dirname(native), { recursive: true });
+      fs.mkdirSync(tools);
+      fs.writeFileSync(
+        path.join(packageRoot, "package.json"),
+        JSON.stringify({
+          name: "@openai/codex",
+          bin: { codex: "bin/codex.js" },
+        }),
+      );
+      if (name !== "vendored")
+        fs.writeFileSync(path.join(nativePackage, "package.json"), "{}");
+      fs.copyFileSync(fakeCodex, native);
+      fs.writeFileSync(
+        launcher,
+        `#!${process.execPath}
+const child = require('node:child_process').spawnSync(${JSON.stringify(native)}, process.argv.slice(2), {stdio:'inherit',env:process.env});
+process.exit(child.status ?? 1);
+`,
+        { mode: 0o755 },
+      );
+      return {
+        launcher,
+        native,
+        tools,
+        configured: name === "vendored" ? [path.dirname(native), tools] : [],
+      };
+    });
+    const packaged = await load(nodes[0], "{{selected_codex}}");
+    try {
+      await Promise.all(
+        packages.map(async ({ launcher, native, tools, configured }) => {
+          const result = await packaged.callApi("synthetic", {
+            vars: { selected_codex: launcher },
+            prompt: {
+              raw: "synthetic",
+              label: "synthetic",
+              config: { additional_directories: configured },
+            },
+          });
+          assert.equal(result.error, undefined);
+          const captured = JSON.parse(String(result.output));
+          assert.equal(captured.executable, native);
+          assert.equal(captured.path, process.env.PATH);
+          assert.deepEqual(captured.directories, [
+            ...configured,
+            path.dirname(nodes[0]),
+            path.dirname(launcher),
+            ...(configured.length ? [] : [path.dirname(native), tools]),
+          ]);
+        }),
+      );
+    } finally {
+      await packaged.cleanup?.();
+    }
     const mixed = await load("{{prefix}}/{{env.NODE_BASENAME}}");
     try {
       const result = await mixed.callApi("synthetic", {
