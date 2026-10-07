@@ -1642,7 +1642,9 @@ async function checkoutRevision(
   environment["GIT_LFS_SKIP_SMUDGE"] = "1";
   const command = await resolveTrustedExecutable(
     "git",
-    environment,
+    restoreIncomplete
+      ? (await inspectTrustedExecutable("git", environment, path)).environment
+      : environment,
     resolve(process.cwd()),
   );
   if (command === null) {
@@ -1813,7 +1815,7 @@ async function checkoutRevision(
     );
   }
   if (
-    retainedGit &&
+    restoreIncomplete &&
     !(await lstat(join(path, ".git", "index")).catch(undefinedIfMissingFile))
   ) {
     // Rebuild the lost index without restoring unrelated deleted worktree files.
@@ -1828,7 +1830,6 @@ async function checkoutRevision(
   );
   if (restoreIncomplete) {
     const ignoreCase =
-      process.platform === "win32" ||
       (
         await git("config", "--bool", "core.ignorecase").catch(
           (error: unknown) => {
