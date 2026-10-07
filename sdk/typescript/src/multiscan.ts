@@ -1735,7 +1735,13 @@ async function checkoutRevision(
       task.revision,
     );
   }
-  await git("checkout", "--quiet", "--detach", task.revision);
+  await git(
+    "checkout",
+    "--quiet",
+    "--detach",
+    ...(restoreIncomplete ? ["--no-overwrite-ignore"] : []),
+    task.revision,
+  );
   if (restoreIncomplete) {
     const ignoreCase =
       process.platform === "win32" ||

@@ -6095,3 +6095,81 @@ for (const nested of [false, true]) {
     expect(runs).toHaveBeenCalledTimes(1);
   },
 );
+
+for (const tracked of [false, true]) {
+  test(`retained ignored data keeps unrelated bytes with removed index tracked=${tracked}`, async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "ignored-retained-source");
+    if (tracked) {
+      await writeFile(
+        join(source.path, "notes.log"),
+        "Pinned synthetic note.\n",
+      );
+      git(source.path, "add", ".");
+      git(
+        source.path,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.test",
+        "commit",
+        "-qm",
+        "Pinned synthetic note",
+      );
+    }
+    const revision = git(source.path, "rev-parse", "HEAD");
+    await writeFile(
+      paths.input,
+      `id,repository,revision,scope\nrepo,${source.path},${revision},src\n`,
+    );
+    const expectedApp = await readFile(join(source.path, "src", "app.ts"));
+    await runMultiscan(
+      options(paths, client(rejecting("Interrupted")), { maxAttempts: 1 }),
+    );
+    const runs = mock(
+      async (
+        checkout: string,
+        settings: Parameters<SecurityClient["run"]>[1] = {},
+      ) => completedScan(settings.outputDir!, "complete", checkout),
+    );
+    const campaign = options(paths, client(runs), {
+      recoverScan: async () => undefined,
+    });
+    const initial = await runMultiscan(campaign);
+    expect(initial).toMatchObject({ completed: 1, skipped: 0 });
+    const ledger = await readFile(initial.resultsPath);
+    const checkout = join(
+      paths.output,
+      "recovery-checkouts",
+      "repo",
+      "attempt-2",
+    );
+    await rm(checkout, { recursive: true, force: true });
+    git(paths.root, "clone", "--quiet", source.path, checkout);
+    await rm(join(checkout, "src"), { recursive: true });
+    const retained = "Keep unrelated retained note bytes.\n";
+    await writeFile(join(checkout, "notes.log"), retained);
+    await appendFile(join(checkout, ".git", "info", "exclude"), "notes.log\n");
+    await rm(join(checkout, ".git", "index"));
+    await rm(source.path, { recursive: true });
+    let failure: unknown;
+    let summary: unknown;
+    try {
+      summary = await runMultiscan(campaign);
+    } catch (error) {
+      failure = error;
+    }
+    expect(await readFile(join(checkout, "notes.log"), "utf8")).toBe(retained);
+    expect(runs).toHaveBeenCalledTimes(1);
+    if (tracked) {
+      expect(failure).toBeInstanceOf(Error);
+    } else {
+      expect(failure).toBeUndefined();
+      expect(summary).toMatchObject({ completed: 1, skipped: 1 });
+      expect(await readFile(initial.resultsPath)).toEqual(ledger);
+      expect(await readFile(join(checkout, "src", "app.ts"))).toEqual(
+        expectedApp,
+      );
+    }
+  });
+}
