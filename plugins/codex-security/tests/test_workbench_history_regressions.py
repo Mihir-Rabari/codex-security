@@ -1960,3 +1960,43 @@ def test_scope_expansion_skips_same_target_pairs_but_keeps_linked_comparisons(
             )
         assert targets == expected
         assert same.call_count == (1 if linked else 0)
+
+
+@pytest.mark.parametrize("reason", ["false_positive", "already_fixed"])
+def test_transitive_comparison_keeps_dismissal_for_predecision_scans(history, reason):
+    state, root, repo = history
+    scans = [
+        create_cli_scan(state, root, repo, identity_anchor=anchor)
+        for anchor in ("transitive-a", "transitive-b", "transitive-c")
+    ]
+    rows = [
+        run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]["findings"][0]
+        for scan in scans
+    ]
+    run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        rows[0]["occurrenceId"],
+        "--status",
+        "closed",
+        "--close-reason",
+        reason,
+        "--note",
+        "Synthetic transitive dismissal.",
+    )
+    save_scan_matches(state, scans[0], scans[1])
+    save_scan_matches(
+        state, scans[0], scans[2], confirmed_match(rows[0]["occurrenceId"], rows[2]["occurrenceId"])
+    )
+    save_scan_matches(
+        state, scans[1], scans[2], confirmed_match(rows[1]["occurrenceId"], rows[2]["occurrenceId"])
+    )
+    detail = run_workbench(state, "get-finding", "--occurrence-id", rows[1]["occurrenceId"])[
+        "scan"
+    ]["findings"][0]
+    assert detail["triage"]["status"] == "closed"
+    result = compare_scan_pair(state, scans[0], scans[1])
+    assert result["summary"]["reopened"] == 0
+    assert result["summary"]["persisting"] == 1
+    assert result["findings"][0]["triage"]["status"] == "closed"

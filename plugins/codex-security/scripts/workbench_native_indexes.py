@@ -112,8 +112,11 @@ def _indexed_findings(
     allowed_scan_ids: set[str],
     *,
     allow_cross_target_matches: bool = False,
+    matching_scan_ids: set[str] | None = None,
 ) -> Iterator[dict[str, Any]]:
     admitted = json.dumps(sorted(allowed_scan_ids))
+    matching_scan_ids = allowed_scan_ids if matching_scan_ids is None else matching_scan_ids
+    matched = json.dumps(sorted(matching_scan_ids))
     parents: dict[tuple[str, str], tuple[str, str]] = {}
     compatible_scan_pairs: dict[tuple[str, str], bool] = {}
 
@@ -141,11 +144,11 @@ def _indexed_findings(
             AND before_scans.id IN (SELECT value FROM json_each(?))
             AND after_scans.id IN (SELECT value FROM json_each(?))
         """,
-        (allow_cross_target_matches, admitted, admitted),
+        (allow_cross_target_matches, matched, matched),
     ):
         if (
-            match["before_scan_id"] not in allowed_scan_ids
-            or match["after_scan_id"] not in allowed_scan_ids
+            match["before_scan_id"] not in matching_scan_ids
+            or match["after_scan_id"] not in matching_scan_ids
         ):
             continue
         if match["before_target_id"] != match["after_target_id"]:
@@ -314,7 +317,6 @@ def _indexed_active_findings(
             "target_ids",
             "target_paths",
             "matched_target_ids",
-            "through_scan_sequence",
         )
         if key in settings
     }
@@ -350,9 +352,17 @@ def _indexed_active_findings(
             include_resolved=True,
             target_ids=history_targets or None,
             target_paths=history_paths or None,
-            through_scan_sequence=settings.get("through_scan_sequence"),
         ):
             pass
+    matching_scan_ids = allowed_scan_ids.copy()
+    if settings.get("through_scan_sequence") is not None:
+        allowed_scan_ids = {
+            row["id"]
+            for row in connection.execute(
+                "SELECT id FROM scans WHERE rowid <= ? AND id IN (SELECT value FROM json_each(?))",
+                (settings["through_scan_sequence"], json.dumps(sorted(allowed_scan_ids))),
+            )
+        }
     uncertain_scans: dict[str, set[str]] = {}
     admitted = json.dumps(sorted(allowed_scan_ids))
     for comparison in connection.execute(
@@ -384,6 +394,7 @@ def _indexed_active_findings(
         connection,
         allowed_scan_ids,
         allow_cross_target_matches=True,
+        matching_scan_ids=matching_scan_ids,
     ):
         matched_by_target: dict[str, list[dict[str, Any]]] = {}
         for occurrence_id in row["occurrence_ids"]:
