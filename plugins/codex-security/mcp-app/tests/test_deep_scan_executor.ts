@@ -2473,21 +2473,17 @@ async function testWorkerCyberAccessSettings() {
           } else {
             assertFlagPair(invocation.argv, "--cyber-access-program", program);
           }
-          for (const feature of [
-            "api_key_cyber_access_programs",
-            "api_key_model_discovery",
-            "shell_tool",
-            "unified_exec",
-          ]) {
-            assert.deepEqual(
-              invocation.argv.filter((arg: string) =>
-                arg.startsWith(`features.${feature}=`),
-              ),
-              features[feature] === undefined
-                ? []
-                : [`features.${feature}=${features[feature]}`],
-            );
-          }
+          assertConfigOverrides(
+            invocation.argv,
+            Object.fromEntries(
+              [
+                "api_key_cyber_access_programs",
+                "api_key_model_discovery",
+                "shell_tool",
+                "unified_exec",
+              ].map((feature) => [`features.${feature}`, features[feature]]),
+            ),
+          );
           assert.equal(
             invocation.openaiAuthentication.CODEX_API_KEY,
             "synthetic-worker-api-key",
