@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import sqlite3
 from pathlib import Path
@@ -1112,3 +1113,94 @@ def test_budget_legacy_saved_pending_surface_refresh_uses_original_evidence(
         assert retained["notes"] == current["evidence"]
         assert retained["annotation"] == saved_surface["annotation"]
         assert len(published["surfaces"]) == 1
+
+
+@pytest.mark.parametrize("decision", ["suppressed", "not_applicable", "deferred"])
+def test_budget_terminal_refresh_archives_previous_candidate_snapshot(
+    tmp_path: Path, workbench_api, decision: str
+) -> None:
+    state_dir, _, scan_dir, scan_id, ledger = budget_scan_fixture(
+        tmp_path, extra_files={"updated.py": "# updated evidence\n"}
+    )
+    original = {**json.loads(ledger.read_text()), "validation": {"disposition": "suppressed"}}
+    run_workbench(state_dir, "set-scan-thread", "--scan-id", scan_id, "--thread-id", "sdk-thread")
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+        workbench_api["budget_exhausted_draft"](scan, scan_dir, [original], "Cost limit reached.")
+    current = {
+        **original,
+        "summary": "Current review",
+        "evidence": "Current source evidence.",
+        "locations": [{"path": "updated.py", "start_line": 1, "end_line": 1, "role": "sink"}],
+        "validation": {"disposition": decision},
+    }
+    ledger.write_text(json.dumps(current) + "\n")
+    complete_budget_scan(state_dir, scan_id)
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    surface = next(
+        row for row in coverage["surfaces"] if row.get("candidateId") == current["candidate_id"]
+    )
+    assert surface["candidate"] == current
+    assert original in surface["originalCandidates"]
+
+
+@pytest.mark.parametrize("edited_field", [None, "reason", "paths"])
+def test_legacy_budget_pending_refresh_keeps_authored_fields(
+    tmp_path: Path, edited_field: str | None
+) -> None:
+    state_dir, target, scan_dir, scan_id, ledger = budget_scan_fixture(
+        tmp_path, extra_files={"updated.py": "# updated source\n"}
+    )
+    original = {**json.loads(ledger.read_text()), "validation": {"disposition": "deferred"}}
+    surface = {
+        "id": f"candidate-{original['candidate_id']}",
+        "label": original["summary"],
+        "disposition": "needs_follow_up",
+        "notes": original["evidence"],
+        "receiptRefs": [],
+    }
+    pending = {
+        "id": original["candidate_id"],
+        "candidateId": original["candidate_id"],
+        "reason": f"Validation was deferred because the scan reached its cost limit: {original['summary']}. Evidence: {original['evidence']}",
+        "paths": [row["path"] for row in original["locations"]],
+        "surfaceIds": [surface["id"]],
+    }
+    if edited_field is not None:
+        pending[edited_field] = (
+            "Authored reason." if edited_field == "reason" else ["app.py", "authored.py"]
+        )
+    saved_pending = copy.deepcopy(pending)
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    findings_path = scan_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    findings["findings"] = []
+    findings_path.write_text(json.dumps(findings))
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage.update(completeness="partial", surfaces=[surface], deferred=[pending])
+    coverage_path.write_text(json.dumps(coverage))
+    current = {
+        **original,
+        "summary": "Current unresolved review",
+        "evidence": "Current unresolved evidence.",
+        "locations": [{"path": "updated.py", "start_line": 1, "end_line": 1, "role": "sink"}],
+    }
+    ledger.write_text(json.dumps(current) + "\n")
+    complete_budget_scan(state_dir, scan_id)
+    coverage = json.loads(coverage_path.read_text())
+    actual = next(
+        row for row in coverage["deferred"] if row.get("candidateId") == current["candidate_id"]
+    )
+    if edited_field is None:
+        assert actual["paths"] == ["app.py", "updated.py"]
+        assert current["evidence"] in actual["reason"]
+        assert actual["candidate"] == current
+    elif edited_field == "paths":
+        assert actual["paths"] == [*saved_pending["paths"], "updated.py"]
+        assert current["evidence"] in actual["reason"]
+    else:
+        assert actual[edited_field] == saved_pending[edited_field]

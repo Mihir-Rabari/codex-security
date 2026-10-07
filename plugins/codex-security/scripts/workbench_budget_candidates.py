@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -85,12 +86,16 @@ def project_resolved_candidate_rows(
 
 
 def archive_resolved_deferred_payloads(
-    coverage: dict[str, Any], findings: list[dict[str, Any]], resolved: dict[Any, str]
+    coverage: dict[str, Any],
+    findings: list[dict[str, Any]],
+    resolved: dict[Any, str],
+    valid_finding: Callable[[dict[str, Any]], bool],
 ) -> None:
     states = {
         key: ("reported", finding)
         for finding in findings
         if isinstance(finding, dict)
+        and valid_finding(finding)
         and (key := finding_candidate_key(finding)) is not None
         and resolved.get(key) == "reported"
     }
@@ -278,6 +283,20 @@ def preserve_budget_candidates(
         generated_surfaces = [
             surface for surface in surfaces_by_candidate.get(key, []) if generated_surface(surface)
         ]
+        legacy_deferred = {
+            id(item)
+            for surface in generated_surfaces
+            if id(surface) in legacy_generated
+            for item in deferred
+            if item.get("candidate") is None
+            and item.get("surfaceIds") == [surface.get("id")]
+            and item.get("reason")
+            == (
+                "Validation was deferred because the scan reached its cost limit: "
+                f"{surface.get('label')}. Evidence: {surface.get('notes')}"
+            )
+            and isinstance(item.get("paths"), list)
+        }
         previous_candidates = [
             surface["candidate"]
             for surface in generated_surfaces
@@ -287,6 +306,7 @@ def preserve_budget_candidates(
             surface["id"] for surface in generated_surfaces if isinstance(surface.get("id"), str)
         ]
         for surface in generated_surfaces:
+            previous = copy.deepcopy(surface.get("candidate"))
             surface.update(
                 label=candidate["summary"],
                 disposition=disposition,
@@ -300,6 +320,8 @@ def preserve_budget_candidates(
                     **candidate,
                 },
             )
+            if isinstance(previous, dict):
+                archive_candidate_payloads(surface, [{"candidate": previous}])
         if disposition == "needs_follow_up" and deferred:
             for item in deferred:
                 previous = item.get("candidate")
@@ -322,6 +344,11 @@ def preserve_budget_candidates(
                             **candidate,
                         }
                         item.update(_budget_candidate_deferred(refreshed, saved_ids))
+                elif id(item) in legacy_deferred:
+                    refreshed = _budget_candidate_deferred(candidate, item["surfaceIds"])
+                    # Legacy rows have no prior snapshot to distinguish authored paths.
+                    refreshed["paths"] = list(dict.fromkeys([*item["paths"], *refreshed["paths"]]))
+                    item.update(refreshed)
                 else:
                     item.setdefault("candidate", candidate)
             continue

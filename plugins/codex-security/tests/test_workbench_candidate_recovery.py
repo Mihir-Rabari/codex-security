@@ -719,3 +719,37 @@ def test_resolved_owned_gap_preserves_valid_parent_findings_with_malformed_rows(
         isinstance(row, dict) and row.get("title") == finding["title"]
         for row in saved[1]["findings"]
     )
+
+
+@pytest.mark.parametrize("provenance", ["missing", None, []])
+def test_resolved_parent_archive_uses_valid_finding_before_malformed_sibling(
+    tmp_path: Path, generic_review_recovery, provenance
+) -> None:
+    module, pending, _, binding = generic_review_recovery
+    contract = tmp_path / "contract"
+    contract.mkdir()
+    write_completed_contract(contract, pending["scanId"], tmp_path, relative_path="app.py")
+    finding = json.loads((contract / "findings.json").read_text())["findings"][0]
+    finding["provenance"]["candidateId"] = "review"
+    malformed = {"title": "Malformed sibling", "extensions": {"candidateId": "review"}}
+    if provenance != "missing":
+        malformed["provenance"] = provenance
+    pending["findings"] = [finding, malformed]
+    row = pending["coverage"]["deferred"][0]
+    row.update(
+        candidateId="review", candidate={"candidate_id": "review", "evidence": "Prior evidence."}
+    )
+    write_saved_parent(tmp_path, pending, 100)
+    saved = module.merge_saved_results(
+        tmp_path, pending["scanId"], binding, [], [], stopped=True, reason="interrupted"
+    )
+    assert saved is not None
+    malformed_retained = next(
+        row for row in saved[1]["findings"] if row.get("title") == malformed["title"]
+    )
+    assert all(malformed_retained.get(field) == value for field, value in malformed.items())
+    retained = next(row for row in saved[1]["findings"] if row.get("title") == finding["title"])
+    assert (
+        pending["coverage"]["deferred"][0]["candidate"]
+        in retained["provenance"]["originalCandidates"]
+    )

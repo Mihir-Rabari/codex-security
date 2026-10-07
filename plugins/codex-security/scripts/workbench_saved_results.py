@@ -2605,7 +2605,7 @@ def merge_saved_results(
                     output.append(copy.deepcopy(item))
 
     if isinstance(coverage.get("deferred"), list):
-        archive_resolved_deferred_payloads(coverage, findings, resolved)
+        archive_resolved_deferred_payloads(coverage, findings, resolved, valid_finding)
         coverage["deferred"] = [
             item
             for item in coverage["deferred"]
