@@ -309,6 +309,105 @@ test("saved-scan bootstrap supports IDs, prefixes and latest and persists one du
   }
 });
 
+test.skipIf(process.platform === "win32")(
+  "local native helpers protect a different caller checkout",
+  async () => {
+    const f = await fixture();
+    const seeded = await deduplicateScanInternal(
+      f.first.scanId,
+      { embedding: f.embedding },
+      {
+        environment: f.environment,
+        reviewer: f.reviewer,
+      },
+    );
+    const caller = join(f.root, "caller");
+    await mkdir(join(caller, ".git"), { recursive: true });
+    const marker = join(f.root, "caller-node-probed");
+    await writeFile(
+      join(caller, "node"),
+      '#!/bin/sh\nprintf probed > "$TEST_NODE_PROBE"\nexit 1\n',
+      { mode: 0o700 },
+    );
+    const module = new URL("../src/deduplication/local.ts", import.meta.url)
+      .href;
+    const script = `
+    const { LocalDeduplication } = await import(${JSON.stringify(module)});
+    const local = new LocalDeduplication(process.env, { allRepositories: true }, ${JSON.stringify(f.repository)});
+    await local.potentialDuplicates(${JSON.stringify(seeded.duplicateGroups[0]![0])});
+  `;
+    const result = spawnSync(process.execPath, ["-e", script], {
+      cwd: caller,
+      encoding: "utf8",
+      env: {
+        ...f.environment,
+        PYTHON: f.python,
+        PATH: caller + delimiter + f.environment.PATH,
+        TEST_NODE_PROBE: marker,
+      },
+    });
+    expect(existsSync(marker)).toBe(false);
+    expect(result.stderr).not.toContain(
+      "Could not access local deduplication state",
+    );
+    expect(result.status).toBe(0);
+  },
+);
+
+test("a no-Git latest workflow resumes its pending group write by explicit scan ID", async () => {
+  const f = await fixture(true);
+  const hostGit = await inspectTrustedExecutable("git", f.environment, []);
+  expect(hostGit.executable).not.toBeNull();
+  const db = new Database(
+    join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+  );
+  try {
+    db.query("INSERT INTO security_targets VALUES (?, ?, ?, ?, ?)").run(
+      "unrelated-target",
+      dirname(await realpath(hostGit.executable!)),
+      "Synthetic target",
+      "created",
+      "updated",
+    );
+  } finally {
+    db.close();
+  }
+  const environment = {
+    ...f.environment,
+    PYTHON: f.python,
+    CODEX_SECURITY_GIT: hostGit.executable!,
+  };
+  const bootstrap = await savedScanWorkbench("latest", {
+    environment,
+    pluginRoot: PLUGIN_ROOT,
+    currentDirectory: f.repository,
+  });
+  expect(bootstrap.environment["CODEX_SECURITY_GIT"]).toBe("");
+  const options = { embedding: f.embedding, workflowId: "no-git-replay" };
+  await expect(
+    deduplicateScanInternal("latest", options, {
+      environment: bootstrap.environment,
+      currentDirectory: () => f.repository,
+      reviewer: f.reviewer,
+      runWorkbench: async (args, input) => {
+        const result = await bootstrap(args, input);
+        if (args[0] === "store-dedupe-groups")
+          throw new Error("Lost group acknowledgement");
+        return result;
+      },
+    }),
+  ).rejects.toThrow("Lost group acknowledgement");
+  const reviewed = f.reviewer.reviewPair.mock.calls.length;
+  const resumed = await deduplicateScanInternal(f.second.scanId, options, {
+    environment,
+    reviewer: f.reviewer,
+  });
+  expect(resumed.deduplicationStatus).toBe("completed");
+  expect(resumed.duplicateGroups).toHaveLength(1);
+  expect(f.reviewer.reviewPair.mock.calls.length).toBe(reviewed);
+  expect(f.embed).toHaveBeenCalledTimes(1);
+});
+
 test("bootstrap fails before Python for ambiguous, absent, malformed and changed targets and never creates a database", async () => {
   const f = await fixture();
   const options = {

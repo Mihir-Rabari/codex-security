@@ -38,7 +38,7 @@ export interface WorkflowState extends WorkflowBinding {
 
 export interface DedupePendingWrite {
   groups: string[][];
-  local?: { inputDigest: string; source: JsonObject };
+  local?: { inputDigest: string; source: JsonObject; gitDisabled?: boolean };
 }
 
 export function workflowDigest(value: unknown): string {
@@ -138,10 +138,17 @@ export class FindingWorkflow {
     return context["scan"] as JsonObject;
   }
 
-  async sourceSnapshot(repository: string): Promise<JsonObject> {
-    return (await this.request({ action: "source", repository }))[
-      "source"
-    ] as JsonObject;
+  async sourceSnapshot(
+    repository: string,
+    gitDisabled = false,
+  ): Promise<JsonObject> {
+    return (
+      await this.request({
+        action: "source",
+        repository,
+        ...(gitDisabled ? { gitDisabled } : {}),
+      })
+    )["source"] as JsonObject;
   }
 
   async getReview(key: string): Promise<unknown> {

@@ -127,9 +127,11 @@ def finding_workflow(
         return {
             "source": {
                 "repository": str(target),
-                "revision": git_revision(target),
+                "revision": "unversioned" if payload.get("gitDisabled") else git_revision(target),
                 "refsDigest": hashlib.sha256(
-                    (git_output(target, "show-ref") or "").encode()
+                    (
+                        "" if payload.get("gitDisabled") else (git_output(target, "show-ref") or "")
+                    ).encode()
                 ).hexdigest(),
                 "content": directory_content_digest(target, include_ignored=True),
             }

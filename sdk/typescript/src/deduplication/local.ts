@@ -147,6 +147,7 @@ export class LocalDeduplication {
         protectedRoot: [
           this.repositoryPath,
           ...(await gitProtectionRoots(this.repositoryPath, this.signal)),
+          ...(await gitProtectionRoots(process.cwd(), this.signal)),
         ],
         failureMessage: "Could not access local deduplication state",
       };

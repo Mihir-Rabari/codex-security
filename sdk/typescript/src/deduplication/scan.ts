@@ -1,4 +1,5 @@
 import { loadContractWithScanDirectory } from "../contract.js";
+import { environmentEntry } from "../auth.js";
 import {
   bundledPluginRoot,
   runWorkbench,
@@ -246,7 +247,12 @@ async function deduplicateResolvedScan(
         local &&
         (saved.pendingWrite.local?.inputDigest !== local.inputDigest ||
           workflowDigest(saved.pendingWrite.local.source) !==
-            workflowDigest(await workflow!.sourceSnapshot(repositoryPath)))
+            workflowDigest(
+              await workflow!.sourceSnapshot(
+                repositoryPath,
+                saved.pendingWrite.local.gitDisabled,
+              ),
+            ))
       ) {
         throw new CodexSecurityError(
           "Local deduplication inputs changed. Use a new workflow ID to review them.",
@@ -297,7 +303,14 @@ async function deduplicateResolvedScan(
     await workflow?.prepareDedupe(result, {
       groups: result.duplicateGroups,
       ...(local
-        ? { local: { inputDigest: local.inputDigest, source: source! } }
+        ? {
+            local: {
+              inputDigest: local.inputDigest,
+              source: source!,
+              gitDisabled:
+                environmentEntry(environment, "CODEX_SECURITY_GIT") === "",
+            },
+          }
         : {}),
     });
     await client.storeDedupeGroups(result.duplicateGroups);
