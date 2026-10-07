@@ -278,13 +278,13 @@ export function formatCliHelp(text: string, columns = 80): string {
             "  codex-security login",
             "",
             wrap(
-              "In your repository, optionally draft a new or updated SECURITY.md:",
+              "In your repository, draft SECURITY.md (optional):",
               width,
               "  ",
             ),
             "  codex-security policy .",
             wrap(
-              "Review the diff and notes, edit as needed, then copy only SECURITY.md to the Policy target shown.",
+              "Review the diff and notes. Edit the draft, then copy only SECURITY.md to the Policy target shown.",
               width,
               "  ",
             ),

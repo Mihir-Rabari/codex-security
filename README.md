@@ -32,19 +32,18 @@ This installs `codex-security` in npm's global executable directory, which must
 be on your `PATH`. To run without a global installation, replace `codex-security`
 in these examples with `npx @openai/codex-security`.
 
-From your repository directory, optionally draft a new or updated `SECURITY.md`
-to describe the project's security boundaries and what should count as a finding:
+From your repository, optionally [draft a `SECURITY.md`](#generate-securitymd)
+that explains what counts as a security issue in your project:
 
 ```bash
 codex-security policy .
 ```
 
 The draft is saved outside your repository. Review the diff and notes, edit the
-draft as needed, then copy only `SECURITY.md` to the **Policy target** shown in the
-output. The command leaves repository files unchanged. You can skip this step to
-keep your existing policy or scan without one.
+draft, then copy only `SECURITY.md` to the **Policy target** shown. Skip this step
+to keep your current policy or scan without one.
 
-Run your scan from the repository directory:
+Run a scan:
 
 ```bash
 codex-security scan .
@@ -63,16 +62,16 @@ Choose a scope and scan mode:
 
 ```bash
 # Scan selected paths.
-npx @openai/codex-security scan . --path src --path tests
+codex-security scan . --path src --path tests
 
 # Scan committed changes from a base revision to HEAD.
-npx @openai/codex-security scan . --diff origin/main
+codex-security scan . --diff origin/main
 
 # Run a deep scan of the repository.
-npx @openai/codex-security scan . --mode deep
+codex-security scan . --mode deep
 ```
 
-Use `npx @openai/codex-security --help` to browse commands, or `scan --help`
+Use `codex-security --help` to browse commands, or `codex-security scan --help`
 for scan options, cost limits, and patching after a scan.
 
 ## TypeScript SDK
@@ -101,25 +100,29 @@ validation, severity classification, owner suggestions, and result handling.
 
 ## Generate SECURITY.md
 
-Use `policy` to propose a new policy or changes to an existing one. To draft
-guidance for one component, select its directory with `--path`:
+Use `policy` to draft a new `SECURITY.md` or update an existing one. Use `--path`
+to select a component:
 
 ```bash
 codex-security policy .
 codex-security policy . --path services/api --knowledge-base architecture.md
 ```
 
-Scans read root and component `SECURITY.md` files. If your existing policy is
-current, you can scan with it directly. If you generate an update, review the
-diff before replacing the file and keep its vulnerability-reporting instructions.
-If the command reports that the policy is already up to date, no copy is needed.
+The command saves its draft outside the repository and leaves existing files
+unchanged. Review the diff and notes, edit the draft, then copy only `SECURITY.md`
+to the displayed **Policy target**. Keep the saved architecture and threat-model
+documents outside the repository.
+
+Scans already use root and component `SECURITY.md` files. Keep your current policy
+if it needs no changes. When updating it, preserve its vulnerability-reporting
+instructions. If the command says the policy is already up to date, no copy is
+needed.
 
 Files at `.github/SECURITY.md` or `docs/SECURITY.md` often contain reporting
-instructions. Keep those instructions; these files do not automatically provide
-repository-wide scan guidance. Keep supporting architecture and threat-model
-documents outside the repository. See the
+instructions. Preserve them when drafting a policy; those locations do not
+automatically provide repository-wide scan guidance. See the
 [policy guide](sdk/typescript/docs/cli.md#generate-a-security-policy) for policy
-locations, open decisions, saved artifacts, and SDK usage.
+locations, unanswered questions, saved artifacts, and SDK usage.
 
 ## Save and export threat models
 

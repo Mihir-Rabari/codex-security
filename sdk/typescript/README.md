@@ -57,7 +57,7 @@ These keys apply to the current command without replacing your saved login.
 To save an API key instead, pass it on stdin:
 
 ```bash
-printenv OPENAI_API_KEY | npx @openai/codex-security login --with-api-key
+printenv OPENAI_API_KEY | codex-security login --with-api-key
 ```
 
 SDK calls accept `auth: "auto" | "chatgpt" | "api-key"`. The default, `"auto"`,
@@ -79,7 +79,7 @@ allows it. Otherwise, open an SSH tunnel from your local machine:
 ssh -L 1455:localhost:1455 user@remote-host
 ```
 
-Run `npx @openai/codex-security login` in that SSH session, then open its sign-in
+Run `codex-security login` in that SSH session, then open its sign-in
 URL in your local browser. Keep SSH connected until login finishes.
 
 ### Amazon Bedrock
@@ -309,19 +309,18 @@ To validate GitHub code scanning alerts, first import them with
 
 ## CLI
 
-From your repository directory, optionally draft `SECURITY.md` to describe the
-project's security boundaries and what should count as a finding:
+From your repository, optionally [draft a `SECURITY.md`](#generate-a-security-policy)
+that explains what counts as a security issue in your project:
 
 ```bash
 codex-security policy .
 ```
 
-Review the saved draft, proposed diff, and owner review notes. Edit the draft as
-needed, then copy only `SECURITY.md` to the displayed **Policy target**. Scans use
-the new policy after you copy it into place. You can keep an existing policy or
-skip policy setup and scan immediately.
+The draft is saved outside your repository. Review the diff and notes, edit the
+draft, then copy only `SECURITY.md` to the **Policy target** shown. Skip this step
+to keep your current policy or scan without one.
 
-Run your scan:
+Run a scan:
 
 ```bash
 codex-security scan .
@@ -344,13 +343,14 @@ codex-security policy .
 codex-security policy . --path services/api
 ```
 
-`policy` drafts new or updated `SECURITY.md` guidance outside the checkout and
-leaves existing policies unchanged. Scans can use an applicable root or component
-policy directly. Review a proposed update before copying it to the displayed
-**Policy target**. The SDK provides `generatePolicy()`,
-`preflightPolicy()`, and `previewPolicy()`. See
+`policy` drafts a new or updated `SECURITY.md` outside the repository and leaves
+existing files unchanged. Review the diff and notes, edit the draft, then copy
+only `SECURITY.md` to the displayed **Policy target**. Scans already use root and
+component policies; you can keep them without generating new ones.
+
+The SDK provides `generatePolicy()`, `preflightPolicy()`, and `previewPolicy()`. See
 [policy generation](docs/cli.md#generate-a-security-policy) for SDK examples,
-headless use, artifacts, and review requirements.
+policy locations and reporting instructions, headless use, and saved artifacts.
 
 ### Exports and CI
 
