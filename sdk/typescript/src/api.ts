@@ -47,6 +47,7 @@ import {
   createProfileCodex,
   createProviderProfile,
   legacyWorkerUsesScanProvider,
+  preflightReadOnlyProfileCodex,
   providerPreflightCommand,
   type ProviderProfile,
 } from "./provider-profile.js";
@@ -485,7 +486,10 @@ interface CodexSecurityRuntimeOptions {
 
 interface ClientDependencies {
   createCodex(
-    options: CodexOptions & { nativeProfile?: string },
+    options: CodexOptions & {
+      nativeProfile?: string;
+      requestedPermissionProfile?: string;
+    },
   ): CodexClientLike | Promise<CodexClientLike>;
   environment: ProcessEnvironment;
   prepareRuntime?: (
@@ -506,10 +510,10 @@ interface ClientDependencies {
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
-  createCodex: ({ nativeProfile, ...options }) =>
+  createCodex: ({ nativeProfile, requestedPermissionProfile, ...options }) =>
     nativeProfile === undefined
       ? new Codex(options)
-      : createProfileCodex(options, nativeProfile),
+      : createProfileCodex(options, nativeProfile, requestedPermissionProfile),
   environment: process.env,
 };
 
@@ -810,7 +814,7 @@ export class CodexSecurity {
         result.model.skillDigest = contract.skillDigest;
         const command = this.#codexCommand();
         const mcpServers = await disabledMcpServers(
-          command,
+          await providerPreflightCommand(command, session.effectiveConfig),
           session.sessionConfig,
           definedEnvironment({
             ...withoutCodexHome(runtime.environment),
@@ -831,10 +835,16 @@ export class CodexSecurity {
             ...policyCodexConfig(session.sessionConfig),
             default_permissions: SCA_PERMISSION_PROFILE,
           },
-          [
-            `mcp_servers=${inlineToml(mcpServers)}`,
-            `permissions.${SCA_PERMISSION_PROFILE}=${inlineToml(dependencyPermissions(this.#dependencies.environment, runtime.codexHome))}`,
-          ],
+          [`mcp_servers=${inlineToml(mcpServers)}`],
+          {
+            id: SCA_PERMISSION_PROFILE,
+            profile: dependencyPermissions(
+              this.#dependencies.environment,
+              runtime.codexHome,
+            ),
+            cwd: outputDir,
+            signal,
+          },
         );
         const threadOptions: ThreadOptions = {
           threadSource: CODEX_SECURITY_THREAD_SOURCES.dependencyTriage,
@@ -3029,6 +3039,12 @@ export class CodexSecurity {
     git?: InspectedExecutable,
     config?: JsonObject,
     configOverrides: string[] = [],
+    readOnlyProfile?: {
+      id: string;
+      profile: JsonObject;
+      cwd: string;
+      signal: AbortSignal;
+    },
   ): Promise<{ codex: CodexClientLike; environment: ProcessEnvironment }> {
     const {
       runtime,
@@ -3109,14 +3125,11 @@ export class CodexSecurity {
         sdkEnvironment,
       );
     }
-    const codex = await this.#dependencies.createCodex({
+    const codexOptions: CodexOptions = {
       ...(codexPathOverride === undefined
         ? {}
         : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
       ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
-      ...(runtime.providerProfile === undefined
-        ? {}
-        : { nativeProfile: runtime.providerProfile.name }),
       ...(configOverrides.length > 0
         ? {
             configOverrides,
@@ -3130,6 +3143,31 @@ export class CodexSecurity {
           codex_security_surface: this.#surface,
         },
       },
+    };
+    if (readOnlyProfile !== undefined) {
+      const verified = await preflightReadOnlyProfileCodex(
+        codexOptions,
+        readOnlyProfile.profile,
+        session.effectiveConfig,
+        readOnlyProfile.cwd,
+        readOnlyProfile.signal,
+        readOnlyProfile.id,
+      );
+      codexOptions.configOverrides = verified.configOverrides;
+      // The native profile client also rejects a policy fallback after preflight.
+      runtime.providerProfile ??= await createProviderProfile(
+        runtimeHome,
+        session.effectiveConfig,
+      );
+    }
+    const codex = await this.#dependencies.createCodex({
+      ...codexOptions,
+      ...(runtime.providerProfile === undefined
+        ? {}
+        : { nativeProfile: runtime.providerProfile.name }),
+      ...(readOnlyProfile === undefined
+        ? {}
+        : { requestedPermissionProfile: readOnlyProfile.id }),
     });
     return { codex, environment };
   }

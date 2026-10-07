@@ -107,10 +107,12 @@ export async function preflightReadOnlyProfileCodex(
   providerConfig: JsonObject,
   cwd: string,
   signal?: AbortSignal,
+  requestedPermissionProfile?: string,
 ): Promise<{ permissionProfileId: string; configOverrides: string[] }> {
   const preflight = await nativePermissionPreflight();
   const permissionProfileId =
-    preflight.DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID as string;
+    requestedPermissionProfile ??
+    (preflight.DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID as string);
   const configOverrides = [
     ...(options.configOverrides ?? []),
     `default_permissions=${JSON.stringify(permissionProfileId)}`,
@@ -149,6 +151,7 @@ export async function preflightReadOnlyProfileCodex(
             },
           }),
       expectedProfile,
+      permissionProfileId,
       signal: signal ?? new AbortController().signal,
       context: "helper",
     });

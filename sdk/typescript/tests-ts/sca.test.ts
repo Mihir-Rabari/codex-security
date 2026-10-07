@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import * as childProcess from "node:child_process";
 import {
   chmod,
   mkdir,
@@ -188,7 +189,10 @@ async function fixture(
     mcpOverrides?: JsonObject;
     codexOverrides?: JsonObject;
     codexFactory?: (
-      options: CodexOptions & { nativeProfile?: string },
+      options: CodexOptions & {
+        nativeProfile?: string;
+        requestedPermissionProfile?: string;
+      },
     ) => Codex | Promise<Codex>;
     linkedCodex?: boolean;
     codexLauncher?: string;
@@ -537,7 +541,9 @@ test.each(["api key", "command"] as const)(
       model_provider: "synthetic.provider",
       model_providers: { "synthetic.provider": provider },
     };
-    const initialConfig = stringifyToml(providerConfig);
+    const initialConfig = stringifyToml({
+      model_provider: providerConfig.model_provider,
+    });
     const replacementConfig = stringifyToml({
       model_provider: "another-provider",
       model_providers: {
@@ -554,7 +560,11 @@ test.each(["api key", "command"] as const)(
       gitHubConfig: "explicit",
       mcpConfig: initialConfig,
       codexOverrides: providerConfig,
-      codexFactory: ({ nativeProfile, ...options }) =>
+      codexFactory: ({
+        nativeProfile,
+        requestedPermissionProfile,
+        ...options
+      }) =>
         createProfileCodex(
           {
             ...options,
@@ -565,6 +575,7 @@ test.each(["api key", "command"] as const)(
             },
           },
           nativeProfile!,
+          requestedPermissionProfile,
         ),
     });
     await using security = f.client;
@@ -596,7 +607,7 @@ process.exit(0);
       repositoryPath: f.repository,
       outputDir: f.outputDir,
     });
-    expect(result.status).toBe("completed");
+    expect(result.status, JSON.stringify(result.diagnostics)).toBe("completed");
     expect(result.assessments).toHaveLength(2);
     const children = (await readFile(receipt, "utf8"))
       .trim()
@@ -643,6 +654,164 @@ process.exit(0);
     expect(await readFile(join(f.codexHome, "config.toml"), "utf8")).toBe(
       replacementConfig,
     );
+  },
+);
+
+test.each(
+  (["openai", "custom"] as const).flatMap((provider) =>
+    (
+      [
+        "allowed",
+        "disallowed",
+        "fallback",
+        "changed",
+        "runtime-fallback",
+      ] as const
+    ).map((policy) => ({ provider, policy })),
+  ),
+)(
+  "dependency triage verifies $provider permissions before exec under $policy policy",
+  async ({ provider, policy }) => {
+    const root = await temporaryDirectory("sca-permission-child-");
+    const node = execFileSync("node", ["-p", "process.execPath"], {
+      encoding: "utf8",
+    }).trim();
+    const executable = join(root, "synthetic-codex.mjs");
+    const receipt = join(root, "calls.jsonl");
+    const id = "codex_security_dependencies";
+    const fallback = `Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`${id}\` to required value \`:read-only\`.`;
+    const f = await fixture({
+      codexLauncher: node,
+      ...(provider === "custom"
+        ? {
+            codexOverrides: {
+              model_provider: "synthetic.provider",
+              model_providers: {
+                "synthetic.provider": {
+                  name: "Synthetic provider",
+                  wire_api: "responses",
+                  base_url: "https://provider.example.invalid/v1",
+                  auth: {
+                    command: "synthetic-auth",
+                    env: { SYNTHETIC_SECRET: "synthetic-private-marker" },
+                  },
+                },
+              },
+            },
+          }
+        : {}),
+      codexFactory: ({
+        nativeProfile,
+        requestedPermissionProfile,
+        ...options
+      }) =>
+        createProfileCodex(options, nativeProfile!, requestedPermissionProfile),
+    });
+    await using security = f.client;
+    await writeFile(
+      executable,
+      `
+import { appendFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { createInterface } from "node:readline";
+import { parse } from ${JSON.stringify(pathToFileURL(createRequire(import.meta.url).resolve("smol-toml")).href)};
+const args = process.argv.slice(2);
+const id = ${JSON.stringify(id)};
+const policy = ${JSON.stringify(policy)};
+const config = {};
+for (let i = 0; i < args.length; i++) {
+  if (["-c", "--config"].includes(args[i])) Object.assign(config, parse(args[++i]));
+}
+const record = (method) => appendFileSync(${JSON.stringify(receipt)}, JSON.stringify({
+  method, args, cwd: process.cwd(), home: process.env.CODEX_HOME,
+  profile: config.permissions?.[id],
+  lockHeld: existsSync(join(process.env.CODEX_HOME, ".codex-security-preflight", ".codex-security-scan.lock", "owner.json")),
+}) + "\\n");
+if (args.includes("mcp")) { record("mcp"); console.log("[]"); process.exit(0); }
+if (args.includes("app-server")) {
+  for await (const line of createInterface({ input: process.stdin })) {
+    const request = JSON.parse(line);
+    record(request.method);
+    if (request.id === undefined) continue;
+    const profile = config.permissions[id];
+    const result = request.method === "config/read"
+      ? { config: { default_permissions: policy === "fallback" ? ":read-only" : id,
+          permissions: { [id]: policy === "changed" ? { ...profile, filesystem: { ":root": "read" } } : profile } } }
+      : request.method === "permissionProfile/list"
+      ? { data: [{ id, allowed: policy !== "disallowed" }], nextCursor: null }
+      : request.method === "configRequirements/read"
+      ? { requirements: { allowedPermissionProfiles: { ":read-only": true } } }
+      : {};
+    console.log(JSON.stringify({ id: request.id, result }));
+  }
+} else {
+  record("exec");
+  for (const event of [
+    { type: "thread.started", thread_id: "synthetic-permission-thread" },
+    ...(policy === "runtime-fallback" ? [{ type: "item.completed", item: { type: "error", message: ${JSON.stringify(fallback)} } }] : []),
+    { type: "item.completed", item: { id: "message", type: "agent_message", text: JSON.stringify({
+      schema_version: "triage-finding/v0", repository: { path: ${JSON.stringify(f.repository)}, revision: "synthetic-revision" }, findings: [${JSON.stringify(triage())}],
+    }) } },
+    { type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } },
+  ]) console.log(JSON.stringify(event));
+}
+`,
+    );
+    const originalSpawn = childProcess.spawn;
+    const spawnSpy = spyOn(childProcess, "spawn").mockImplementation(((
+      ...input: Parameters<typeof originalSpawn>
+    ) => {
+      const [command, args, options] = input;
+      return command === node
+        ? originalSpawn(node, [executable, ...(args ?? [])], options ?? {})
+        : originalSpawn(...input);
+    }) as typeof originalSpawn);
+    try {
+      const result = await security.scanDependencies({
+        repositoryPath: f.repository,
+        outputDir: f.outputDir,
+      });
+      const calls = (await readFile(receipt, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      const preflight = calls.filter((call) => call.method === "config/read");
+      expect(preflight).toHaveLength(1);
+      expect(preflight[0]).toMatchObject({
+        cwd: f.outputDir,
+        home: f.codexHome,
+        lockHeld: true,
+      });
+      expect(preflight[0].profile.filesystem[f.codexHome]).toEqual({
+        ".": "deny",
+      });
+      expect(preflight[0].profile.network.enabled).toBe(false);
+      for (const call of calls.filter((call) => call.method !== "exec")) {
+        expect(call.args.join(" ")).not.toContain("synthetic-private-marker");
+        expect(call.args.join(" ")).not.toContain("provider.example.invalid");
+        if (provider === "custom")
+          expect(call.args.join(" ")).toContain("synthetic.provider");
+      }
+      const executions = calls.filter((call) => call.method === "exec");
+      if (policy === "allowed") {
+        expect(result.status, JSON.stringify(result.diagnostics)).toBe(
+          "completed",
+        );
+        expect(result.assessments[0]!.status).toBe("completed");
+        expect(executions).toHaveLength(1);
+        expect(executions[0].lockHeld).toBe(false);
+      } else {
+        expect(result.status).toBe("partial");
+        expect(result.matches).toHaveLength(1);
+        expect(result.assessments[0]!.status).not.toBe("completed");
+        expect(result.diagnostics.join("\n")).toContain(id);
+        expect(executions).toHaveLength(policy === "runtime-fallback" ? 1 : 0);
+        if (policy === "runtime-fallback")
+          expect(result.diagnostics.join("\n")).toContain(fallback);
+      }
+    } finally {
+      spawnSpy.mockRestore();
+    }
   },
 );
 
@@ -707,6 +876,7 @@ process.exit(0);
   ["HOME", false],
   ["USERPROFILE", false],
   ["HOME", true],
+  ["USERPROFILE", true],
 ] as const)(
   "dependency triage runs a delegated native tool with private %s stores, configured GitHub home: %s",
   async (homeVariable, configuredGitHubHome) => {
@@ -737,6 +907,7 @@ process.exit(0);
     const privateFiles = [
       selectedSsh,
       selectedGitHub,
+      join(f.selectedUserHome, ".config", "gh", "hosts.yml"),
       join(f.ambientHome, "auth.json"),
       join(f.ambientHome, ".credentials.json"),
       join(f.ambientHome, "config.toml"),
@@ -762,9 +933,11 @@ process.exit(0);
           : "synthetic credential",
       );
     }
-    const permissions = parseToml(options.configOverrides![1]!)[
-      "permissions"
-    ] as Record<string, JsonObject>;
+    const permissions = parseToml(
+      options.configOverrides!.find((value) =>
+        value.startsWith("permissions.codex_security_dependencies="),
+      )!,
+    )["permissions"] as Record<string, JsonObject>;
     expect(permissions["codex_security_dependencies"]!["network"]).toEqual({
       enabled: false,
     });
@@ -773,6 +946,9 @@ process.exit(0);
     ] as JsonObject;
     expect(filesystem[dirname(selectedSsh)]).toEqual({ ".": "deny" });
     expect(filesystem[dirname(selectedGitHub)]).toEqual({ ".": "deny" });
+    expect(filesystem[join(f.selectedUserHome, ".config", "gh")]).toEqual({
+      ".": "deny",
+    });
     for (const path of [
       join(homedir(), ".codex", "auth.json"),
       join(homedir(), ".codex", ".credentials.json"),
@@ -1608,9 +1784,11 @@ test.each(["xdg", "explicit"] as const)(
       ).status,
     ).toBe("completed");
     const options = f.captured.codex!;
-    const permissions = parseToml(options.configOverrides![1]!)[
-      "permissions"
-    ] as Record<string, JsonObject>;
+    const permissions = parseToml(
+      options.configOverrides!.find((value) =>
+        value.startsWith("permissions.codex_security_dependencies="),
+      )!,
+    )["permissions"] as Record<string, JsonObject>;
     const filesystem = permissions["codex_security_dependencies"]![
       "filesystem"
     ] as JsonObject;

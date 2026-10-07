@@ -74,6 +74,7 @@ export function codexSecurityPrivatePaths(
     join(homedir(), ".ssh"),
     join(expandHome("~", environment), ".ssh"),
     join(homedir(), ".config", "gh"),
+    join(expandHome("~", environment), ".config", "gh"),
     ...[process.env, environment].flatMap((source) => {
       const appData = environmentEntry(source, "AppData");
       const xdg = environmentEntry(source, "XDG_CONFIG_HOME");
@@ -84,9 +85,7 @@ export function codexSecurityPrivatePaths(
           : []),
       ];
     }),
-    githubConfigDirectory || join(homedir(), ".config", "gh"),
-    githubConfigDirectory ||
-      join(expandHome("~", environment), ".config", "gh"),
+    ...(githubConfigDirectory ? [githubConfigDirectory] : []),
     stateDatabase,
     `${stateDatabase}-wal`,
     `${stateDatabase}-shm`,
