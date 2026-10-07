@@ -473,3 +473,31 @@ test.skipIf(process.platform === "win32")(
     }
   },
 );
+
+test.skipIf(process.platform === "win32")(
+  "Python discovery protects the enclosing checkout of a nested target",
+  async () => {
+    const f = await fixture();
+    const target = join(f.repository, "component");
+    await mkdir(target);
+    await mkdir(join(f.repository, ".git"));
+    const python = join(f.repository, "python3");
+    const marker = join(f.root, "enclosing-checkout-probed");
+    await writeFile(
+      python,
+      '#!/bin/sh\nprintf probed > "$TEST_PYTHON_PROBE"\nprintf "codex-security-python-ok\\n"\n',
+    );
+    await chmod(python, 0o700);
+    await expect(
+      resolvePluginPython({
+        environment: {
+          ...f.environment,
+          PYTHON: python,
+          TEST_PYTHON_PROBE: marker,
+        },
+        protectedRoot: target,
+      }),
+    ).rejects.toThrow("PYTHON interpreter is unavailable or unusable");
+    expect(existsSync(marker)).toBe(false);
+  },
+);

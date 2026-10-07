@@ -767,3 +767,52 @@ test.skipIf(process.platform === "win32")(
     }
   },
 );
+
+test("local embeddings preserve an endpoint from a copied Windows environment", async () => {
+  const f = await fixture();
+  const finding = f.document.findings[0]!;
+  const endpoint = "https://synthetic.invalid/embeddings";
+  const request = spyOn(globalThis, "fetch").mockResolvedValue(
+    Response.json({
+      model: EMBEDDING_MODEL,
+      data: [{ index: 0, embedding: vector }],
+    }),
+  );
+  try {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    let local: LocalDeduplication;
+    try {
+      // Only construction reads the copied environment; restore before async work.
+      Object.defineProperty(process, "platform", { value: "win32" });
+      local = new LocalDeduplication(
+        {
+          ...f.environment,
+          codex_security_embeddings_url: endpoint,
+          openai_api_key: "synthetic-key",
+        },
+        { repositoryId: f.targetId },
+        f.repository,
+        undefined,
+        async (_options, _args, input) =>
+          JSON.parse(input!).action === "prepare"
+            ? JSON.parse(
+                JSON.stringify({
+                  cacheKeys: { [finding.findingId]: "synthetic-key" },
+                  findingsToEmbed: [finding],
+                }),
+              )
+            : {},
+      );
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+    await local.prepare([finding], f.targetId);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request.mock.calls[0]![0]).toBe(endpoint);
+    expect(request.mock.calls[0]![1]?.headers).toMatchObject({
+      Authorization: "Bearer synthetic-key",
+    });
+  } finally {
+    request.mockRestore();
+  }
+});

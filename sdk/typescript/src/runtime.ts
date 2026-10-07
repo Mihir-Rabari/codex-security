@@ -2877,19 +2877,25 @@ export async function resolvePluginPython(
 ): Promise<string> {
   const environment = options.environment ?? process.env;
   const requestedRoots = options.protectedRoot ?? process.cwd();
-  const callerRoot =
-    options.protectedRoot === undefined
-      ? null
-      : await gitMarkerRoot(process.cwd(), options.signal, "outermost");
   const protectedRoot =
-    callerRoot === null
-      ? requestedRoots
-      : [
-          callerRoot,
-          ...(typeof requestedRoots === "string"
-            ? [requestedRoots]
-            : requestedRoots),
-        ];
+    typeof requestedRoots === "string" ? [requestedRoots] : [...requestedRoots];
+  // A saved target may be a subdirectory of an untrusted checkout. Protect its
+  // enclosing checkout as well as the caller's, without excluding an arbitrary cwd.
+  for (const directory of new Set([process.cwd(), ...protectedRoot])) {
+    try {
+      const checkout = await gitMarkerRoot(
+        directory,
+        options.signal,
+        "outermost",
+      );
+      if (checkout !== null && !protectedRoot.includes(checkout))
+        protectedRoot.push(checkout);
+    } catch (error) {
+      // Historical checkouts may have been removed; keep their lexical exclusion.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+    }
+  }
   if (options.configuredPath !== undefined) {
     return await requirePython(
       options.configuredPath,

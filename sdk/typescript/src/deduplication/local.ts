@@ -49,7 +49,8 @@ export class LocalDeduplication {
     embedding?: FindingEmbeddingBinding,
   ) {
     const endpoint =
-      environment["CODEX_SECURITY_EMBEDDINGS_URL"] || EMBEDDINGS_URL;
+      environmentEntry(environment, "CODEX_SECURITY_EMBEDDINGS_URL") ||
+      EMBEDDINGS_URL;
     this.embedding = embedding ?? {
       model: EMBEDDING_MODEL,
       dimensions: EMBEDDING_DIMENSIONS,
