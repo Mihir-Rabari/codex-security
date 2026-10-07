@@ -117,7 +117,7 @@ def test_parent_candidate_outcome_compares_headless_worker_chronology(
 
 
 @pytest.mark.parametrize(
-    "parent_surfaces", ["missing", "projected", "renamed", "second-only", "no-parent"]
+    "parent_surfaces", ["missing", "projected", "renamed", "second-only", "no-parent", "edited"]
 )
 @pytest.mark.parametrize("merge_state", ["buffered", "merging", "merged"])
 def test_missing_deferred_projection_links_first_duplicate_surface(
@@ -174,12 +174,23 @@ def test_missing_deferred_projection_links_first_duplicate_surface(
     ]
     if parent_surfaces == "renamed":
         projected[0]["id"] = "canonical-first-surface"
+    if parent_surfaces == "edited":
+        projected[0]["label"] = "Parent requested a different review."
     (scan.scan_dir / "coverage.json").write_text(
         json.dumps(
             {
                 **scan.coverage,
                 "completeness": "partial",
                 "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "partial"}],
+                "deferred": [
+                    {
+                        "id": f"{worker_id}-attempt-1-deferred-1",
+                        "reason": "Parent requested different proof.",
+                        "surfaceIds": [projected[0]["id"]],
+                    }
+                ]
+                if parent_surfaces == "edited"
+                else [],
                 "surfaces": []
                 if parent_surfaces == "missing"
                 else projected[1:]
@@ -203,8 +214,22 @@ def test_missing_deferred_projection_links_first_duplicate_surface(
     coverage = json.loads(coverage_path.read_text())
     pending = [item for item in coverage["deferred"] if item.get("reason") == deferred["reason"]]
     assert len(pending) == 1
-    assert pending[0]["surfaceIds"] == [projected[0]["id"]]
-    assert len(coverage["surfaces"]) == len(projected)
+    if parent_surfaces == "edited":
+        worker_surface = next(
+            surface for surface in coverage["surfaces"] if surface["label"] == surfaces[0]["label"]
+        )
+        assert worker_surface["id"] != projected[0]["id"]
+        assert pending[0]["surfaceIds"] == [worker_surface["id"]]
+        parent_task = next(
+            task
+            for task in coverage["deferred"]
+            if task["reason"] == "Parent requested different proof."
+        )
+        assert parent_task["surfaceIds"] == [projected[0]["id"]]
+        assert len(coverage["surfaces"]) == len(projected) + 1
+    else:
+        assert pending[0]["surfaceIds"] == [projected[0]["id"]]
+        assert len(coverage["surfaces"]) == len(projected)
     assert all(surface in coverage["surfaces"] for surface in projected)
     assert result.read_bytes() == original
     published = coverage_path.read_bytes()

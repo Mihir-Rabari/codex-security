@@ -1321,6 +1321,18 @@ def merge_saved_results(
         if field == "surfaces":
             original = source_rows[index - 1] if isinstance(source_rows, list) else item
             result["id"] = surface_id(original, index)
+            if origin := projection_origins.get(id(original)):
+                result["receiptRefs"] = coverage_receipts(result, worker, origin[1])
+            previous = retained_coverage_record("surfaces", result)
+            if previous is not None and isinstance(previous.get("id"), str):
+                result["id"] = previous["id"]
+            else:
+                surfaces = coverage.get("surfaces", [])
+                if any(
+                    isinstance(row, dict) and row.get("id") == result["id"]
+                    for row in (surfaces if isinstance(surfaces, list) else [])
+                ):
+                    result["id"] = f"{result['id']}-{_digest(result)[:16]}"
         elif field == "deferred":
             result["id"] = f"{prefix}-deferred-{index}"
             if isinstance(item.get("surfaceIds"), list):
