@@ -54,7 +54,7 @@ describe("bundled scan report and source limits", () => {
       "check_report(['REPORT.md'], [], 'ambiguous')",
       "with patch.object(finalizer, 'write_report_projection') as report_only, patch.object(finalizer, 'finalize_scan') as full_finalizer, patch.object(finalizer, 'build_findings_export') as export, patch.object(finalizer, 'build_sarif_projection') as sarif, patch.object(sys, 'argv', ['finalizer', '--scan-dir', str(scan_dir), '--schema-dir', str(schema_dir), '--report-only']):",
       "    assert finalizer.main() == 0",
-      "    report_only.assert_called_once_with(scan_dir, schema_dir)",
+      "    report_only.assert_called_once_with(scan_dir.resolve(), schema_dir)",
       "    full_finalizer.assert_not_called(); export.assert_not_called(); sarif.assert_not_called()",
       "fingerprints = {'algorithm': finalizer.FINGERPRINT_ALGORITHM, 'primary': 'derived'}",
       "finding = {'findingId': 'finding', 'occurrenceId': 'occurrence', 'fingerprints': {**fingerprints, 'future': 'preserved'}}",
