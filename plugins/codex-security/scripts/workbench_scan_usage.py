@@ -329,7 +329,8 @@ def _read_rollout_copies_usage(
     # Restored indexes can reference a prefix and its complete continuation.
     # Keep totals and model attribution from the same copy, counting it once.
     usage, warnings, selected_models = max(
-        attributable or readings, key=lambda reading: reading[0]["totalTokens"]
+        attributable or readings,
+        key=lambda reading: (reading[0]["totalTokens"], -len(reading[1])),
     )
     for model, tokens in selected_models.items():
         _add_token_usage(model_usage.setdefault(model, _empty_token_usage()), tokens)
@@ -851,6 +852,9 @@ def _read_rollout_usage(
                     inherited_usage = _token_snapshot(payload)
                     if inherited_usage is not None:
                         previous = inherited_usage
+                        timestamp = _timestamp(event.get("timestamp"))
+                        if timestamp is not None:
+                            response_counter_baseline = (inherited_usage["totalTokens"], timestamp)
                 continue
             if event.get("type") == "token_usage_record":
                 response_id = payload.get("response_id")

@@ -77,11 +77,18 @@ export function projectWorkerSettings(config: JsonObject): JsonObject {
     typeof selected === "string" &&
     Object.hasOwn(providerDefaults, selected)
   ) {
-    result["model_providers"] = {
-      [selected]: {
-        ...providerDefaults[selected as keyof typeof providerDefaults],
-      },
+    const provider = {
+      ...providerDefaults[selected as keyof typeof providerDefaults],
     };
+    const providers = config["model_providers"];
+    const configured = isRecord(providers) ? providers[selected] : undefined;
+    if (isRecord(configured)) {
+      for (const key of ["name", "base_url", "env_key", "wire_api"] as const) {
+        if (typeof configured[key] === "string")
+          provider[key] = configured[key];
+      }
+    }
+    result["model_providers"] = { [selected]: provider };
   } else if (selected === "amazon-bedrock") {
     const providers = config["model_providers"];
     const provider = isRecord(providers) ? providers[selected] : undefined;

@@ -446,8 +446,16 @@ export class ScanCostTracker {
           (previous.usage?.total_tokens ?? -1) ||
         ((session.usage?.total_tokens ?? -1) ===
           (previous.usage?.total_tokens ?? -1) &&
-          (session.counterUsage?.total_tokens ?? -1) >
-            (previous.counterUsage?.total_tokens ?? -1))
+          ((session.counterUsage?.total_tokens ?? -1) >
+            (previous.counterUsage?.total_tokens ?? -1) ||
+            ((session.counterUsage?.total_tokens ?? -1) ===
+              (previous.counterUsage?.total_tokens ?? -1) &&
+              session.pendingLineBytes === 0 &&
+              !session.unreadable &&
+              (previous.pendingLineBytes > 0 ||
+                previous.unreadable ||
+                (session.responseUsageObserved &&
+                  !previous.responseUsageObserved)))))
       ) {
         usageSessions.set(threadId, session);
       }
@@ -816,7 +824,13 @@ function readSessionEvent(
     if (event["type"] !== "event_msg") return;
     if (payload["type"] === "token_count" && isRecord(payload["info"])) {
       const usage = tokenUsage(payload["info"]["total_token_usage"]);
-      if (usage !== null) session.inheritedUsage = usage;
+      if (usage !== null) {
+        session.inheritedUsage = usage;
+        session.responseCounterBaseline = {
+          tokens: usage.total_tokens,
+          timestamp: sessionStartedAt(event["timestamp"]),
+        };
+      }
     }
     if (payload["type"] === "task_started") {
       // Fresh Codex worker thread/turn IDs share a same-process monotonic UUIDv7 generator.

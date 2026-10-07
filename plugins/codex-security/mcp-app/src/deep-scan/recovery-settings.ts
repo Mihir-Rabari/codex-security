@@ -430,18 +430,24 @@ export function restoredDeepScanWorkerSettings(
 function executionSettings(
   value: DeepScanExecutionSettings,
 ): DeepScanExecutionSettings {
-  // Catalog provider definitions are reconstructed by the existing launch
-  // projection. Only Bedrock's per-scan AWS selectors need persistence.
+  // Keep custom routing fields while reconstructing unchanged catalog defaults.
+  const projected = projectWorkerSettings({
+    ...(value.modelProvider === undefined
+      ? {}
+      : { model_provider: value.modelProvider }),
+    ...(value.providerConfig === undefined
+      ? {}
+      : { model_providers: value.providerConfig }),
+  }).model_providers as JsonObject | undefined;
+  const defaults = projectWorkerSettings({
+    ...(value.modelProvider === undefined
+      ? {}
+      : { model_provider: value.modelProvider }),
+  }).model_providers;
   const provider =
-    value.modelProvider === "amazon-bedrock"
-      ? (projectWorkerSettings({
-          ...(value.modelProvider === undefined
-            ? {}
-            : { model_provider: value.modelProvider }),
-          ...(value.providerConfig === undefined
-            ? {}
-            : { model_providers: value.providerConfig }),
-        }).model_providers as JsonObject | undefined)
+    value.modelProvider === "amazon-bedrock" ||
+    JSON.stringify(projected) !== JSON.stringify(defaults)
+      ? projected
       : undefined;
   const settings: DeepScanExecutionSettings = {
     codexPath: value.codexPath,

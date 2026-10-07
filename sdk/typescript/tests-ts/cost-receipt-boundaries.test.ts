@@ -137,3 +137,166 @@ test.each([
     }
   },
 );
+
+test.each([false, true])(
+  "keeps inherited receipt baselines without counting parent tokens (gap: %s)",
+  async (gap) => {
+    const home = await temporaryDirectory();
+    await mkdir(join(home, "sessions"));
+    const path = join(home, "sessions", "worker.jsonl");
+    const start = "2026-09-01T00:00:01Z";
+    const records = [
+      {
+        type: "session_meta",
+        payload: { id: "worker", forked_from_id: "parent", timestamp: start },
+      },
+      {
+        type: "session_meta",
+        payload: { id: "parent", timestamp: "2026-09-01T00:00:00Z" },
+      },
+      {
+        type: "event_msg",
+        timestamp: "2026-09-01T00:00:00Z",
+        payload: {
+          type: "token_count",
+          info: { total_token_usage: tokens(1000) },
+        },
+      },
+      {
+        type: "event_msg",
+        timestamp: start,
+        payload: {
+          type: "task_started",
+          turn_id: "worker-turn",
+          started_at: Date.parse(start) / 1000,
+        },
+      },
+      {
+        type: "token_usage_record",
+        timestamp: "2026-09-01T00:00:02Z",
+        payload: {
+          thread_id: "worker",
+          turn_id: "worker-turn",
+          response_id: "worker-response",
+          model: "gpt-5.6-sol",
+          usage: tokens(100),
+          thread_token_usage: tokens(gap ? 1150 : 1100),
+        },
+      },
+    ];
+    await writeFile(
+      path,
+      records.map((x) => JSON.stringify(x) + "\n").join(""),
+    );
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+    });
+    tracker.setAttributionReader(async () => ({
+      formatVersion: 1,
+      executionThreadIds: ["worker"],
+      owner: { threadId: null, turnId: null, startedAt: start },
+      startedAt: start,
+      completedAt: null,
+    }));
+    tracker.start("worker");
+    const python = spawnSync(
+      Bun.which("python3") ?? "python",
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import json,sys",
+          "from pathlib import Path",
+          "from datetime import datetime",
+          "sys.path.insert(0,sys.argv[1])",
+          "import workbench_scan_usage as w",
+          "usage,warnings=w._read_rollout_usage(w.RolloutSession('worker','parent',Path(sys.argv[2])),started_at=datetime.fromisoformat('2026-09-01T00:00:01+00:00'),completed_at=None)",
+          "print(json.dumps({'usage':usage,'warnings':sorted(warnings)}))",
+        ].join("\n"),
+        join(import.meta.dir, "../../../plugins/codex-security/scripts"),
+        path,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(python.status, python.stderr).toBe(0);
+    try {
+      const sdk = await tracker.stop();
+      const py = JSON.parse(python.stdout);
+      expect(sdk.usage).toMatchObject({ input_tokens: 100, total_tokens: 100 });
+      expect(py.usage.inputTokens).toBe(100);
+      expect((sdk.usage as { coverage?: string }).coverage === "partial").toBe(
+        gap,
+      );
+      expect(py.warnings.includes("token_receipts_incomplete")).toBe(gap);
+    } finally {
+      await tracker.stop();
+    }
+  },
+);
+
+test.each([false, true])(
+  "uses the complete equal-token rollout copy (prefix first: %s)",
+  async (prefixFirst) => {
+    const home = await temporaryDirectory();
+    await mkdir(join(home, "sessions"));
+    const records = [
+      { type: "session_meta", payload: { id: "owner", model: "gpt-5.6-sol" } },
+      {
+        type: "token_usage_record",
+        timestamp: "2026-09-01T00:00:02Z",
+        payload: {
+          thread_id: "owner",
+          response_id: "receipt",
+          model: "gpt-5.6-sol",
+          usage: tokens(100),
+          thread_token_usage: tokens(100),
+        },
+      },
+    ];
+    const complete = records.map((x) => JSON.stringify(x) + "\n").join("");
+    const prefix = complete + '{"type":"event_msg"';
+    const first = join(home, "sessions", "a-first.jsonl"),
+      second = join(home, "sessions", "z-second.jsonl");
+    await writeFile(first, prefixFirst ? prefix : complete);
+    await writeFile(second, prefixFirst ? complete : prefix);
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+    });
+    tracker.start("owner");
+    const python = spawnSync(
+      Bun.which("python3") ?? "python",
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import json,sys",
+          "from pathlib import Path",
+          "from datetime import datetime,timezone",
+          "sys.path.insert(0,sys.argv[1])",
+          "import workbench_scan_usage as w",
+          "usage,warnings=w._read_rollout_copies_usage([w.RolloutSession('owner',None,Path(p)) for p in sys.argv[2:]],started_at=datetime(2026,9,1,tzinfo=timezone.utc),completed_at=None,owner_turn_id=None,model_usage={})",
+          "print(json.dumps({'usage':usage,'warnings':sorted(warnings)}))",
+        ].join("\n"),
+        join(import.meta.dir, "../../../plugins/codex-security/scripts"),
+        first,
+        second,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(python.status, python.stderr).toBe(0);
+    try {
+      const sdk = await tracker.stop();
+      const py = JSON.parse(python.stdout);
+      expect(sdk.usage).toMatchObject({ input_tokens: 100 });
+      expect(sdk.usage).not.toHaveProperty("coverage", "partial");
+      expect(py.usage.inputTokens).toBe(100);
+      expect(py.warnings).not.toContain("rollout_record_incomplete");
+    } finally {
+      await tracker.stop();
+    }
+  },
+);
