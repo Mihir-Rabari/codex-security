@@ -582,6 +582,34 @@ async function preserveScanDraft(
   });
 
   for (const source of sources) {
+    for (const previous of source.coverage.surfaces as JsonObject[]) {
+      const current = (result.coverage.surfaces as JsonObject[]).find(
+        (surface) =>
+          coverageEntryPresent([surface], previous, ambiguousDeferredIds),
+      );
+      if (!current || !isObject(previous.provenance)) continue;
+      const inherited = previous.provenance.scanReceiptRefs;
+      if (!Array.isArray(inherited)) continue;
+      const refs = new Set(
+        ((current.receiptRefs as string[] | undefined) ?? []).map((ref) =>
+          posix.normalize(ref),
+        ),
+      );
+      const retained = inherited.filter(
+        (ref) => typeof ref === "string" && refs.has(ref),
+      );
+      if (retained.length === 0) continue;
+      const provenance = isObject(current.provenance) ? current.provenance : {};
+      current.provenance = {
+        ...provenance,
+        scanReceiptRefs: exactUnion(
+          Array.isArray(provenance.scanReceiptRefs)
+            ? provenance.scanReceiptRefs
+            : [],
+          retained,
+        ),
+      };
+    }
     const deferred = result.coverage.deferred as JsonObject[];
     const dispositions = (result.coverage.surfaces as JsonObject[]).filter(
       (surface) =>
@@ -1447,6 +1475,12 @@ async function readArchivedWorkerCheckpoints(
           (surface.receiptRefs as string[]).map(async (value) => {
             const ref = posix.normalize(value);
             if (ref.startsWith(archivePrefix)) return ref;
+            if (
+              isObject(surface.provenance) &&
+              Array.isArray(surface.provenance.scanReceiptRefs) &&
+              surface.provenance.scanReceiptRefs.includes(ref)
+            )
+              return ref;
             if (!ref.startsWith(activePrefix)) {
               try {
                 await requireRegularFile(

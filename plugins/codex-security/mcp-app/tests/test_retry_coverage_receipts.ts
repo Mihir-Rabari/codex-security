@@ -230,3 +230,66 @@ for (const resume of [false, true]) {
     });
   }
 }
+
+const receiptOwnershipCases = [
+  [
+    "third attempt shared collision",
+    {
+      extraReceiptRetry: true,
+      receiptSpelling: "shared scan",
+      receiptCollision: true,
+    },
+  ],
+  [
+    "returned shared coverage rewrite collision",
+    {
+      rewriteReturnedCoverage: true,
+      receiptSpelling: "shared scan",
+      receiptCollision: true,
+    },
+  ],
+  [
+    "shared and new local same spelling",
+    {
+      sameNamedNewSurface: true,
+      receiptSpelling: "shared scan",
+      receiptCollision: true,
+    },
+  ],
+  [
+    "third attempt shared no collision control",
+    {
+      extraReceiptRetry: true,
+      receiptSpelling: "shared scan",
+      receiptCollision: false,
+    },
+  ],
+  [
+    "returned worker-local coverage control",
+    {
+      rewriteReturnedCoverage: true,
+      receiptSpelling: "worker",
+      receiptCollision: true,
+    },
+  ],
+  [
+    "worker-local same spelling control",
+    {
+      sameNamedNewSurface: true,
+      receiptSpelling: "worker",
+      receiptCollision: true,
+    },
+  ],
+] as const;
+for (const [name, options] of receiptOwnershipCases)
+  test(name, async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "supported-receipt-owner-"));
+    try {
+      await publishCoverageFixture(root, "complete", {
+        receiptRetry: true,
+        ...options,
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });

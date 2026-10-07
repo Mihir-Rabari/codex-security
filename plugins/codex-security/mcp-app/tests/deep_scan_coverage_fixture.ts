@@ -24,6 +24,9 @@ interface CoverageFixtureOptions {
   stopAfterDraft?: boolean;
   stopBeforeDraft?: boolean;
   receiptRetry?: boolean;
+  extraReceiptRetry?: boolean;
+  rewriteReturnedCoverage?: boolean;
+  sameNamedNewSurface?: boolean;
   receiptSpelling?:
     | "worker"
     | "scan"
@@ -103,6 +106,9 @@ export async function publishCoverageFixture(
     stopAfterDraft = false,
     stopBeforeDraft = false,
     receiptRetry = false,
+    extraReceiptRetry = false,
+    rewriteReturnedCoverage = false,
+    sameNamedNewSurface = false,
     receiptSpelling = "worker",
     activeReceiptSpelling = "worker",
     sharedReceipt = false,
@@ -297,7 +303,11 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       },
     );
   };
-  const writeDiscovery = async (artifactDir: string, index: number) => {
+  const writeDiscovery = async (
+    artifactDir: string,
+    index: number,
+    complete = true,
+  ) => {
     const status = statuses[index];
     const pending = completeness === "partial" && status !== "complete";
     const coverage: JsonObject = {
@@ -399,16 +409,23 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         emptyReceipt ? "" : "Synthetic review evidence.\n",
       );
     }
-    const activeReceiptRef = sharedReceipt
+    if (sameNamedNewSurface) {
+      const local = path.join(artifactDir, sharedRef);
+      await mkdir(path.dirname(local), { recursive: true });
+      await writeFile(local, "Synthetic review evidence.\n");
+    }
+    const activeReceiptRef = sameNamedNewSurface
       ? sharedRef
-      : activeReceiptSpelling === "worker"
-        ? "artifacts/review.md"
-        : activeReceiptSpelling === "scan"
-          ? activeQualifiedRef
-          : activeQualifiedRef.replace("artifacts/", "artifacts/./");
+      : sharedReceipt
+        ? sharedRef
+        : activeReceiptSpelling === "worker"
+          ? "artifacts/review.md"
+          : activeReceiptSpelling === "scan"
+            ? activeQualifiedRef
+            : activeQualifiedRef.replace("artifacts/", "artifacts/./");
     const resultPath = path.join(artifactDir, "result.json");
     if (receiptRetry) {
-      await recordCodexSecurityWorkerScanDraft(
+      const saved = await recordCodexSecurityWorkerScanDraft(
         {
           root: artifactDir,
           repoRoot: targetPath,
@@ -417,7 +434,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         },
         {
           scanId: run.scanId,
-          complete: true,
+          complete,
           findings: [],
           coverage: {
             completeness: retryPending ? "partial" : status,
@@ -446,6 +463,23 @@ runpy.run_path(sys.argv[0], run_name="__main__")
           },
         },
       );
+
+      if (rewriteReturnedCoverage && index === 0) {
+        await recordCodexSecurityWorkerScanDraft(
+          {
+            root: artifactDir,
+            repoRoot: targetPath,
+            layout: "worker",
+            scanId: run.scanId,
+          },
+          {
+            scanId: run.scanId,
+            complete,
+            findings: [],
+            coverage: structuredClone(saved.coverage),
+          },
+        );
+      }
     } else {
       await recordCodexSecurityWorkerScanDraft(
         {
@@ -466,7 +500,8 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         rawSources.set(checkpointPath, await readFile(checkpointPath, "utf8"));
       }
     }
-    rawSources.set(resultPath, await readFile(resultPath, "utf8"));
+    if (complete)
+      rawSources.set(resultPath, await readFile(resultPath, "utf8"));
   };
   if (resume) {
     const workers = [];
@@ -486,13 +521,20 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         kind: "discovery" as const,
         promptPath: path.join(workerRoot, "prompt.md"),
         artifactDir,
-        attempt: index === 0 ? 2 : 1,
+        attempt: index === 0 ? (extraReceiptRetry ? 3 : 2) : 1,
       };
       if (receiptRetry || (retryCoverage && index === 0)) {
         await writeReceiptAttempt(artifactDir);
         await archiveDirectory(
           artifactDir,
           path.join(workerRoot, "attempts", "attempt-01"),
+        );
+      }
+      if (extraReceiptRetry && index === 0) {
+        await writeDiscovery(artifactDir, index, false);
+        await archiveDirectory(
+          artifactDir,
+          path.join(workerRoot, "attempts", "attempt-02"),
         );
       }
       await writeDiscovery(artifactDir, index);
@@ -577,7 +619,11 @@ runpy.run_path(sys.argv[0], run_name="__main__")
             finalResponse: "Continue the unfinished audit.",
           };
         }
-        await writeDiscovery(request.artifactContext.root, index);
+        await writeDiscovery(
+          request.artifactContext.root,
+          index,
+          !(extraReceiptRetry && index === 0 && discoveryCalls === 2),
+        );
       } else {
         await recordCodexSecurityDeepReduction(
           {
@@ -596,7 +642,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     store,
     executor,
     pluginRoot,
-    retryDelaysMs: [1],
+    retryDelaysMs: extraReceiptRetry ? [1, 1] : [1],
     onComplete: async (draft, signal) => {
       if (stopBeforeDraft)
         throw new Error("Synthetic stop before parent draft.");
@@ -625,7 +671,11 @@ runpy.run_path(sys.argv[0], run_name="__main__")
   }
   assert.equal(
     discoveryCalls,
-    resume ? (continueAfterResume ? 1 : 0) : statuses.length + 1,
+    resume
+      ? continueAfterResume
+        ? 1
+        : 0
+      : statuses.length + (extraReceiptRetry ? 2 : 1),
   );
   const accepted = await store.get(run.scanId, threadId);
   for (const worker of (accepted.persistedWorkers ?? []).filter(
@@ -720,7 +770,9 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     else
       assert.match(
         current[0].receiptRefs[0],
-        /\/output\/artifacts\/review\.md$/,
+        sameNamedNewSurface
+          ? /\/output\/artifacts\/01_context\/false_positive_feedback\.json$/
+          : /\/output\/artifacts\/review\.md$/,
       );
     assert.equal(
       await readFile(path.join(run.scanDir, current[0].receiptRefs[0]), "utf8"),

@@ -105,8 +105,12 @@ export async function readDeepReductionSources(
           },
         }));
         const { coverage, ...reduction } = result;
-        const scanReceiptRefs = new Set<string>();
-        for (const surface of coverage.surfaces as Record<string, unknown>[]) {
+        const scanReceiptRefs = new Map<number, ReadonlySet<string>>();
+        for (const [index, surface] of (
+          coverage.surfaces as Record<string, unknown>[]
+        ).entries()) {
+          const surfaceScanRefs = new Set<string>();
+          scanReceiptRefs.set(index, surfaceScanRefs);
           for (const ref of (surface.receiptRefs as string[] | undefined) ??
             []) {
             const normalized = posix.normalize(ref);
@@ -122,7 +126,7 @@ export async function readDeepReductionSources(
                 bound.artifacts.scanDir,
                 true,
               );
-              scanReceiptRefs.add(normalized);
+              surfaceScanRefs.add(normalized);
               continue;
             }
             try {
@@ -141,7 +145,7 @@ export async function readDeepReductionSources(
                 bound.artifacts.scanDir,
                 true,
               );
-              scanReceiptRefs.add(normalized);
+              surfaceScanRefs.add(normalized);
             } catch {
               // Worker-local receipts are qualified below; finalization validates evidence.
             }

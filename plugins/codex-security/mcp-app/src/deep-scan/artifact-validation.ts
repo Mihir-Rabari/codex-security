@@ -294,7 +294,7 @@ export function projectDiscoveryCoverage(
   coverage: ScanDraftInput["coverage"],
   worker: { id: string; attempt?: number },
   artifactPrefix: string,
-  scanReceiptRefs: ReadonlySet<string> = new Set(),
+  scanReceiptRefs: ReadonlyMap<number, ReadonlySet<string>> = new Map(),
 ): ScanDraftInput["coverage"] {
   const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;
   const provenance = {
@@ -350,7 +350,7 @@ export function projectDiscoveryCoverage(
         .map((ref) =>
           ref.startsWith(archivePrefix) ||
           ref.startsWith(`${artifactPrefix}/`) ||
-          scanReceiptRefs.has(ref)
+          scanReceiptRefs.get(index)?.has(ref)
             ? ref
             : `${artifactPrefix}/${ref}`,
         ),
