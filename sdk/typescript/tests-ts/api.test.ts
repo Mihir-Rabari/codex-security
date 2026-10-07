@@ -1658,6 +1658,19 @@ describe("CodexSecurity orchestration", () => {
           },
           model_verbosity: "high",
           web_search: "disabled",
+          skills: {
+            config: [
+              { path: join(root, "skill-1", "SKILL.md"), enabled: false },
+            ],
+          },
+          otel: {
+            exporter: {
+              "otlp-http": {
+                endpoint: "https://telemetry.example.test/first",
+                tls: { "ca-certificate": join(root, "tls-1", "ca.pem") },
+              },
+            },
+          },
           windows: { sandbox: "unelevated" },
         },
         "auto",
@@ -1797,6 +1810,14 @@ describe("CodexSecurity orchestration", () => {
                     windows,
                   );
                   expect(options.config?.["windows"]).toEqual(windows);
+                  for (const key of ["skills", "otel"]) {
+                    expect(options.config?.[key] as unknown).toEqual(
+                      resolveCodexProfile(overrides)[key],
+                    );
+                    expect(workerConfig[key]).toEqual(
+                      resolveCodexProfile(overrides)[key],
+                    );
+                  }
                   expect(workerConfig["model_verbosity"]).toBe(
                     resolveCodexProfile(overrides)["model_verbosity"],
                   );

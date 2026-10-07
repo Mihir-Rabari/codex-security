@@ -861,9 +861,16 @@ process.exit(process.exitCode ?? 0);
       await client.close();
     }
   });
-  test.each(["openrouter", "fireworks"] as const)(
-    "saves generated %s settings when a file profile supplies only a model",
-    async (provider) => {
+  test.each([
+    ["openrouter", "generated"],
+    ["fireworks", "generated"],
+    ["openrouter", "file"],
+    ["fireworks", "file"],
+    ["openrouter", "refined"],
+    ["fireworks", "refined"],
+  ] as const)(
+    "preserves %s provider settings in a %s file-profile recipe",
+    async (provider, selection) => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const home = join(root, "home");
@@ -871,9 +878,30 @@ process.exit(process.exitCode ?? 0);
       const scanDir = join(root, "scan");
       for (const path of [repository, home, runtimeHome, scanDir])
         await mkdir(path, { mode: 0o700 });
+      const fileProvider = {
+        ...EXTERNAL_CODEX_PROVIDERS[provider],
+        base_url: "https://file-provider.example.test/v1",
+      };
+      const explicitProvider: JsonObject | undefined =
+        selection === "generated"
+          ? { ...EXTERNAL_CODEX_PROVIDERS[provider] }
+          : selection === "refined"
+            ? {
+                base_url: "https://caller-provider.example.test/v1",
+                http_headers: { "X-Synthetic": "synthetic-caller-header" },
+              }
+            : undefined;
       await writeFile(
         join(home, "review.config.toml"),
-        'model="synthetic-model"\n',
+        stringify({
+          model: "synthetic-model",
+          ...(selection === "generated"
+            ? {}
+            : {
+                model_provider: provider,
+                model_providers: { [provider]: fileProvider },
+              }),
+        }),
       );
       let savedRecipe: JsonObject | undefined;
       const client = new TestClient(
@@ -882,9 +910,11 @@ process.exit(process.exitCode ?? 0);
           codexOverrides: {
             profile: "review",
             model_provider: provider,
-            model_providers: {
-              [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
-            },
+            ...(explicitProvider === undefined
+              ? {}
+              : {
+                  model_providers: { [provider]: explicitProvider },
+                }),
           },
         },
         {
@@ -923,7 +953,10 @@ process.exit(process.exitCode ?? 0);
         );
         expect(replay["model_provider"]).toBe(provider);
         expect(replay["model_providers"]).toEqual({
-          [provider]: EXTERNAL_CODEX_PROVIDERS[provider],
+          [provider]:
+            selection === "generated"
+              ? EXTERNAL_CODEX_PROVIDERS[provider]
+              : { ...fileProvider, ...explicitProvider },
         });
       } finally {
         await client.close();

@@ -187,6 +187,8 @@ test.each([
   "null profile",
   "profile override",
   "profile only",
+  "file custom only",
+  "file default key",
 ] as const)(
   "concurrent provider snapshots preserve %s credentials",
   async (selection) => {
@@ -216,11 +218,16 @@ test.each([
       for (let index = 0; index < 2; index++) {
         const scan = join(root, `scan-${index}`);
         await mkdir(scan, { mode: 0o700 });
+        const fileProfile = selection.startsWith("file ");
+        const providerKey =
+          selection === "file default key"
+            ? "OPENROUTER_API_KEY"
+            : "SYNTHETIC_CUSTOM_API_KEY";
         const provider = {
           name: `Synthetic ${index}`,
           base_url: `https://provider-${index}.example.test/v1`,
           wire_api: "responses",
-          env_key: "SYNTHETIC_CUSTOM_API_KEY",
+          env_key: providerKey,
           env_http_headers: {
             "X-Synthetic-Token": "SYNTHETIC_CUSTOM_HEADER",
             "X-Synthetic-Missing": "SYNTHETIC_UNSET",
@@ -236,74 +243,104 @@ test.each([
           view_image: index === 0,
         };
         const providerEnvironment = {
-          SYNTHETIC_CUSTOM_API_KEY: ` synthetic-key-${index} `,
+          [providerKey]: fileProfile
+            ? `synthetic-key-${index}`
+            : ` synthetic-key-${index} `,
           SYNTHETIC_CUSTOM_HEADER: ` synthetic-header-${index} `,
           SYNTHETIC_REQUIRED_KEY: `synthetic-required-${index}`,
         };
+        // Authentication trims the selected API key; other inherited provider
+        // variables, including header values, retain their original bytes.
+        const workerEnvironment = {
+          ...providerEnvironment,
+          [providerKey]: providerEnvironment[providerKey]!.trim(),
+        };
+        if (fileProfile) {
+          await writeFile(
+            join(sourceHome, `review-${index}.config.toml`),
+            stringifyToml({
+              model_provider: "openrouter",
+              model_providers: {
+                openrouter: provider,
+                "required.gateway": {
+                  name: "Managed selection",
+                  wire_api: "responses",
+                  env_key: "SYNTHETIC_REQUIRED_KEY",
+                },
+              },
+              features: featureOverrides,
+              web_search: webSearch,
+            }),
+          );
+        }
         clients.push(
           new TestClient(
             {
               pluginPath: PLUGIN_ROOT,
-              codexOverrides: {
-                model_provider: "openrouter",
-                web_search: selection === "root" ? webSearch : "live",
-                features: selection === "root" ? featureOverrides : {},
-                ...(selection === "profile only"
-                  ? {}
-                  : {
-                      model_providers: {
-                        openrouter:
-                          selection === "profile override"
-                            ? {
-                                ...provider,
-                                env_key: "SYNTHETIC_UNUSED_KEY",
-                              }
-                            : provider,
-                        "required.gateway": {
-                          name: "Managed selection",
-                          wire_api: "responses",
-                          env_key: "SYNTHETIC_REQUIRED_KEY",
-                        },
-                      },
-                    }),
-                ...(selection === "root"
-                  ? {}
-                  : {
-                      profile: "selected",
-                      profiles: {
-                        selected: {
-                          features: featureOverrides,
-                          web_search: webSearch,
-                          ...(selection === "null profile"
-                            ? {
-                                model_provider: null,
-                                model: null,
-                                model_reasoning_effort: null,
-                              }
-                            : selection === "selected profile"
-                              ? {}
-                              : {
-                                  model_provider: "openrouter",
-                                  model_providers: {
-                                    openrouter: provider,
-                                    "required.gateway": {
-                                      name: "Managed selection",
-                                      wire_api: "responses",
-                                      env_key: "SYNTHETIC_REQUIRED_KEY",
-                                    },
-                                  },
-                                }),
-                        },
-                      },
-                    }),
-              },
+              codexOverrides: fileProfile
+                ? { profile: `review-${index}` }
+                : {
+                    model_provider: "openrouter",
+                    web_search: selection === "root" ? webSearch : "live",
+                    features: selection === "root" ? featureOverrides : {},
+                    ...(selection === "profile only"
+                      ? {}
+                      : {
+                          model_providers: {
+                            openrouter:
+                              selection === "profile override"
+                                ? {
+                                    ...provider,
+                                    env_key: "SYNTHETIC_UNUSED_KEY",
+                                  }
+                                : provider,
+                            "required.gateway": {
+                              name: "Managed selection",
+                              wire_api: "responses",
+                              env_key: "SYNTHETIC_REQUIRED_KEY",
+                            },
+                          },
+                        }),
+                    ...(selection === "root"
+                      ? {}
+                      : {
+                          profile: "selected",
+                          profiles: {
+                            selected: {
+                              features: featureOverrides,
+                              web_search: webSearch,
+                              ...(selection === "null profile"
+                                ? {
+                                    model_provider: null,
+                                    model: null,
+                                    model_reasoning_effort: null,
+                                  }
+                                : selection === "selected profile"
+                                  ? {}
+                                  : {
+                                      model_provider: "openrouter",
+                                      model_providers: {
+                                        openrouter: provider,
+                                        "required.gateway": {
+                                          name: "Managed selection",
+                                          wire_api: "responses",
+                                          env_key: "SYNTHETIC_REQUIRED_KEY",
+                                        },
+                                      },
+                                    }),
+                            },
+                          },
+                        }),
+                  },
             },
             {
               environment: {
                 CODEX_HOME: sourceHome,
                 CODEX_SECURITY_STATE_DIR: state,
                 OPENAI_API_KEY: "synthetic-account-key",
-                OPENROUTER_API_KEY: "synthetic-sdk-account-key",
+                ...(selection === "file custom only"
+                  ? {}
+                  : { OPENROUTER_API_KEY: "synthetic-sdk-account-key" }),
                 ...providerEnvironment,
                 SYNTHETIC_UNUSED_KEY: "synthetic-unused-key",
               },
@@ -349,7 +386,7 @@ test.each([
                       await readFile(workerSnapshotPath, "utf8"),
                     );
                     expect(workerSnapshot["worker_runtime"]).toMatchObject({
-                      environment: providerEnvironment,
+                      environment: workerEnvironment,
                       features: featureOverrides,
                       web_search: webSearch,
                     });
@@ -361,7 +398,7 @@ test.each([
                       (workerSnapshot["worker_runtime"] as JsonObject)[
                         "environment"
                       ],
-                    ).toEqual(providerEnvironment);
+                    ).toEqual(workerEnvironment);
                     if (process.platform !== "win32") {
                       expect(
                         (await stat(workerSnapshotPath)).mode & 0o777,
@@ -374,7 +411,7 @@ test.each([
                       }),
                     ).not.toContain("synthetic-key-");
                     const settings = await workerRuntimeSettings(environment);
-                    expect(settings.environment).toEqual(providerEnvironment);
+                    expect(settings.environment).toEqual(workerEnvironment);
                     expect(settings.config["features"]).toMatchObject(
                       featureOverrides,
                     );
@@ -397,8 +434,8 @@ test.each([
                     expect(actual.http_headers ?? {}).toEqual(
                       provider.http_headers ?? {},
                     );
-                    expect(environment["SYNTHETIC_CUSTOM_API_KEY"]).toBe(
-                      providerEnvironment.SYNTHETIC_CUSTOM_API_KEY,
+                    expect(environment[providerKey]).toBe(
+                      workerEnvironment[providerKey],
                     );
                     const saved = await readFile(
                       join(sharedHome, "config.toml"),
@@ -444,6 +481,198 @@ test.each([
   },
   30_000,
 );
+
+const fileProviderKeyCases = [
+  ["openrouter", "default", "OPENROUTER_API_KEY"],
+  ["openrouter", "custom only", "SYNTHETIC_CUSTOM_API_KEY"],
+  ["fireworks", "default", "FIREWORKS_API_KEY"],
+  ["fireworks", "custom only", "SYNTHETIC_CUSTOM_API_KEY"],
+  ["openrouter", "custom Codex key", "CODEX_API_KEY"],
+  ["openrouter", "other external key", "FIREWORKS_API_KEY"],
+] as const;
+
+test.each(["openrouter", "fireworks"] as const)(
+  "native file profile accepts the %s custom environment key",
+  async (providerId) => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home, { mode: 0o700 });
+    await writeFile(
+      join(home, "review.config.toml"),
+      stringifyToml({
+        model_provider: providerId,
+        model: "synthetic-model",
+        model_providers: {
+          [providerId]: {
+            name: "Synthetic provider",
+            wire_api: "responses",
+            base_url: "https://provider.example.test/v1",
+            env_key: "SYNTHETIC_CUSTOM_API_KEY",
+          },
+        },
+      }),
+    );
+    const selected = await effectiveProvider(
+      { CODEX_HOME: home, SYNTHETIC_CUSTOM_API_KEY: "synthetic-custom-key" },
+      root,
+      [],
+      "review",
+    );
+    expect(selected).toMatchObject({ env_key: "SYNTHETIC_CUSTOM_API_KEY" });
+  },
+  30_000,
+);
+
+for (const mode of ["standard", "deep"] as const) {
+  test.each(fileProviderKeyCases)(
+    `file provider %s uses its %s key for ${mode} preflight and children`,
+    async (providerId, _selection, providerKey) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const scan = join(root, "scan");
+      const sourceHome = join(root, "source-home");
+      const report = join(root, "environment.json");
+      await mkdir(repository);
+      await mkdir(scan, { mode: 0o700 });
+      await mkdir(sourceHome, { mode: 0o700 });
+      const plugin = await createPluginProbe(root, report);
+      const provider = {
+        name: "Synthetic file provider",
+        wire_api: "responses",
+        base_url: "https://provider.example.test/v1",
+        env_key: providerKey,
+      };
+      const original = stringifyToml({
+        model: "synthetic-model",
+        model_provider: providerId,
+        model_providers: { [providerId]: provider },
+        features: { shell_tool: false, unified_exec: false },
+      });
+      await writeFile(join(sourceHome, "review.config.toml"), original);
+      let launched = false;
+      const client = new TestClient(
+        { pluginPath: plugin, codexOverrides: { profile: "review" } },
+        {
+          environment: {
+            CODEX_HOME: sourceHome,
+            CODEX_SECURITY_STATE_DIR: join(root, "state"),
+            ...(_selection === "custom Codex key" ||
+            _selection === "other external key"
+              ? Object.fromEntries(
+                  [
+                    "OPENAI_API_KEY",
+                    "CODEX_API_KEY",
+                    "OPENROUTER_API_KEY",
+                    "FIREWORKS_API_KEY",
+                  ]
+                    .filter((name) => name !== providerKey)
+                    .map((name) => [name, "synthetic-unrelated-key"]),
+                )
+              : {}),
+            [providerKey]: "synthetic-file-key",
+          },
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scan,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: (options) => {
+            launched = true;
+            return {
+              startThread: () => ({
+                id: null,
+                async runStreamed() {
+                  expect(options.apiKey).toBeUndefined();
+                  const environment = options.env!;
+                  expect(environment[providerKey]).toBe("synthetic-file-key");
+                  for (const name of [
+                    "OPENAI_API_KEY",
+                    "CODEX_API_KEY",
+                    "OPENROUTER_API_KEY",
+                    "FIREWORKS_API_KEY",
+                  ]) {
+                    if (name !== providerKey)
+                      expect(environment[name]).toBeUndefined();
+                  }
+                  if (mode === "deep") {
+                    const settings = await (
+                      await loadWorkerSettings(root)
+                    )(environment);
+                    expect(settings.environment).toEqual({
+                      [providerKey]: "synthetic-file-key",
+                    });
+                    expect(
+                      await effectiveProvider(
+                        environment,
+                        repository,
+                        profileConfigOverrides(settings.config),
+                        settings.nativeProfile,
+                      ),
+                    ).toMatchObject(provider);
+                    const status = await nativeRequest(
+                      environment,
+                      repository,
+                      [],
+                      "mcpServerStatus/list",
+                      {
+                        serverName: "codex-security",
+                        detail: "toolsAndAuthOnly",
+                      },
+                    );
+                    expect(status.data[0].toolsError).toBeNull();
+                    expect(status.data[0].tools).toHaveProperty(
+                      "synthetic_environment",
+                    );
+                    expect(
+                      JSON.parse(await readFile(report, "utf8")).recovered,
+                    ).toEqual({ [providerKey]: "synthetic-file-key" });
+                    const snapshot =
+                      environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
+                    if (process.platform !== "win32")
+                      expect((await stat(snapshot)).mode & 0o777).toBe(0o600);
+                    expect(await readFile(snapshot, "utf8")).toContain(
+                      '"synthetic-file-key"',
+                    );
+                  }
+                  for (const text of [
+                    await readFile(
+                      environment["CODEX_SECURITY_CONFIG_PATH"]!,
+                      "utf8",
+                    ),
+                    JSON.stringify({
+                      config: options.config,
+                      overrides: options.configOverrides,
+                    }),
+                  ]) {
+                    expect(text).not.toContain("synthetic-file-key");
+                  }
+                  throw new Error("synthetic file provider child checked");
+                },
+              }),
+            };
+          },
+        },
+      );
+      try {
+        const preflight = await client.preflight(repository, { mode });
+        expect(preflight.authentication).toEqual({
+          method: "api_key",
+          source: providerKey,
+          verified: false,
+        });
+        expect(preflight.modelProvider).toBe(providerId);
+        await expect(client.run(repository, { mode })).rejects.toThrow(
+          "synthetic file provider child checked",
+        );
+        expect(launched).toBe(true);
+        expect(
+          await readFile(join(sourceHome, "review.config.toml"), "utf8"),
+        ).toBe(original);
+      } finally {
+        await client.close();
+      }
+    },
+    30_000,
+  );
+}
 
 test("workers preserve native provider inheritance without an explicit selection", async () => {
   const root = await temporaryDirectory();

@@ -130,6 +130,7 @@ import {
   scanModel,
   scanModelConfiguration,
   scanModelProvider,
+  scanProviderEnvKey,
   writeCodexConfig,
   type CodexSecurityConfig,
   type ExternalModelProvider,
@@ -1427,6 +1428,7 @@ export async function runCodexSkillCommand(
         processEnvironment,
         authentication.method === "command" ? "chatgpt" : output.auth,
         provider,
+        providerEnvKey,
       );
       if (
         explicitChatgpt &&
@@ -1538,6 +1540,7 @@ export async function runCodexSkillCommand(
           codexHome,
           output.auth,
           provider,
+          providerEnvKey,
         );
       } else if (authentication.method === "api_key" && requiresOpenAiAuth) {
         apiKey = environmentValue(selected, authentication.source)?.trim();
@@ -3399,20 +3402,23 @@ export async function main(
                   dependencies.createPolicySecurity ??
                   ((config) =>
                     new CodexSecurity(config, undefined, { surface: "cli" })),
-                chooseAuthentication: (config, auth, signal) =>
-                  chooseInteractiveAuthentication(
+                chooseAuthentication: async (config, auth, signal) => {
+                  const effectiveConfig = await mergedCodexConfig(
+                    config,
+                    configuredCodexHome(dependencies.environment),
+                  );
+                  if (hasCommandAuth(effectiveConfig)) return auth;
+                  return await chooseInteractiveAuthentication(
                     {
                       auth,
-                      provider: scanModelProvider({
-                        ...DEFAULT_CODEX_CONFIG,
-                        ...config.codexOverrides,
-                      }),
+                      provider: scanModelProvider(effectiveConfig),
                       command: "policy",
                       signal,
                     },
                     errorOutput,
                     dependencies,
-                  ),
+                  );
+                },
                 prompt:
                   dependencies.policyPrompt ??
                   createTerminalPrompt(errorOutput),
@@ -8292,6 +8298,7 @@ async function executeScan(
           auth,
           provider,
           hasCommandAuth(effectiveConfiguration),
+          scanProviderEnvKey(effectiveConfiguration),
         );
     diagnostic("scan.configuration", {
       cli_version: VERSION,

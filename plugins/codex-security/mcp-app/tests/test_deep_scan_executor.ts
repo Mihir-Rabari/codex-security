@@ -1440,6 +1440,38 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             windowsSandbox,
             webSearch,
             features,
+            skills:
+              index === 0
+                ? undefined
+                : {
+                    config: [
+                      {
+                        path: path.join(
+                          fixture.root,
+                          `skill-${index}`,
+                          "SKILL.md",
+                        ),
+                        enabled: index % 2 === 0,
+                      },
+                    ],
+                  },
+            otel:
+              index === 0
+                ? undefined
+                : {
+                    exporter: {
+                      "otlp-http": {
+                        endpoint: `https://telemetry-${index}.example.test/v1`,
+                        tls: {
+                          "ca-certificate": path.join(
+                            fixture.root,
+                            `tls-${index}`,
+                            "ca.pem",
+                          ),
+                        },
+                      },
+                    },
+                  },
             configuration: {
               ...parsedConfiguration,
               ...(index === 0
@@ -1481,6 +1513,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                         native_profile: entry.nativeProfile,
                         environment: entry.environment,
                         windows: { sandbox: entry.windowsSandbox },
+                        skills: entry.skills,
+                        otel: entry.otel,
                         features: entry.features,
                       },
               }),
@@ -1661,6 +1695,19 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               web_search: workerConfigurations[index].webSearch,
               "windows.sandbox": workerConfigurations[index].windowsSandbox,
             });
+            const selectedRuntime = parseToml(
+              invocation.argv
+                .filter((arg: string) => /^(?:skills|otel)=/.test(arg))
+                .join("\n"),
+            );
+            for (const key of ["skills", "otel"] as const) {
+              assert.deepEqual(
+                selectedRuntime[key] === undefined
+                  ? undefined
+                  : JSON.parse(JSON.stringify(selectedRuntime[key])),
+                workerConfigurations[index][key],
+              );
+            }
             assert.equal(
               invocation.cacheDirectory,
               path.join(fixture.root, `cache-${index} `),

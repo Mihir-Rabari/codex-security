@@ -18,6 +18,7 @@ import {
   hasCommandAuth,
   mergedCodexConfig,
   scanModelProvider,
+  scanProviderEnvKey,
   type CodexSecurityConfig,
 } from "./config.js";
 import type { ScanCost, ScanSessionEvent } from "./cost.js";
@@ -138,8 +139,20 @@ export async function runComponentScans(
       configuredCodexHome(source),
     );
     const provider = scanModelProvider(configuration);
-    scanAuthentication(source, auth, provider, hasCommandAuth(configuration));
-    environment = selectedScanEnvironment(source, auth, provider);
+    const providerEnvKey = scanProviderEnvKey(configuration);
+    scanAuthentication(
+      source,
+      auth,
+      provider,
+      hasCommandAuth(configuration),
+      providerEnvKey,
+    );
+    environment = selectedScanEnvironment(
+      source,
+      auth,
+      provider,
+      providerEnvKey,
+    );
   }
   const repository = await normalizeRepository(
     options.repository,
