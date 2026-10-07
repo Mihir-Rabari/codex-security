@@ -7685,9 +7685,11 @@ async function verifiedPatchFiles(
     }
     return path;
   });
-  const directory = await realpath(selected.repository).catch(
-    () => context.directory,
-  );
+  const directory = await realpath(selected.repository)
+    .then(async (path) =>
+      (await lstat(path)).isDirectory() ? path : undefined,
+    )
+    .catch(() => undefined);
   if (files.length > 0 && directory !== context.directory)
     throw new CodexSecurityError(
       "Patch directory changed during patching. Local edits and patches were kept.",
