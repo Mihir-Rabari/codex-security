@@ -80,6 +80,7 @@
 - replace language parsers with source previews ([#1391](https://github.com/openai/codex-security/pull/1391))
 - include build and test files in scan inputs ([#1414](https://github.com/openai/codex-security/pull/1414))
 - load saved feedback and align scan completion instructions ([#1264](https://github.com/openai/codex-security/pull/1264))
+- share workbench migration SQL ([#1333](https://github.com/openai/codex-security/pull/1333))
 
 <!-- release-section: highlights:end -->
 
