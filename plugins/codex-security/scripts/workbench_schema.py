@@ -869,6 +869,13 @@ MIGRATIONS = (
     ),
     (
         42,
+        "editable scan names",
+        """
+        ALTER TABLE scans ADD COLUMN name TEXT;
+        """,
+    ),
+    (
+        43,
         "scope severity checkpoints to each scan",
         """
         CREATE TABLE scan_finding_severity_assessments (
@@ -985,6 +992,10 @@ def apply_migrations(
             """
         )
         normalize_pre_release_migrations(connection, now())
+        connection.execute(
+            "UPDATE schema_migrations SET version = 43 "
+            "WHERE version = 42 AND name = 'scope severity checkpoints to each scan'"
+        )
         applied = {
             row["version"] for row in connection.execute("SELECT version FROM schema_migrations")
         }
