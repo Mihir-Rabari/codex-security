@@ -1340,6 +1340,7 @@ def merge_saved_results(
     )
     findings: list[dict[str, Any]] = []
     inferred_identities: dict[int, dict[str, Any]] = {}
+    finding_owners: dict[int, str | None] = {}
     finding_positions: dict[str, int] = {}
     candidate_owners: dict[tuple[str, str], set[str]] = {}
 
@@ -1355,8 +1356,14 @@ def merge_saved_results(
         current_provenance = current_provenance if isinstance(current_provenance, dict) else {}
         previous_provenance = previous.get("provenance")
         previous_provenance = previous_provenance if isinstance(previous_provenance, dict) else {}
-        current_owner = _saved_worker_owner(current_provenance, current_owner)
-        previous_owner = _saved_worker_owner(previous_provenance, previous_owner)
+        current_owner = _saved_worker_owner(
+            current_provenance,
+            current_owner if current_owner is not None else finding_owners.get(id(finding)),
+        )
+        previous_owner = _saved_worker_owner(
+            previous_provenance,
+            previous_owner if previous_owner is not None else finding_owners.get(id(previous)),
+        )
         current_owner = current_owner if isinstance(current_owner, str) else None
         previous_owner = previous_owner if isinstance(previous_owner, str) else None
         if (
@@ -1423,7 +1430,7 @@ def merge_saved_results(
             return _digest(
                 [
                     key,
-                    finding.get("provenance", {}).get("workerId"),
+                    _saved_worker_owner(finding.get("provenance"), finding_owners.get(id(finding))),
                     finding_candidate_id(finding),
                     explicit_finding_key(finding),
                 ]
@@ -2064,6 +2071,7 @@ def merge_saved_results(
                 warnings.append(f"Retained malformed finding evidence in {relative}.")
                 continue
             finding = copy.deepcopy(value)
+            finding_owners[id(finding)] = worker_id
             if "identity" not in value or id(value) in inferred_identities:
                 inferred_identities[id(finding)] = finding
             candidate_id = finding_candidate_id(finding)
@@ -2143,7 +2151,8 @@ def merge_saved_results(
                         _finding_key(retained) == key
                         and not distinct_candidates(finding, retained, previous_owner=owner)
                         for retained, owner in _retained_findings(
-                            findings[finding_positions[mapped_key]]
+                            findings[finding_positions[mapped_key]],
+                            finding_owners.get(id(findings[finding_positions[mapped_key]])),
                         )
                     )
                 ):

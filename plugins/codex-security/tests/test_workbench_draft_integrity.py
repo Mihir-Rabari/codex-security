@@ -2329,8 +2329,9 @@ def test_parent_history_preserves_opaque_provenance_during_worker_recovery(
 @pytest.mark.parametrize(
     "worker_metadata", [{"description": "same metadata"}, ["same metadata"], "bound-string", None]
 )
+@pytest.mark.parametrize("identityless_history", [False, True])
 def test_saved_optional_worker_metadata_keeps_bound_sibling_owners(
-    tmp_path, retry, worker_metadata
+    tmp_path, retry, worker_metadata, identityless_history
 ):
     state, home, scan_dir, scan_id = draft_fixture(tmp_path, deep=True, workers=2)
     original = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
@@ -2348,6 +2349,10 @@ def test_saved_optional_worker_metadata_keeps_bound_sibling_owners(
         )
         if index == 0:
             finding["identity"] = {"anchor": "explicit-observation"}
+            if identityless_history:
+                historical = copy.deepcopy(finding)
+                historical.pop("identity")
+                finding["provenance"]["previousFindings"] = [historical]
         else:
             finding.pop("identity", None)
         document["findings"] = [finding]
