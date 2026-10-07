@@ -1,5 +1,7 @@
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ZodType } from "zod/v4";
+import { isTerminalCandidateDecision } from "./artifact-candidates.js";
+import { readArtifactText } from "./artifact-io.js";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
 import reducerSchema from "../../schemas/tools/deep-reducer.schema.json";
 import scanDraftSchema from "../../schemas/tools/scan-draft.schema.json";
@@ -82,6 +84,54 @@ export async function getCodexSecurityDeepReducerInputs(
           throw new Error(
             "An assigned Standard worker wrote only a checkpoint, not a complete result.",
           );
+        const deferred = result.coverage.deferred as Record<string, unknown>[];
+        for (const surface of result.coverage.surfaces as Record<
+          string,
+          unknown
+        >[]) {
+          if (!isTerminalCandidateDecision(surface)) continue;
+          for (const ref of (surface.receiptRefs as string[] | undefined) ??
+            []) {
+            try {
+              if (!ref.startsWith("artifacts/"))
+                throw new Error(
+                  "Worker candidate receipt must be under artifacts/.",
+                );
+              await readArtifactText(
+                {
+                  root: dirname(worker.resultPath),
+                  repoRoot: context.repoRoot,
+                  layout: "worker",
+                },
+                ref.split("/"),
+                "Worker candidate receipt",
+              );
+            } catch (error) {
+              surface.disposition = "needs_follow_up";
+              if (
+                !deferred.some(
+                  (item) => item.candidateId === surface.candidateId,
+                )
+              )
+                deferred.push({
+                  candidateId: surface.candidateId,
+                  reason:
+                    error instanceof Error ? error.message : String(error),
+                  ...(typeof surface.id === "string"
+                    ? { surfaceIds: [surface.id] }
+                    : {}),
+                  ...Object.fromEntries(
+                    ["candidate", "finding"].flatMap((field) =>
+                      field in surface
+                        ? [[field, structuredClone(surface[field])]]
+                        : [],
+                    ),
+                  ),
+                });
+              break;
+            }
+          }
+        }
         result.findings = result.findings.map((finding, index) => ({
           ...finding,
           provenance: {

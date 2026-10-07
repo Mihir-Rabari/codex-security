@@ -352,8 +352,10 @@ function retainSourceFindings(
     const originals = provenance.sourceFindings as
       Array<{ id: string; finding: Finding }> | undefined;
     if (originals?.length) {
-      for (const original of originals)
+      for (const original of originals) {
         sources.set(original.id, original.finding);
+        workers.add(original.id.slice(0, original.id.lastIndexOf(":")));
+      }
     } else {
       sources.set(`previous:${index}`, finding);
     }

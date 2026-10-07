@@ -16,10 +16,30 @@ from candidate_identity import (
 )
 from finalize_scan_contract import (
     ContractError,
+    _read_json,
     _recover_unsealed_coverage,
     _require_portable_relative_path,
     _require_scan_local_file,
+    _validate_resolved_deferred,
+    _validate_schema_node,
 )
+
+
+def resolved_deferred_rows(draft: dict[str, Any], schema: dict[str, Any]) -> list[dict[str, Any]]:
+    if draft.get("complete") is False:
+        return []
+    coverage = draft["coverage"]
+    rows = coverage.get("resolvedDeferred", [])
+    deferred = coverage.get("deferred", [])
+    try:
+        # Invalid closure metadata cannot discard the evidence it names.
+        _validate_schema_node(rows, schema, "coverage.resolvedDeferred")
+        _validate_resolved_deferred(
+            {**coverage, "deferred": deferred if isinstance(deferred, list) else []}
+        )
+    except ContractError:
+        return []
+    return rows
 
 
 def recover_candidate_receipts(
@@ -50,6 +70,12 @@ def recover_candidate_receipts(
     parent = copy.deepcopy(parent)
     if source is not None:
         coverage = parent["coverage"]
+        closures = []
+        if coverage.get("resolvedDeferred"):
+            schema = _read_json(
+                Path(__file__).resolve().parent.parent / "schemas" / "coverage.schema.json"
+            )["properties"]["resolvedDeferred"]
+            closures = resolved_deferred_rows(parent, schema)
         if not isinstance(coverage.get("deferred"), list):
             coverage["deferred"] = []
         for index, row in enumerate(coverage["surfaces"]):
@@ -104,6 +130,16 @@ def recover_candidate_receipts(
                             },
                         }
                     )
+        if closures:
+            # Reopened candidate work must not invalidate unrelated valid closures.
+            active = {
+                identity
+                for row in coverage["deferred"]
+                if isinstance(row, dict)
+                for identity in (row.get("id"), row.get("candidateId"))
+                if isinstance(identity, str)
+            }
+            coverage["resolvedDeferred"] = [row for row in closures if row["id"] not in active]
         return parent
     _recover_unsealed_coverage(
         parent["coverage"],

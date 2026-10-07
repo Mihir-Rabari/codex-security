@@ -45,7 +45,6 @@ from finalize_scan_contract import (
     _remove_scan_local_file_if_exists,
     _require_safe_json_value,
     _validate_completion_binding,
-    _validate_resolved_deferred,
     _validate_schema_node,
     _write_prepared_scan_finalization,
     finalize_scan,
@@ -66,6 +65,9 @@ from workbench_budget_candidates import (
 )
 from workbench_budget_candidates import (
     preserve_budget_candidates as preserve_budget_candidates,
+)
+from workbench_budget_candidates import (
+    resolved_deferred_rows as _resolved_deferred_rows,
 )
 from workbench_constants import PHASES
 from workbench_target import committed_diff_snapshot_digest
@@ -1078,20 +1080,6 @@ def _reconcile_stopped_diff_sources(
 def _deferred_rows(coverage: dict[str, Any]) -> list[Any]:
     rows = coverage.get("deferred", [])
     return rows if isinstance(rows, list) else []
-
-
-def _resolved_deferred_rows(draft: dict[str, Any], schema: dict[str, Any]) -> list[dict[str, Any]]:
-    if draft.get("complete") is False:
-        return []
-    coverage = draft["coverage"]
-    rows = coverage.get("resolvedDeferred", [])
-    try:
-        # Invalid closure metadata cannot discard the evidence it names.
-        _validate_schema_node(rows, schema, "coverage.resolvedDeferred")
-        _validate_resolved_deferred({**coverage, "deferred": _deferred_rows(coverage)})
-    except ContractError:
-        return []
-    return rows
 
 
 def _merge_tied_parent_observations(

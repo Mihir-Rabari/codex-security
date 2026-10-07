@@ -384,6 +384,7 @@ describe("plugin runtime preparation", () => {
       "candidateKey",
       "surfaceReferenceKey",
       "isRecord",
+      "genericDeferred",
       "normalizeLegacyCandidateEntry",
       "normalizeCoverageEntries",
       "buildCoverage",

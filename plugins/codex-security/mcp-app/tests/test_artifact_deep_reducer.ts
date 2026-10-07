@@ -540,7 +540,7 @@ function retainedFinding(
   };
 }
 
-for (const kind of ["correct", "imported", "merged"]) {
+for (const kind of ["correct", "imported", "merged", "previous"]) {
   const importedOwner = kind !== "correct";
   const merged = kind === "merged";
   test(`live two-worker reduction binds retained source ownership ${kind}`, async () => {
@@ -631,13 +631,40 @@ for (const kind of ["correct", "imported", "merged"]) {
             : ["worker-a:0"],
         },
       };
+      let previousReducerResultPath: string | undefined;
+      if (kind === "previous") {
+        const previousRoot = path.join(path.dirname(output), "previous");
+        await mkdir(previousRoot, { recursive: true });
+        const previousContext = {
+          root: previousRoot,
+          repoRoot: root,
+          layout: "reducer",
+          scanId,
+          deepReducer: { scanRoot: root, claimedWorkers: [claimed[0]!] },
+        };
+        const previousInputs =
+          await getCodexSecurityDeepReducerInputs(previousContext);
+        await recordCodexSecurityDeepReduction(previousContext, {
+          scanId,
+          findings: previousInputs.discoveries[0].result.findings,
+        });
+        previousReducerResultPath = path.join(previousRoot, "result.json");
+        originals.set(
+          previousReducerResultPath,
+          await readFile(previousReducerResultPath, "utf8"),
+        );
+      }
       await recordCodexSecurityDeepReduction(
         {
           root: output,
           repoRoot: root,
           layout: "reducer",
           scanId,
-          deepReducer: { scanRoot: root, claimedWorkers: claimed },
+          deepReducer: {
+            scanRoot: root,
+            claimedWorkers: kind === "previous" ? [claimed[1]!] : claimed,
+            ...(previousReducerResultPath ? { previousReducerResultPath } : {}),
+          },
         },
         { scanId, findings: [aggregate] },
       );
@@ -690,4 +717,125 @@ for (const kind of ["correct", "imported", "merged"]) {
       await rm(root, { recursive: true, force: true });
     }
   });
+}
+
+for (const receipt of [
+  "missing",
+  "valid",
+  "empty",
+  "none",
+  "other-worker",
+] as const) {
+  for (const savedGap of [false, true]) {
+    test(`worker terminal candidate receipt ${receipt}, saved gap=${savedGap}`, async () => {
+      const root = await temporaryDirectory(
+        "deep-worker-candidate-receipt-",
+        true,
+      );
+      try {
+        const candidateId = "receipt-candidate";
+        const pending = {
+          candidateId,
+          reason: "Original proof gap remains saved.",
+          candidate: { evidence: "Original candidate evidence." },
+        };
+        const workersRoot = path.join(
+          root,
+          "artifacts",
+          "deep_discovery",
+          "workers",
+        );
+        const worker = await createWorker({
+          workersRoot,
+          label: "worker-receipt",
+          id: "worker-receipt",
+          result: workerDraft([], {
+            coverage: {
+              completeness: "partial",
+              explicitExclusions: [],
+              surfaces: [
+                {
+                  id: "decision",
+                  label: "Synthetic review",
+                  candidateId,
+                  candidate: pending.candidate,
+                  disposition: "rejected",
+                  receiptRefs:
+                    receipt === "none" ? [] : ["artifacts/review.txt"],
+                },
+              ],
+              deferred: savedGap ? [pending] : [],
+            },
+          }),
+        });
+        if (["valid", "empty", "other-worker"].includes(receipt)) {
+          const receiptRoot =
+            receipt === "other-worker"
+              ? path.join(workersRoot, "another-worker", "output")
+              : path.dirname(worker.resultPath);
+          await mkdir(path.join(receiptRoot, "artifacts"), { recursive: true });
+          await writeFile(
+            path.join(receiptRoot, "artifacts", "review.txt"),
+            receipt === "empty" ? "" : "Synthetic review receipt.\n",
+          );
+        }
+        const workerBytes = await readFile(worker.resultPath, "utf8");
+        const output = path.join(
+          root,
+          "artifacts",
+          "deep_discovery",
+          "dedup",
+          "reducer",
+          "output",
+        );
+        await mkdir(output, { recursive: true });
+        const context = {
+          root: output,
+          repoRoot: root,
+          scanId,
+          layout: "reducer",
+          deepReducer: { scanRoot: root, claimedWorkers: [worker] },
+        };
+        const inputs = await getCodexSecurityDeepReducerInputs(context);
+        const expectedPending =
+          receipt === "missing" || receipt === "other-worker";
+        assert.equal(
+          inputs.discoveries[0].result.unresolvedCandidates?.length ?? 0,
+          expectedPending ? 1 : 0,
+        );
+        await recordCodexSecurityDeepReduction(context, {
+          scanId,
+          findings: [],
+        });
+        const saved = await readJson(path.join(output, "result.json"));
+        assert.equal(
+          saved.unresolvedCandidates?.length ?? 0,
+          expectedPending ? 1 : 0,
+        );
+        if (expectedPending) {
+          assert.equal(saved.unresolvedCandidates[0].candidateId, candidateId);
+          assert.equal(saved.unresolvedCandidates[0].sourceWorkerId, worker.id);
+          assert.deepEqual(
+            saved.unresolvedCandidates[0].candidate,
+            pending.candidate,
+          );
+          if (savedGap)
+            assert.equal(saved.unresolvedCandidates[0].reason, pending.reason);
+        }
+        const { deepReductionScanDraft } = await importSource(
+          fileURLToPath(
+            new URL("../src/deep-scan/artifact-validation.ts", import.meta.url),
+          ),
+        );
+        const publication = deepReductionScanDraft(saved);
+        assert.equal(
+          publication.coverage.completeness,
+          expectedPending ? "partial" : "complete",
+        );
+        assert.equal(await readFile(worker.resultPath, "utf8"), workerBytes);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
 }

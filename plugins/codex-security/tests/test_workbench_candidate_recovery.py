@@ -962,3 +962,70 @@ def test_worker_receipt_recovery_preserves_optional_semantic_ids(
         2 if receipt == "missing" else 1
     )
     assert result.read_bytes() == before
+
+
+@pytest.mark.parametrize("receipt_present", [False, True])
+@pytest.mark.parametrize("result_present", [False, True])
+@pytest.mark.parametrize("valid_closure", [False, True])
+def test_worker_receipt_recovery_keeps_unrelated_generic_closures(
+    tmp_path: Path,
+    generic_review_recovery,
+    receipt_present: bool,
+    result_present: bool,
+    valid_closure: bool,
+) -> None:
+    module, pending, terminal, binding = generic_review_recovery
+    pending["complete"] = False
+    pending["coverage"]["deferred"] = [
+        {"id": "review", "reason": "Review the candidate surface."},
+        {"id": "independent", "reason": "Review unrelated work."},
+    ]
+    terminal["coverage"]["resolvedDeferred"] = [
+        {"id": "review", "reason": "Review completed." if valid_closure else ""},
+        {"id": "independent", "reason": "Unrelated work completed."},
+    ]
+    terminal["coverage"]["surfaces"] = [
+        {
+            "id": "candidate-decision",
+            "candidateId": "review",
+            "label": "Reviewed candidate",
+            "disposition": "rejected",
+            "receiptRefs": ["artifacts/review.txt"],
+        }
+    ]
+    output = tmp_path / "worker"
+    output.mkdir()
+    older = write_checkpoint(output / "checkpoints", pending)
+    os.utime(older, ns=(100, 100))
+    selected = write_checkpoint(output / "checkpoints", terminal)
+    os.utime(selected, ns=(200, 200))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": selected.name}))
+    os.utime(head, ns=(300, 300))
+    if result_present:
+        result_path = output / "result.json"
+        result_path.write_text(json.dumps(terminal))
+        os.utime(result_path, ns=(300, 300))
+    if receipt_present:
+        (output / "artifacts").mkdir()
+        (output / "artifacts/review.txt").write_text("Synthetic candidate review.\n")
+    originals = {path: path.read_bytes() for path in output.rglob("*") if path.is_file()}
+    workers = [saved_discovery_worker(output, "worker", 1)]
+    first = module.merge_saved_results(
+        tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
+    )
+    assert first is not None
+    replay = replay_saved_results(
+        module, first, tmp_path, pending["scanId"], binding, workers, stopped=True
+    )
+    for documents in (first, replay):
+        assert documents is not None
+        deferred = documents[2]["deferred"]
+        assert any(item.get("id") == "independent" for item in deferred) is (
+            not valid_closure and not result_present
+        )
+        candidates = module.unresolved_candidates(documents[2], documents[1])
+        assert [item["candidateId"] for item in candidates] == (
+            [] if receipt_present else ["review"]
+        )
+    assert all(path.read_bytes() == value for path, value in originals.items())
