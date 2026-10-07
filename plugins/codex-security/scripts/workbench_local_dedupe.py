@@ -91,7 +91,7 @@ def prepare(
     ):
         raise ValueError("target_mismatch")
     if not payload["findings"]:
-        return {"entries": []}
+        return {"cacheKeys": {}, "findingsToEmbed": []}
     # A sealed historical scan selects logical IDs; never overwrite their current bodies.
     for finding in payload["findings"]:
         existing = connection.execute(
@@ -127,19 +127,16 @@ def prepare(
         + "ORDER BY findings.created_at, findings.id",
         (repository_id,) if repository_id is not None else (),
     )
-    entries = []
+    cache_keys = {}
+    findings_to_embed = []
     for row in rows:
         if row["details_json"] is None:
             raise ValueError("finding_not_indexed")
         key = cache_key(payload["space"], row["details_json"])
-        entries.append(
-            {
-                "finding": json.loads(row["details_json"]),
-                "cacheKey": key,
-                "needsEmbedding": key != row["cache_key"],
-            }
-        )
-    return {"entries": entries}
+        cache_keys[row["id"]] = key
+        if key != row["cache_key"]:
+            findings_to_embed.append(json.loads(row["details_json"]))
+    return {"cacheKeys": cache_keys, "findingsToEmbed": findings_to_embed}
 
 
 if __name__ == "__main__":

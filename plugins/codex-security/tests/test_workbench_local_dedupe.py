@@ -48,35 +48,49 @@ def prepare(api, connection, findings, **values):
     )
 
 
-def entry(prepared, **values):
+def entry(prepared, index=0, **values):
+    finding_id = prepared["findingsToEmbed"][index]["findingId"]
     return {
-        "findingId": prepared["finding"]["findingId"],
-        "cacheKey": prepared["cacheKey"],
+        "findingId": finding_id,
+        "cacheKey": prepared["cacheKeys"][finding_id],
         "embedding": {"model": "synthetic", "vector": [1, 0]},
         **values,
     }
 
 
 def test_cache_reuse_and_legacy_writes_clear_certification(workbench_api, workbench_db):
-    first = prepare(workbench_api, workbench_db, [finding(1)])["entries"][0]
-    assert first["needsEmbedding"]
+    first = prepare(workbench_api, workbench_db, [finding(1)])
+    assert first["findingsToEmbed"] == [finding(1)]
     assert request(workbench_api, workbench_db, "embed", entries=[entry(first)]) == {}
-    assert not prepare(workbench_api, workbench_db, [finding(1)])["entries"][0]["needsEmbedding"]
-    assert prepare(workbench_api, workbench_db, [finding(1)], space="synthetic-v2")["entries"][0][
-        "needsEmbedding"
-    ]
+    assert prepare(workbench_api, workbench_db, [finding(1)]) == {
+        "cacheKeys": first["cacheKeys"],
+        "findingsToEmbed": [],
+    }
+    assert prepare(workbench_api, workbench_db, [finding(1)], space="synthetic-v2")[
+        "findingsToEmbed"
+    ] == [finding(1)]
     workbench_api["store_findings"](
         workbench_db,
         [{"finding": finding(1), "embedding": {"model": "synthetic", "vector": [0, 1]}}],
         TIMESTAMP,
     )
-    assert prepare(workbench_api, workbench_db, [finding(1)])["entries"][0]["needsEmbedding"]
+    assert prepare(workbench_api, workbench_db, [finding(1)])["findingsToEmbed"] == [finding(1)]
+
+
+def test_preparation_returns_all_cache_keys_but_only_uncached_bodies(workbench_api, workbench_db):
+    first = prepare(workbench_api, workbench_db, [finding(1)])
+    request(workbench_api, workbench_db, "embed", entries=[entry(first)])
+    mixed = prepare(workbench_api, workbench_db, [finding(1), finding(2)])
+    assert mixed["findingsToEmbed"] == [finding(2)]
+    assert set(mixed["cacheKeys"]) == {"finding-1", "finding-2"}
+    assert mixed["cacheKeys"]["finding-1"] == first["cacheKeys"]["finding-1"]
+    assert prepare(workbench_api, workbench_db, []) == {"cacheKeys": {}, "findingsToEmbed": []}
 
 
 @pytest.mark.parametrize("failure", ["stale", "dimensions", "zero", "nonfinite"])
 def test_embedding_batch_rolls_back_on_invalid_or_stale_input(workbench_api, workbench_db, failure):
-    entries = prepare(workbench_api, workbench_db, [finding(1), finding(2)])["entries"]
-    second = entry(entries[1])
+    prepared = prepare(workbench_api, workbench_db, [finding(1), finding(2)])
+    second = entry(prepared, 1)
     if failure == "stale":
         second["cacheKey"] = "old-input"
     else:
@@ -85,9 +99,42 @@ def test_embedding_batch_rolls_back_on_invalid_or_stale_input(workbench_api, wor
             "zero": [0, 0],
             "nonfinite": [float("nan"), 0],
         }[failure]
-    result = request(workbench_api, workbench_db, "embed", entries=[entry(entries[0]), second])
+    result = request(workbench_api, workbench_db, "embed", entries=[entry(prepared), second])
     assert result == {"error": "finding_changed" if failure == "stale" else "embedding_failed"}
     assert workbench_db.execute("SELECT COUNT(*) FROM finding_embeddings").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("case", ["matching", "empty", "missing", "deleted", "null", "stale"])
+def test_neighbors_and_commits_check_the_complete_cache_map(workbench_api, workbench_db, case):
+    second = finding(2)
+    second["findingId"] = 'finding-2-"-\u2603'
+    prepared = prepare(workbench_api, workbench_db, [finding(1), second])
+    request(workbench_api, workbench_db, "embed", entries=[entry(prepared), entry(prepared, 1)])
+    expected = dict(prepared["cacheKeys"])
+    if case == "empty":
+        expected = {}
+    elif case == "missing":
+        expected["missing"] = "missing-key"
+    elif case == "deleted":
+        with workbench_db:
+            workbench_db.execute(
+                "DELETE FROM finding_embeddings WHERE finding_id = ?", (second["findingId"],)
+            )
+    elif case in {"null", "stale"}:
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE finding_embeddings SET cache_key = ? WHERE finding_id = ?",
+                (None if case == "null" else "old-input", second["findingId"]),
+            )
+    neighbors = request(
+        workbench_api, workbench_db, "neighbors", findingId="finding-1", cacheKeys=expected
+    )
+    commit = request(workbench_api, workbench_db, "commit", groups=[], cacheKeys=expected)
+    if case in {"matching", "empty"}:
+        assert "potentialDuplicates" in neighbors
+        assert commit == {"groups": []}
+    else:
+        assert neighbors == commit == {"error": "finding_changed"}
 
 
 def test_preparation_conflict_rolls_back_new_findings(workbench_api, workbench_db):
