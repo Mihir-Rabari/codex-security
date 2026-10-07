@@ -70,17 +70,18 @@ console.log(receipt.repositoryId, receipt.findingIds);
 The retained HTTP clients use these endpoints on the supplied base URL,
 preserving its base path:
 
-| Method | Path                                    | Response                                                              |
-| ------ | --------------------------------------- | --------------------------------------------------------------------- |
-| `POST` | `/v1/bulk/findings`                     | An array of stored finding IDs in request order.                      |
-| `GET`  | `/v1/finding/{id}/potential-duplicates` | `{finding, potentialDuplicates}` containing complete finding records. |
-| `POST` | `/v1/dedupe-groups`                     | Persisted groups with `groupId`, `findingIds`, and `createdAt`.       |
+| Method | Path                                    | Response                                                                 |
+| ------ | --------------------------------------- | ------------------------------------------------------------------------ |
+| `POST` | `/v1/bulk/findings`                     | An array acknowledging all submitted finding IDs; order does not matter. |
+| `GET`  | `/v1/finding/{id}/potential-duplicates` | `{finding, potentialDuplicates}` containing complete finding records.    |
+| `POST` | `/v1/dedupe-groups`                     | A successful JSON acknowledgement, such as `{}`.                         |
 
 Publication sends `{findings, repositoryId}`. Candidate requests include either
 `repositoryId` or `allRepositories=true`. Group writes send
 `{groups: [[findingId, ...], ...]}`; repeated membership must be idempotent for
-workflow retries. An explicit URL selects this remote contract instead of local
-SQLite. This package no longer implements or hosts the HTTP endpoints.
+workflow retries. Both POST endpoints must persist their writes before
+acknowledging them and return a JSON body. An explicit URL selects this remote
+contract instead of local SQLite. This package no longer implements or hosts the HTTP endpoints.
 
 ## Deduplicate a scan
 
@@ -180,14 +181,11 @@ exits successfully after saving the other accepted groups.
 
 Deduplication retrieves all candidate neighborhoods, screens them with
 `gpt-5.6-luna` at `xhigh`, then independently reviews nominated pairs with
-`gpt-5.6-sol` at `high`. A pair review can start after all screenings that cover
-it finish without a `DISTINCT` decision. Accepted pairs form groups only when
-no reviewed `DISTINCT` decision or refusal contradicts the group.
+`gpt-5.6-sol` at `high`. Accepted pairs form groups only when no reviewed
+`DISTINCT` decision or refusal contradicts the group.
 
 The default concurrency is 8. Set `--concurrency N` or SDK `concurrency: N` to
-change it; use 1 for serial execution. Candidate retrieval uses that limit, and
-screenings and ready pair reviews share one worker pool. Results are combined
-in input order, independent of completion order.
+change it; use 1 for serial execution.
 
 Reviews run on the SDK/CLI host using its Codex sign-in or environment API key;
 credentials are not sent to the findings service. Each review receives complete
@@ -198,16 +196,13 @@ requests; pair reviews use Codex's automatic approval reviewer. Web, plugins,
 and inherited MCP servers are disabled. Finding content and linked tickets do
 not authorize access to another target.
 
-Models must submit a validated decision. A session that ends without one gets
-one corrective turn. Invalid output and eligible transient failures can retry
-in fresh sessions, up to three sessions per review. Transient service failures
-allow up to three request attempts; HTTP retries honor `Retry-After`. Backoff
-occupies the job's concurrency slot.
+Models must submit a validated decision. Invalid output and eligible transient
+failures are retried automatically; HTTP retries honor `Retry-After`.
 
 Cancellation, authentication/configuration errors, permanent HTTP errors, and
 required-source-access blockers are not retried. Refusals are not retried or
-sent to another model. If candidate retrieval or review still fails, queued jobs
-stop and running jobs finish before the operation fails without posting groups.
+sent to another model. If candidate retrieval or review still fails, the
+operation fails without posting groups.
 A failed group-write request may already have committed; resubmitting the same
 memberships does not create duplicate groups. Non-cancellation review failures
 throw `DeduplicationReviewError`, with diagnostic text and `metadata` for the

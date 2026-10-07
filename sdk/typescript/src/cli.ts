@@ -3931,7 +3931,7 @@ export async function main(
           .positive()
           .default(DEFAULT_DEDUPE_CONCURRENCY)
           .describe(
-            "Maximum concurrent dedupe jobs across Luna and Sol; use 1 for serial execution.",
+            "Maximum concurrent deduplication jobs; use 1 for serial execution.",
           ),
         records: z
           .boolean()
