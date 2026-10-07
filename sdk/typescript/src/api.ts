@@ -3229,7 +3229,10 @@ export class CodexSecurity {
         );
       }
     } catch (recoveryError) {
-      notifyObserver(options, "onWarning")(
+      notifyObserver(
+        options,
+        "onWarning",
+      )(
         `Could not restore previous scan output: ${errorMessage(recoveryError)}`,
       );
     }
