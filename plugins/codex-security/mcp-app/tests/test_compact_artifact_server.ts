@@ -1,5 +1,5 @@
 import { readJson, snapshotScanDraft, writeJson } from "./support/json.ts";
-import { finding } from "./scan-draft-fixture.ts";
+import { workerDraft, finding } from "./scan-draft-fixture.ts";
 import { gitText } from "../scripts/git.mjs";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import type { TextContent } from "@modelcontextprotocol/sdk/types.js";
@@ -1291,12 +1291,7 @@ async function testDiscoveryWorkerToolList(bundle: string) {
     const input = {
       scanId,
       findings: [],
-      coverage: {
-        completeness: "complete",
-        surfaces: [],
-        explicitExclusions: [],
-        deferred: [],
-      },
+      coverage: workerDraft([]).coverage,
     };
 
     requireToolError(
@@ -1413,12 +1408,7 @@ async function testReducerWorkerToolList(bundle: string) {
   await writeJson(workerResultPath, {
     scanId,
     findings: [workerFinding],
-    coverage: {
-      completeness: "complete",
-      surfaces: [],
-      explicitExclusions: [],
-      deferred: [],
-    },
+    coverage: workerDraft([]).coverage,
   });
   await writeJson(previousReducerResultPath, {
     scanId,
