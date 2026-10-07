@@ -162,6 +162,17 @@ function normalizeHistory(database: DatabaseSync): void {
     ])
       moveMigration(database, from, to, mirrorNames.get(from)!);
   }
+  const sourceScopeName = migration(43).name;
+  for (const previewVersion of [34, 40, 41, 42])
+    moveMigration(database, previewVersion, 43, sourceScopeName);
+  const sourceScopeMigration = database
+    .prepare("SELECT name FROM schema_migrations WHERE version = 43")
+    .get();
+  if (sourceScopeMigration && sourceScopeMigration.name !== sourceScopeName) {
+    throw new Error(
+      "The Codex Security database has an unsupported source-scope migration history.",
+    );
+  }
   moveMigration(
     database,
     33,
@@ -421,7 +432,7 @@ export function applyMigrations(
         );
       } else if (item.version === 16) backfill = repairStableTargets(database);
       else if (applied.has(item.version)) {
-        if ([2, 12, 13, 26, 28, 31, 32].includes(item.version))
+        if ([2, 12, 13, 26, 28, 31, 32, 42, 43].includes(item.version))
           repairAdditive(database, item.version);
         else if (item.version === 11) repairDeepScan(database);
       } else {

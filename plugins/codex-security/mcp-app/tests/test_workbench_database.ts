@@ -28,6 +28,7 @@ const { openWorkbenchDatabase, databaseInfo } = (await importSource(
 const { applyMigrations, migrations } = (await importSource(
   "src/workbench/migrations.ts",
 )) as typeof Migrations;
+const currentVersion = Math.max(...migrations.map((item) => item.version));
 const temporary = createTemporaryDirectories(true);
 after(() => temporary.cleanup());
 
@@ -99,7 +100,7 @@ test("opens a private WAL database at the configured state path", async () => {
     assert.equal(
       database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()
         ?.count,
-      42,
+      migrations.length,
     );
     assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
     if (process.platform !== "win32") {
@@ -129,7 +130,7 @@ test("every released schema upgrades to the same current schema and remains idem
   const current = memory(t);
   applyMigrations(current);
   const expected = schema(current);
-  for (let version = 0; version <= 42; version++) {
+  for (let version = 0; version <= currentVersion; version++) {
     const database = memory(t, version);
     applyMigrations(database);
     assert.deepEqual(
@@ -243,7 +244,7 @@ test(
         database
           .prepare("SELECT MAX(version) AS version FROM schema_migrations")
           .get()?.version,
-        42,
+        currentVersion,
       );
     } finally {
       database.close();
@@ -253,6 +254,173 @@ test(
     });
   },
 );
+
+for (const previewVersion of [34, 40, 41, 42]) {
+  test(`database-info upgrades source-scope preview ${previewVersion} without losing scan data`, async () => {
+    const directory = await temporary.create("workbench-source-preview-");
+    const databasePath = join(directory, "workbench.sqlite3");
+    const old = new DatabaseSync(databasePath);
+    applyMigrations(
+      old,
+      migrations.filter((item) => item.version <= 32),
+    );
+    insertScan(old);
+    const sourceScope = migrations.find((item) => item.version === 43)!;
+    old.exec(sourceScope.statements.join("\n"));
+    old
+      .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
+      .run(previewVersion, sourceScope.name);
+    const scopes = JSON.stringify({
+      "synthetic/repository": ["src/original.ts"],
+    });
+    old.prepare("UPDATE scans SET source_scopes_json = ?").run(scopes);
+    old.close();
+
+    assert.equal((await databaseInfo(directory)).databasePath, databasePath);
+    const upgraded = new DatabaseSync(databasePath);
+    try {
+      assertMigrationNames(upgraded, 34, 40, 41, 42, 43);
+      assert.equal(
+        upgraded
+          .prepare(
+            "SELECT applied_at FROM schema_migrations WHERE version = 43",
+          )
+          .get()?.applied_at,
+        "original",
+      );
+      assert.equal(
+        upgraded
+          .prepare("SELECT source_scopes_json FROM scans WHERE id = 'scan'")
+          .get()?.source_scopes_json,
+        scopes,
+      );
+      assert.equal(
+        upgraded.prepare("SELECT name FROM scans WHERE id = 'scan'").get()
+          ?.name,
+        null,
+      );
+      assert.deepEqual(upgraded.prepare("PRAGMA foreign_key_check").all(), []);
+      const history = upgraded
+        .prepare("SELECT * FROM schema_migrations ORDER BY version")
+        .all();
+      await databaseInfo(directory);
+      assert.deepEqual(
+        upgraded
+          .prepare("SELECT * FROM schema_migrations ORDER BY version")
+          .all(),
+        history,
+      );
+    } finally {
+      upgraded.close();
+    }
+  });
+}
+
+test("database-info retains scan names from installed migration 42", async () => {
+  const directory = await temporary.create("workbench-released-names-");
+  const databasePath = join(directory, "workbench.sqlite3");
+  const old = new DatabaseSync(databasePath);
+  applyMigrations(
+    old,
+    migrations.filter((item) => item.version <= 42),
+  );
+  insertScan(old);
+  old.exec("UPDATE scans SET name = 'Original scan'");
+  const originalAppliedAt = old
+    .prepare("SELECT applied_at FROM schema_migrations WHERE version = 42")
+    .get()?.applied_at;
+  old.close();
+  await databaseInfo(directory);
+  const upgraded = new DatabaseSync(databasePath);
+  try {
+    assertMigrationNames(upgraded, 42, 43);
+    assert.equal(
+      upgraded.prepare("SELECT name FROM scans").get()?.name,
+      "Original scan",
+    );
+    assert.equal(
+      upgraded.prepare("SELECT source_scopes_json FROM scans").get()
+        ?.source_scopes_json,
+      null,
+    );
+    assert.equal(
+      upgraded
+        .prepare("SELECT applied_at FROM schema_migrations WHERE version = 42")
+        .get()?.applied_at,
+      originalAppliedAt,
+    );
+  } finally {
+    upgraded.close();
+  }
+});
+
+test("database-info repairs recorded scan-name and source-scope columns", async () => {
+  const directory = await temporary.create("workbench-source-repair-");
+  const databasePath = join(directory, "workbench.sqlite3");
+  const old = new DatabaseSync(databasePath);
+  applyMigrations(old);
+  insertScan(old);
+  const history = old
+    .prepare("SELECT * FROM schema_migrations ORDER BY version")
+    .all();
+  old.exec(
+    "ALTER TABLE scans DROP COLUMN name; ALTER TABLE scans DROP COLUMN source_scopes_json",
+  );
+  old.close();
+  await databaseInfo(directory);
+  const repaired = new DatabaseSync(databasePath);
+  try {
+    assert.deepEqual(
+      {
+        ...repaired
+          .prepare(
+            "SELECT name, source_scopes_json, target_revision FROM scans",
+          )
+          .get(),
+      },
+      { name: null, source_scopes_json: null, target_revision: "revision" },
+    );
+    assert.deepEqual(
+      repaired
+        .prepare("SELECT * FROM schema_migrations ORDER BY version")
+        .all(),
+      history,
+    );
+  } finally {
+    repaired.close();
+  }
+});
+
+test("database-info rejects unsupported source-scope history without changing it", async () => {
+  const directory = await temporary.create("workbench-source-unknown-");
+  const databasePath = join(directory, "workbench.sqlite3");
+  const old = new DatabaseSync(databasePath);
+  applyMigrations(old);
+  old.exec(
+    "UPDATE schema_migrations SET name = 'unknown source history' WHERE version = 43",
+  );
+  const history = old
+    .prepare("SELECT * FROM schema_migrations ORDER BY version")
+    .all();
+  const originalSchema = schema(old);
+  old.close();
+  await assert.rejects(
+    databaseInfo(directory),
+    /unsupported source-scope migration history/u,
+  );
+  const unchanged = new DatabaseSync(databasePath);
+  try {
+    assert.deepEqual(schema(unchanged), originalSchema);
+    assert.deepEqual(
+      unchanged
+        .prepare("SELECT * FROM schema_migrations ORDER BY version")
+        .all(),
+      history,
+    );
+  } finally {
+    unchanged.close();
+  }
+});
 
 test("preview index history does not skip findings, embedding or checkpoint migrations", (t) => {
   const database = memory(t);
@@ -721,7 +889,7 @@ test("retries an upgrade when another process holds the write lock beyond the bu
         database
           .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
           .get()?.count,
-        42,
+        migrations.length,
       );
       assert.equal(
         database.prepare("SELECT COUNT(*) AS count FROM security_targets").get()
