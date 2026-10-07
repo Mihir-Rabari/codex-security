@@ -1789,3 +1789,140 @@ def test_false_positive_feedback_follows_reopened_matched_group(history, redisco
         "falsePositives"
     ]
     assert bool(feedback) is not rediscover
+
+
+@pytest.mark.parametrize("earlier", ["verified", "unverified", "explicit-request"])
+def test_current_semantic_alias_excludes_superseded_checkout_verification(tmp_path, earlier):
+    state, root, repository = tmp_path / "state", tmp_path / "scans", tmp_path / "repository"
+    initialize_git_repository(repository)
+    (repository / "src").mkdir()
+    (repository / "src/extract.py").write_text("vulnerable\n")
+    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "-qm", "Synthetic initial revision"], check=True
+    )
+    first_revision = subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+    ).strip()
+    first = create_cli_scan(
+        state, root, repository, identity_anchor="earlier-alias", target_revision=first_revision
+    )
+    first_id = run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"]["findings"][
+        0
+    ]["occurrenceId"]
+    if earlier != "unverified":
+        verified_patch(state, first, first_id, repository, first_revision)
+    (repository / "src/extract.py").write_text("vulnerable\n")
+    (repository / "next-revision.txt").write_text("Synthetic later revision.\n")
+    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "-qm", "Synthetic next revision"], check=True
+    )
+    second_revision = subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+    ).strip()
+    second = create_cli_scan(
+        state, root, repository, identity_anchor="current-alias", target_revision=second_revision
+    )
+    second_id = run_workbench(state, "get-scan", "--scan-id", second["scanId"])["scan"]["findings"][
+        0
+    ]["occurrenceId"]
+    verified_patch(state, second, second_id, repository, second_revision)
+    save_scan_matches(state, first, second, confirmed_match(first_id, second_id))
+    requested = first_id if earlier == "explicit-request" else second_id
+    result = run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        requested,
+        "--status",
+        "closed",
+        "--close-reason",
+        "already_fixed",
+        check=False,
+    )
+    if earlier == "explicit-request":
+        assert result["returncode"] != 0 and "Repository HEAD changed" in result["stderr"]
+    else:
+        assert result["returncode"] == 0, result["stderr"]
+
+
+@pytest.mark.parametrize("selection", ["inherited", "unmatched", "local"])
+def test_false_positive_feedback_projects_inherited_linked_decision(linked_history, selection):
+    state, root, repository, linked, revision = linked_history
+    first = create_cli_scan(
+        state, root, repository, identity_anchor="reviewed", target_revision=revision
+    )
+    second = create_cli_scan(
+        state, root, linked, identity_anchor="linked-alias", target_revision=revision
+    )
+    first_id, second_id = [
+        run_workbench(state, "get-scan", "--scan-id", row["scanId"])["scan"]["findings"][0][
+            "occurrenceId"
+        ]
+        for row in [first, second]
+    ]
+    run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        first_id,
+        "--status",
+        "closed",
+        "--close-reason",
+        "false_positive",
+        "--note",
+        "Synthetic inherited dismissal.",
+    )
+    if selection == "inherited":
+        save_scan_matches(state, first, second, confirmed_match(first_id, second_id))
+    selected = repository if selection == "local" else linked
+    current = create_cli_scan(state, root, selected, complete=False, target_revision=revision)
+    feedback = run_workbench(state, "get-scan-feedback", "--scan-id", current["scanId"])[
+        "falsePositives"
+    ]
+    assert bool(feedback) is (selection != "unmatched")
+    if feedback:
+        assert feedback[0]["reason"] == "Synthetic inherited dismissal."
+
+
+@pytest.mark.parametrize("terminal", ["failed", "complete-control", "no-recurrence"])
+def test_false_positive_feedback_observes_sealed_stopped_recurrence(history, terminal):
+    state, root, repository = history
+    first = create_cli_scan(state, root, repository)
+    first_id = run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"]["findings"][
+        0
+    ]["occurrenceId"]
+    run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        first_id,
+        "--status",
+        "closed",
+        "--close-reason",
+        "false_positive",
+        "--note",
+        "Synthetic stale dismissal.",
+    )
+    if terminal == "complete-control":
+        create_cli_scan(state, root, repository)
+    elif terminal == "failed":
+        stopped = create_cli_scan(state, root, repository, complete=False)
+        scan_dir = Path(stopped["scanDir"])
+        write_completed_contract(scan_dir, stopped["scanId"], repository)
+        subprocess.run([sys.executable, str(FINALIZER), "--scan-dir", str(scan_dir)], check=True)
+        preserved = run_workbench(
+            state,
+            "fail-scan",
+            "--scan-id",
+            stopped["scanId"],
+            "--message",
+            "Synthetic interruption",
+        )
+        assert preserved["scan"]["findings"]
+    current = create_cli_scan(state, root, repository, complete=False)
+    feedback = run_workbench(state, "get-scan-feedback", "--scan-id", current["scanId"])[
+        "falsePositives"
+    ]
+    assert bool(feedback) is (terminal == "no-recurrence")

@@ -1867,9 +1867,11 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
                 """,
                 (json.dumps(sorted(indexed_finding["occurrence_ids"])),),
             ).fetchall()
-            verification_ids.update(
-                indexed_finding.get("active_occurrence_ids", {indexed_finding["occurrence_id"]})
+            active_finding = _indexed_scan_findings(connection, scan, include_resolved=False).get(
+                occurrence["id"]
             )
+            if active_finding is not None:
+                verification_ids.update(active_finding["active_occurrence_ids"])
         if args.status == "closed":
             for checked_occurrence in triaged_occurrences:
                 remediation = connection.execute(
@@ -2721,7 +2723,11 @@ def _require_finding_checkout_owner(
 
 
 def _indexed_scan_findings(
-    connection: sqlite3.Connection, scan: sqlite3.Row, *, through_scan: bool = False
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    *,
+    through_scan: bool = False,
+    include_resolved: bool = True,
 ) -> dict[str, dict[str, Any]]:
     if (
         connection.execute(
@@ -2744,7 +2750,7 @@ def _indexed_scan_findings(
         for finding in native_indexes._indexed_active_findings(
             connection,
             coverage_for_comparison,
-            include_resolved=True,
+            include_resolved=include_resolved,
             **scope,
         )
         for occurrence_id in finding.get("occurrence_ids", ())
