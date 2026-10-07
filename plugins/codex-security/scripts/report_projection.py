@@ -535,7 +535,7 @@ def _remediation_section(finding: dict[str, Any]) -> list[str]:
             )
         )
         if values:
-            lines.extend(["", f"{label}:", *_bullets(values, "None recorded.")])
+            lines.extend(_bullet_section(f"{label}:", values))
     return lines
 
 
