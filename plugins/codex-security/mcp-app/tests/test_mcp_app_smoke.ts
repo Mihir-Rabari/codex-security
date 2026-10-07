@@ -208,13 +208,6 @@ function startTestServer({
   );
 
   return {
-    initialize(name: string, capabilities: Record<string, unknown> = {}) {
-      return this.requestAndWait(1, "initialize", {
-        protocolVersion: "2025-11-25",
-        capabilities,
-        clientInfo: { name, version: "0.1.0" },
-      });
-    },
     notify(method: string, params = {}) {
       writeMessage(childProcess, { jsonrpc: "2.0", method, params });
     },
@@ -242,6 +235,16 @@ function startTestServer({
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
       throw new Error(`Timed out waiting for ${description}`);
+    },
+    initialize(name: string, capabilities: Record<string, unknown> = {}) {
+      return this.requestAndWait(1, "initialize", {
+        protocolVersion: "2025-11-25",
+        capabilities,
+        clientInfo: { name, version: "0.1.0" },
+      });
+    },
+    callTool(id: number, params: Record<string, unknown>) {
+      return this.requestAndWait(id, "tools/call", params);
     },
     async requestAndWait(id: number, method: string, params = {}) {
       writeMessage(childProcess, { jsonrpc: "2.0", id, method, params });
@@ -383,7 +386,7 @@ async function assertMissingPythonError() {
         "codex-security-missing-python-smoke",
       ),
     );
-    const response = await missingPythonServer.requestAndWait(2, "tools/call", {
+    const response = await missingPythonServer.callTool(2, {
       name: "inspect_codex_security_target",
       arguments: { targetPath: target },
     });
@@ -417,7 +420,7 @@ async function assertWorkbenchStdinFailureDoesNotCrashServer() {
   });
   try {
     assertNoError(await server.initialize("codex-security-early-exit-smoke"));
-    const response = await server.requestAndWait(2, "tools/call", {
+    const response = await server.callTool(2, {
       name: "update_codex_security_scan_context",
       arguments: {
         scanId: randomUUID(),
@@ -444,7 +447,7 @@ async function assertUnavailableUserInputFallback() {
         "codex-security-no-elicitation-smoke",
       ),
     );
-    const response = await noElicitationServer.requestAndWait(2, "tools/call", {
+    const response = await noElicitationServer.callTool(2, {
       name: "request_codex_security_user_input",
       arguments: {
         questions: [
@@ -474,7 +477,7 @@ async function assertWorkspaceWorksWithoutUiCapability() {
   });
   try {
     assertNoError(await nonUiServer.initialize("codex-security-non-ui-smoke"));
-    const response = await nonUiServer.requestAndWait(2, "tools/call", {
+    const response = await nonUiServer.callTool(2, {
       name: "open_codex_security_workspace",
       arguments: { targetPath: target, mode: "standard", scope: "." },
       _meta: { "openai/threadId": "fixture-non-ui-thread" },
@@ -514,7 +517,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     assertNoError(
       await headlessServer.initialize("codex-security-headless-smoke"),
     );
-    const withoutOwner = await headlessServer.requestAndWait(2, "tools/call", {
+    const withoutOwner = await headlessServer.callTool(2, {
       name: "start_codex_security_standard_scan",
       arguments: { targetPath: target },
     });
@@ -524,7 +527,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       /owning Codex thread context/,
     );
 
-    const started = await headlessServer.requestAndWait(3, "tools/call", {
+    const started = await headlessServer.callTool(3, {
       name: "start_codex_security_standard_scan",
       arguments: {
         targetPath: target,
@@ -556,7 +559,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     assert.equal(result.scan.userContext, headlessContext);
     assert.equal(result.workspace.userContext, headlessContext);
 
-    const joined = await headlessServer.requestAndWait(4, "tools/call", {
+    const joined = await headlessServer.callTool(4, {
       name: "start_codex_security_standard_scan",
       arguments: {
         targetPath: target,
@@ -572,7 +575,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       result.handoffClaimToken,
     );
 
-    const wrongThread = await headlessServer.requestAndWait(6, "tools/call", {
+    const wrongThread = await headlessServer.callTool(6, {
       name: "list_codex_security_review_items",
       arguments: { scanId: result.scanId },
       _meta: { "openai/threadId": "fixture-headless-other-thread" },
@@ -583,25 +586,21 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       /current continuation claim/,
     );
 
-    const standardInventory = await headlessServer.requestAndWait(
-      7,
-      "tools/call",
-      {
-        name: "list_codex_security_review_items",
-        arguments: {
-          scanId: result.scanId,
-          handoffClaimToken: result.handoffClaimToken,
-        },
-        _meta: { "openai/threadId": "fixture-headless-delegated-thread" },
+    const standardInventory = await headlessServer.callTool(7, {
+      name: "list_codex_security_review_items",
+      arguments: {
+        scanId: result.scanId,
+        handoffClaimToken: result.handoffClaimToken,
       },
-    );
+      _meta: { "openai/threadId": "fixture-headless-delegated-thread" },
+    });
     assert.equal(standardInventory.result.isError, true);
     assert.match(
       standardInventory.result.content[0].text,
       /only available for Deep or diff scans/,
     );
 
-    const progressed = await headlessServer.requestAndWait(8, "tools/call", {
+    const progressed = await headlessServer.callTool(8, {
       name: "update_codex_security_scan_progress",
       arguments: {
         scanId: result.scanId,
@@ -612,7 +611,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     });
     assertNoError(progressed);
 
-    const advanced = await headlessServer.requestAndWait(81, "tools/call", {
+    const advanced = await headlessServer.callTool(81, {
       name: "update_codex_security_scan_progress",
       arguments: {
         scanId: result.scanId,
@@ -622,18 +621,14 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       _meta: { "openai/threadId": ownerThread },
     });
     assertNoError(advanced);
-    const rejoinedAfterPreflight = await headlessServer.requestAndWait(
-      82,
-      "tools/call",
-      {
-        name: "start_codex_security_standard_scan",
-        arguments: {
-          targetPath: target,
-          userContext: headlessContext,
-        },
-        _meta: { "openai/threadId": ownerThread },
+    const rejoinedAfterPreflight = await headlessServer.callTool(82, {
+      name: "start_codex_security_standard_scan",
+      arguments: {
+        targetPath: target,
+        userContext: headlessContext,
       },
-    );
+      _meta: { "openai/threadId": ownerThread },
+    });
     assertNoError(rejoinedAfterPreflight);
     assert.equal(
       rejoinedAfterPreflight.result.structuredContent.startDisposition,
@@ -649,7 +644,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       result.scanId,
       result.scan.contract.target.requiredSnapshotDigest,
     );
-    const completed = await headlessServer.requestAndWait(9, "tools/call", {
+    const completed = await headlessServer.callTool(9, {
       name: "complete_codex_security_scan",
       arguments: {
         scanId: result.scanId,
@@ -709,7 +704,7 @@ async function assertDeepScanPersistsRetryableWorkerStartupError() {
       Date.now() - pollingStarted < 30_000;
       requestId++
     ) {
-      const listed = await deepServer.requestAndWait(requestId, "tools/call", {
+      const listed = await deepServer.callTool(requestId, {
         name: "list_codex_security_scans",
         arguments: {},
       });
@@ -750,7 +745,7 @@ async function assertDeepScanPersistsRetryableWorkerStartupError() {
     );
     assert.equal(startupErrorWorker.status, "running");
 
-    const canceled = await deepServer.requestAndWait(3, "tools/call", {
+    const canceled = await deepServer.callTool(3, {
       name: "cancel_codex_security_scan",
       arguments: { scanId: scan.scanId },
       _meta: { "openai/threadId": "fixture-deep-inventory-thread" },
@@ -784,18 +779,14 @@ with sqlite3.connect(sys.argv[1]) as connection:
       publicationFailure,
       scan.scanId,
     ]);
-    const canceledWithPublicationFailure = await deepServer.requestAndWait(
-      4,
-      "tools/call",
-      {
-        name: "start_codex_security_deep_scan",
-        arguments: { scanId: scan.scanId },
-        _meta: {
-          "openai/threadId": "fixture-deep-inventory-thread",
-          "codex/sandbox-state-meta": parentSandboxState,
-        },
+    const canceledWithPublicationFailure = await deepServer.callTool(4, {
+      name: "start_codex_security_deep_scan",
+      arguments: { scanId: scan.scanId },
+      _meta: {
+        "openai/threadId": "fixture-deep-inventory-thread",
+        "codex/sandbox-state-meta": parentSandboxState,
       },
-    );
+    });
     const publicationFailureText = canceledWithPublicationFailure.result.content
       .map((item: { text: string }) => item.text)
       .join(" ");
@@ -921,7 +912,7 @@ exec "$CODEX_SECURITY_TEST_SYSTEM_PYTHON" "$@"
       { mode: 0o755 },
     );
     assertNoError(
-      await bundledPythonServer.requestAndWait(2, "tools/call", {
+      await bundledPythonServer.callTool(2, {
         name: "inspect_codex_security_target",
         arguments: { targetPath: target },
       }),
@@ -1581,7 +1572,7 @@ try {
       preflight_action: "Leave paused",
     },
   });
-  const invalidUserInput = await requestAndWait(9001, "tools/call", {
+  const invalidUserInput = await testServer.callTool(9001, {
     name: "request_codex_security_user_input",
     arguments: {
       questions: [
@@ -2263,7 +2254,7 @@ try {
     false,
   );
 
-  const inspectedSetup = await requestAndWait(46, "tools/call", {
+  const inspectedSetup = await testServer.callTool(46, {
     name: "inspect_codex_security_setup",
     arguments: {
       targetPath: gitTarget,
@@ -2332,7 +2323,7 @@ try {
     undefined,
   );
 
-  const inspected = await requestAndWait(40, "tools/call", {
+  const inspected = await testServer.callTool(40, {
     name: "inspect_codex_security_target",
     arguments: { targetPath: target },
   });
@@ -2412,7 +2403,7 @@ try {
   );
 
   const handoffClaimToken = randomUUID();
-  const claimedHandoff = await requestAndWait(2002, "tools/call", {
+  const claimedHandoff = await testServer.callTool(2002, {
     name: "claim_codex_security_scan_handoff_delivery",
     arguments: { claimToken: handoffClaimToken, scanId },
   });
@@ -2421,7 +2412,7 @@ try {
     claimedHandoff.result.structuredContent.workspace.results.handoffClaimToken,
     handoffClaimToken,
   );
-  const attachedHandoff = await requestAndWait(20021, "tools/call", {
+  const attachedHandoff = await testServer.callTool(20021, {
     name: "attach_codex_security_scan_continuation_thread",
     arguments: {
       claimToken: handoffClaimToken,
@@ -2519,7 +2510,7 @@ try {
   );
 
   const appUserContext = "Focus on account recovery. ".repeat(120).trim();
-  const appUpdatedContext = await requestAndWait(92011, "tools/call", {
+  const appUpdatedContext = await testServer.callTool(92011, {
     name: "update_codex_security_scan_context_from_app",
     arguments: { scanId, userContext: appUserContext },
   });
@@ -2746,7 +2737,7 @@ try {
 
   await writeCompletedContract(initializedScanDir, scanId, snapshotDigest);
   await writeFile(path.join(target, "src/a.py"), "changed\n");
-  const completed = await requestAndWait(802, "tools/call", {
+  const completed = await testServer.callTool(802, {
     name: "complete_codex_security_scan",
     arguments: { handoffClaimToken, scanId },
   });
@@ -2764,7 +2755,9 @@ try {
     completed.result.structuredContent.workspace.results.progress.status,
     "complete",
   );
-  const refreshed = await callRequestScan(10, { arguments: { scanId } });
+  const refreshed = await callRequestScan(10, {
+    arguments: { scanId },
+  });
   assertNoError(refreshed);
   const results = refreshed.result.structuredContent.scan;
   assert.equal(results.findings.length, 2);
@@ -2807,7 +2800,7 @@ try {
   );
 
   const generationActionToken = randomUUID();
-  const rejectedClosedPatch = await requestAndWait(159, "tools/call", {
+  const rejectedClosedPatch = await testServer.callTool(159, {
     name: "request_codex_security_finding_remediation",
     arguments: {
       actionToken: generationActionToken,
@@ -2827,7 +2820,7 @@ try {
 
   const canceledRequestId = randomUUID();
   const canceledActionToken = randomUUID();
-  const requestedThenCanceledPatch = await requestAndWait(500, "tools/call", {
+  const requestedThenCanceledPatch = await testServer.callTool(500, {
     name: "request_codex_security_finding_remediation",
     arguments: {
       actionToken: canceledActionToken,
@@ -2836,7 +2829,7 @@ try {
     },
   });
   assertNoError(requestedThenCanceledPatch);
-  const canceledPatch = await requestAndWait(501, "tools/call", {
+  const canceledPatch = await testServer.callTool(501, {
     name: "cancel_codex_security_finding_remediation_request",
     arguments: {
       actionToken: canceledActionToken,
@@ -2852,7 +2845,7 @@ try {
     },
   );
 
-  const requestedPatch = await requestAndWait(61, "tools/call", {
+  const requestedPatch = await testServer.callTool(61, {
     name: "request_codex_security_finding_remediation",
     arguments: {
       actionToken: generationActionToken,
@@ -2910,7 +2903,7 @@ try {
   );
 
   const applyActionToken = randomUUID();
-  const requestedApply = await requestAndWait(65, "tools/call", {
+  const requestedApply = await testServer.callTool(65, {
     name: "request_codex_security_finding_remediation_action",
     arguments: {
       action: "apply",
@@ -2931,7 +2924,7 @@ try {
       .version,
     3,
   );
-  const markedApplyDelivered = await requestAndWait(166, "tools/call", {
+  const markedApplyDelivered = await testServer.callTool(166, {
     name: "mark_codex_security_finding_remediation_delivered",
     arguments: {
       actionToken: applyActionToken,
@@ -2970,7 +2963,7 @@ try {
   );
 
   const verifyActionToken = randomUUID();
-  const requestedVerify = await requestAndWait(168, "tools/call", {
+  const requestedVerify = await testServer.callTool(168, {
     name: "request_codex_security_finding_remediation_action",
     arguments: {
       action: "verify",
@@ -3042,7 +3035,7 @@ try {
     "Focused remediation checks passed.",
   );
 
-  const findingsPage = await requestAndWait(67, "tools/call", {
+  const findingsPage = await testServer.callTool(67, {
     name: "list_codex_security_findings",
     arguments: { scanId, offset: 0, limit: 1 },
   });
@@ -3056,7 +3049,7 @@ try {
     1,
   );
   assert.equal(findingsPage.result.structuredContent.findingsPage.total, 2);
-  const filteredFindingsPage = await requestAndWait(94001, "tools/call", {
+  const filteredFindingsPage = await testServer.callTool(94001, {
     name: "list_codex_security_findings",
     arguments: {
       scanId,
@@ -3078,7 +3071,7 @@ try {
     1,
   );
 
-  const csvExport = await requestAndWait(63, "tools/call", {
+  const csvExport = await testServer.callTool(63, {
     name: "export_codex_security_findings",
     arguments: { scanId, format: "csv" },
   });
@@ -3092,7 +3085,7 @@ try {
     /occurrence_id,finding_id,title/,
   );
 
-  const sarifExport = await requestAndWait(64, "tools/call", {
+  const sarifExport = await testServer.callTool(64, {
     name: "export_codex_security_findings",
     arguments: { scanId, format: "sarif" },
   });
@@ -3138,7 +3131,7 @@ try {
     rejectedMissingThreadCancel.result.content[0].text,
     /continuation thread.*Codex Security workbench/,
   );
-  const canceledFromNativeRoute = await requestAndWait(2210, "tools/call", {
+  const canceledFromNativeRoute = await testServer.callTool(2210, {
     name: "cancel_codex_security_scan_from_app",
     arguments: { scanId: canceledScanId },
   });
@@ -3174,7 +3167,7 @@ try {
   const fallbackScanId =
     fallbackStarted.result.structuredContent.workspace.results.scanId;
   const fallbackClaimToken = `recovery_${randomUUID()}`;
-  const fallbackClaimed = await requestAndWait(2012, "tools/call", {
+  const fallbackClaimed = await testServer.callTool(2012, {
     name: "claim_codex_security_scan_handoff_delivery",
     arguments: {
       claimToken: fallbackClaimToken,
@@ -3188,7 +3181,7 @@ try {
       .handoffClaimToken,
     fallbackClaimToken,
   );
-  const fallbackAttached = await requestAndWait(2017, "tools/call", {
+  const fallbackAttached = await testServer.callTool(2017, {
     name: "attach_codex_security_scan_continuation_thread",
     arguments: {
       claimToken: fallbackClaimToken,
@@ -3259,7 +3252,7 @@ try {
       .handoffClaimToken,
     undefined,
   );
-  const fallbackAppAcknowledgement = await requestAndWait(2014, "tools/call", {
+  const fallbackAppAcknowledgement = await testServer.callTool(2014, {
     name: "mark_codex_security_scan_handoff_delivered",
     arguments: { claimToken: fallbackClaimToken, scanId: fallbackScanId },
   });
@@ -3292,7 +3285,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
     staleRecoveryContext.result.content[0].text,
     /handoff delivery could not be recorded|owned by another continuation/i,
   );
-  const scanList = await requestAndWait(2212, "tools/call", {
+  const scanList = await testServer.callTool(2212, {
     name: "list_codex_security_scans",
     arguments: {},
   });
@@ -3304,7 +3297,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
   assert.equal(listedFallback.progress.status, "running");
   assert.equal("artifacts" in listedFallback, false);
   assert.equal("findings" in listedFallback, false);
-  const globalFindings = await requestAndWait(2213, "tools/call", {
+  const globalFindings = await testServer.callTool(2213, {
     name: "list_codex_security_global_findings",
     arguments: { limit: 1 },
   });
@@ -3319,7 +3312,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
   assert.equal(indexedFinding.status, "open");
   assert.equal(indexedFinding.occurrenceCount, 1);
   assert.match(indexedFinding.targetId, /^target_sha256_[0-9a-f]{64}$/);
-  const globalFindingsNext = await requestAndWait(2215, "tools/call", {
+  const globalFindingsNext = await testServer.callTool(2215, {
     name: "list_codex_security_global_findings",
     arguments: { limit: 20, offset: 1 },
   });
@@ -3328,7 +3321,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
   assert.equal(globalFindingsNext.result.structuredContent.limit, 20);
   assert.equal(globalFindingsNext.result.structuredContent.offset, 1);
   assert.equal(globalFindingsNext.result.structuredContent.nextOffset, null);
-  const filteredGlobalFindings = await requestAndWait(94002, "tools/call", {
+  const filteredGlobalFindings = await testServer.callTool(94002, {
     name: "list_codex_security_global_findings",
     arguments: {
       limit: 1,
@@ -3349,7 +3342,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
     filteredGlobalFindings.result.structuredContent.nextOffset,
     null,
   );
-  const repositories = await requestAndWait(2214, "tools/call", {
+  const repositories = await testServer.callTool(2214, {
     name: "list_codex_security_repositories",
     arguments: {},
   });
@@ -3369,7 +3362,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
         scan.targetId === indexedFinding.targetId,
     ).length,
   );
-  const filteredScans = await requestAndWait(94003, "tools/call", {
+  const filteredScans = await testServer.callTool(94003, {
     name: "list_codex_security_scans",
     arguments: {
       limit: 1,
@@ -3385,7 +3378,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
     fallbackScanId,
   );
   assert.equal(filteredScans.result.structuredContent.limit, 1);
-  const filteredRepositories = await requestAndWait(94004, "tools/call", {
+  const filteredRepositories = await testServer.callTool(94004, {
     name: "list_codex_security_repositories",
     arguments: {
       limit: 1,
@@ -3401,7 +3394,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
     ),
     [indexedFinding.targetId],
   );
-  const rotatedAttached = await requestAndWait(2030, "tools/call", {
+  const rotatedAttached = await testServer.callTool(2030, {
     name: "attach_codex_security_scan_continuation_thread",
     arguments: {
       claimToken: rotatedFallbackClaimToken,
@@ -3431,7 +3424,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
     },
   ]) {
     for (const staleClaimToken of [undefined, fallbackClaimToken]) {
-      const rejected = await requestAndWait(rejectedRequestId++, "tools/call", {
+      const rejected = await testServer.callTool(rejectedRequestId++, {
         name: operation.name,
         arguments: {
           ...operation.arguments,
@@ -3456,7 +3449,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
     },
   });
   assertNoError(rotatedProgress);
-  const rotatedFailure = await requestAndWait(2039, "tools/call", {
+  const rotatedFailure = await testServer.callTool(2039, {
     name: "fail_codex_security_scan",
     arguments: {
       handoffClaimToken: rotatedFallbackClaimToken,
@@ -3469,7 +3462,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
     rotatedFailure.result.structuredContent.scan.progress.status,
     "failed",
   );
-  const unavailableRecovery = await requestAndWait(2040, "tools/call", {
+  const unavailableRecovery = await testServer.callTool(2040, {
     name: "recover_codex_security_scan_results",
     arguments: { scanId: fallbackScanId },
   });
@@ -3531,12 +3524,12 @@ with sqlite3.connect(sys.argv[1]) as connection:
   const invalidScanId =
     invalidScanStarted.result.structuredContent.workspace.results.scanId;
   const invalidScanClaimToken = randomUUID();
-  const invalidScanClaimed = await requestAndWait(9402, "tools/call", {
+  const invalidScanClaimed = await testServer.callTool(9402, {
     name: "claim_codex_security_scan_handoff_delivery",
     arguments: { claimToken: invalidScanClaimToken, scanId: invalidScanId },
   });
   assertNoError(invalidScanClaimed);
-  const prematureCompletion = await requestAndWait(9403, "tools/call", {
+  const prematureCompletion = await testServer.callTool(9403, {
     name: "complete_codex_security_scan",
     arguments: {
       handoffClaimToken: invalidScanClaimToken,
