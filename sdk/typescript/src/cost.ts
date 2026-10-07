@@ -29,6 +29,13 @@ import {
 
 export { estimateScanCost, formatUsd, type ScanCost } from "./cost-model.js";
 
+/** A persisted worker session discovered during this run. Contains no model text. */
+export interface ScanWorkerEvent {
+  kind: "observed";
+  /** Scan-local number shared with activity and session observers. */
+  worker: number;
+}
+
 export interface ScanSessionEvent {
   threadId: string;
   parentThreadId: string | null;
@@ -46,7 +53,6 @@ interface SessionReasoning {
 interface SessionUsage {
   offset: number;
   pendingLine: Buffer[];
-  pendingLineBytes: number;
   unreadable: boolean;
   threadId: string | null;
   parentThreadId: string | null;
@@ -91,6 +97,7 @@ interface ScanCostTrackerOptions {
   onActivity?: (activity: ScanActivity) => void;
   onProgress?: (progress: ScanProgress) => void;
   onSessionEvent?: (event: ScanSessionEvent) => void;
+  onWorkerEvent?: (event: ScanWorkerEvent) => void;
   onError?: (error: unknown) => void;
 }
 
@@ -106,7 +113,6 @@ function createSessionUsage(): SessionUsage {
   return {
     offset: 0,
     pendingLine: [],
-    pendingLineBytes: 0,
     unreadable: false,
     threadId: null,
     parentThreadId: null,
@@ -148,6 +154,7 @@ export class ScanCostTracker {
   readonly #reportedSessionEvents = new Map<string, Set<string>>();
   readonly #reportedActivities = new Map<string, Set<string>>();
   #threadId: string | null = null;
+  #observingWorkers = true;
   #timer: NodeJS.Timeout | null = null;
   #pending: Promise<void> = Promise.resolve();
   #snapshot: ScanCostSnapshot = { usage: null, cost: null };
@@ -197,7 +204,8 @@ export class ScanCostTracker {
       this.#options.onCostLowerBound === undefined &&
       this.#options.onActivity === undefined &&
       this.#options.onProgress === undefined &&
-      this.#options.onSessionEvent === undefined
+      this.#options.onSessionEvent === undefined &&
+      this.#options.onWorkerEvent === undefined
     ) {
       return;
     }
@@ -239,7 +247,11 @@ export class ScanCostTracker {
     clearInterval(this.#timer ?? undefined);
     this.#timer = null;
     if (fallbackUsage !== undefined) this.recordUsage(fallbackUsage);
-    await this.refresh();
+    try {
+      await this.refresh();
+    } finally {
+      this.#observingWorkers = false;
+    }
     if (
       this.#attribution !== null ||
       this.#receipts.size > 0 ||
@@ -397,8 +409,13 @@ export class ScanCostTracker {
       }
       let worker: number | undefined;
       if (threadId !== this.#threadId) {
-        worker = this.#workers.get(threadId) ?? this.#workers.size + 1;
-        this.#workers.set(threadId, worker);
+        worker = this.#workers.get(threadId);
+        if (worker === undefined) {
+          worker = this.#workers.size + 1;
+          this.#workers.set(threadId, worker);
+          if (this.#observingWorkers)
+            this.#options.onWorkerEvent?.({ kind: "observed", worker });
+        }
       }
       for (const { index, event } of session.events?.splice(0) ?? []) {
         let reported = this.#reportedSessionEvents.get(threadId);
@@ -448,8 +465,8 @@ export class ScanCostTracker {
         (session.usage?.total_tokens ?? -1) >
           (previous.usage?.total_tokens ?? -1) ||
         (session.usage?.total_tokens === previous.usage?.total_tokens &&
-          session.pendingLineBytes === 0 &&
-          previous.pendingLineBytes > 0)
+          session.pendingLine.length === 0 &&
+          previous.pendingLine.length > 0)
       ) {
         usageSessions.set(threadId, session);
       }
@@ -498,7 +515,7 @@ export class ScanCostTracker {
         session.expectedResponseTokens > session.responseTokens
       )
         incomplete = true;
-      if (session.pendingLineBytes > 0 && !this.#receipts.get(threadId))
+      if (session.pendingLine.length > 0 && !this.#receipts.get(threadId))
         incomplete = true;
     }
     let usage: ScanTokenUsage | null = null;
@@ -716,7 +733,6 @@ async function readSessionUsage(
       } catch (error) {
         session.unreadable = true;
         session.pendingLine = [];
-        session.pendingLineBytes = 0;
         throw error;
       }
     }
@@ -736,17 +752,15 @@ function readSessionChunk(
     const newline = contents.indexOf(0x0a, lineStart);
     const lineEnd = newline === -1 ? contents.length : newline;
     const fragment = contents.subarray(lineStart, lineEnd);
-    const lineBytes = session.pendingLineBytes + fragment.length;
 
     if (newline === -1) {
       if (fragment.length > 0) {
         session.pendingLine.push(Buffer.from(fragment));
-        session.pendingLineBytes = lineBytes;
       }
       return;
     }
 
-    if (session.pendingLineBytes === 0) {
+    if (session.pendingLine.length === 0) {
       readSessionEvent(
         fragment.toString("utf8"),
         session,
@@ -756,13 +770,12 @@ function readSessionChunk(
     } else {
       if (fragment.length > 0) session.pendingLine.push(Buffer.from(fragment));
       readSessionEvent(
-        Buffer.concat(session.pendingLine, lineBytes).toString("utf8"),
+        Buffer.concat(session.pendingLine).toString("utf8"),
         session,
         repository,
         attribution,
       );
       session.pendingLine = [];
-      session.pendingLineBytes = 0;
     }
     lineStart = newline + 1;
   }

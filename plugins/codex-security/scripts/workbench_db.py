@@ -42,12 +42,6 @@ import workbench_saved_results as saved_results
 import workbench_scan_history as scan_history
 import workbench_scan_usage as scan_usage
 import workbench_severity as severity
-from filesystem_identity import (
-    serialize_filesystem_identity as serialize_filesystem_identity,
-)
-from filesystem_identity import (
-    stored_filesystem_identity_matches as stored_filesystem_identity_matches,
-)
 from finalize_scan_contract import (
     PRODUCER_NAME,
     ContractError,
@@ -942,7 +936,7 @@ def _start_prompt_driven_scan(
     target_root = scan_target_root(args.scan_root, target)
 
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         current_target = require_remediation_target(target_path)
         current_diff_target = (
             require_diff_target(
@@ -1061,10 +1055,6 @@ def _start_prompt_driven_scan(
             )
             if claimed.rowcount != 1:
                 raise SystemExit("Codex Security headless scan ownership could not be recorded.")
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return {**scan_context(connection, scan_id), "startDisposition": "created"}
 
 
@@ -1805,24 +1795,6 @@ def coverage_for_comparison(scan: sqlite3.Row) -> dict[str, Any]:
     return saved_results.coverage_for_comparison(_WORKBENCH_DB_CONTEXT, scan)
 
 
-def preserve_scan_results_locked(connection: sqlite3.Connection, scan_id: str) -> bool:
-    return saved_results.preserve_scan_results_locked(_WORKBENCH_DB_CONTEXT, connection, scan_id)
-
-
-def recover_scan_results(
-    connection: sqlite3.Connection, args: argparse.Namespace
-) -> dict[str, Any]:
-    return saved_results.recover_scan_results(_WORKBENCH_DB_CONTEXT, connection, args)
-
-
-def fail_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    return saved_results.fail_scan(_WORKBENCH_DB_CONTEXT, connection, args)
-
-
-def cancel_scan_locked(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    return saved_results.cancel_scan_locked(_WORKBENCH_DB_CONTEXT, connection, args)
-
-
 def preserve_stopped_results_after_transition(connection: sqlite3.Connection, scan_id: str) -> None:
     saved_results.preserve_stopped_results_after_transition(
         _WORKBENCH_DB_CONTEXT, connection, scan_id
@@ -1927,7 +1899,7 @@ def request_finding_remediation(
 ) -> dict[str, Any]:
     request_id = require_uuid(args.request_id, "request-id")
     action_token = require_uuid(args.action_token, "action-token")
-    try:
+    with connection:
         occurrence = require_occurrence(connection, args.occurrence_id)
         require_finding_open(connection, occurrence["id"])
         scan = require_scan(connection, occurrence["scan_id"])
@@ -2016,10 +1988,6 @@ def request_finding_remediation(
                 timestamp,
             ),
         )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return scan_context(connection, occurrence["scan_id"])
 
 
@@ -2028,7 +1996,7 @@ def request_finding_remediation_action(
 ) -> dict[str, Any]:
     request_id = require_uuid(args.request_id, "request-id")
     action_token = require_uuid(args.action_token, "action-token")
-    try:
+    with connection:
         occurrence = require_occurrence(connection, args.occurrence_id)
         require_finding_open(connection, occurrence["id"])
         scan = require_scan(connection, occurrence["scan_id"])
@@ -2092,10 +2060,6 @@ def request_finding_remediation_action(
             raise SystemExit(
                 "This remediation request changed. Refresh it before recording an update."
             )
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     return scan_context(connection, occurrence["scan_id"])
 
 
@@ -2105,7 +2069,7 @@ def claim_finding_remediation_resend(
     request_id = require_uuid(args.request_id, "request-id")
     action_token = require_uuid(args.action_token, "action-token")
     connection.execute("BEGIN IMMEDIATE")
-    try:
+    with connection:
         timestamp = now()
         occurrence = require_occurrence(connection, args.occurrence_id)
         require_finding_open(connection, occurrence["id"])
@@ -2172,10 +2136,6 @@ def claim_finding_remediation_resend(
             unavailable = "This remediation host request is still owned by another panel. Retry after its lease expires."
         if updated.rowcount != 1:
             raise SystemExit(unavailable)
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
     result = scan_context(connection, occurrence["scan_id"])
     result["actionToken"] = claimed_token
     return result
@@ -2349,10 +2309,6 @@ def set_finding_remediation(
                 "This remediation request changed. Refresh it before recording an update."
             )
     return scan_context(connection, occurrence["scan_id"])
-
-
-def export_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    return publication.export_findings(_WORKBENCH_PUBLICATION_CONTEXT, connection, args)
 
 
 def require_reviewed_patch_applied(
@@ -2763,6 +2719,7 @@ def scan_result(
         "mode": scan["mode"],
         "model": scan["model"],
         "diffTarget": stored_diff_target(scan),
+        "name": scan["name"],
         "progress": progress_result,
         "reasoningEffort": scan["reasoning_effort"],
         "remediationAvailable": remediation_available,
@@ -3255,10 +3212,7 @@ def read_json_object(path: Path) -> dict[str, Any]:
     return payload
 
 
-_WORKBENCH_PUBLICATION_CONTEXT = SimpleNamespace(**globals())
-
-
-_WORKBENCH_DB_CONTEXT = SimpleNamespace(**globals())
+_WORKBENCH_PUBLICATION_CONTEXT = _WORKBENCH_DB_CONTEXT = SimpleNamespace(**globals())
 
 
 def main(*, select_finalization: bool = False, with_execution_settings: bool = False) -> None:
@@ -3347,6 +3301,10 @@ def main(*, select_finalization: bool = False, with_execution_settings: bool = F
             result = deep_scan.record_deep_scan_publication_failure(connection, args)
         elif args.command == "get-scan":
             result = scan_context(connection, args.scan_id, args.occurrence_id)
+        elif args.command == "rename-scan":
+            result = scan_history.rename_scan(
+                connection, require_scan(connection, args.scan_id), args.name
+            )
         elif args.command == "get-scan-feedback":
             result = get_scan_feedback(connection, require_scan(connection, args.scan_id))
         elif args.command == "list-scans":
@@ -3416,11 +3374,11 @@ def main(*, select_finalization: bool = False, with_execution_settings: bool = F
         elif args.command == "cancel-scan":
             result = saved_results.cancel_scan(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "fail-scan":
-            result = fail_scan(connection, args)
+            result = saved_results.fail_scan(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "preserve-scan-results":
             result = saved_results.preserve_scan_results(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "recover-scan-results":
-            result = recover_scan_results(connection, args)
+            result = saved_results.recover_scan_results(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "write-scan-draft":
             result = saved_results.write_scan_draft(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "save-scan-artifact":
@@ -3461,7 +3419,7 @@ def main(*, select_finalization: bool = False, with_execution_settings: bool = F
                 _WORKBENCH_PUBLICATION_CONTEXT, connection, args
             )
         elif args.command == "export-findings":
-            result = export_findings(connection, args)
+            result = publication.export_findings(_WORKBENCH_PUBLICATION_CONTEXT, connection, args)
         elif args.command == "database-info":
             result = {"databasePath": str(database_path())}
         elif args.command == "severity-classification":

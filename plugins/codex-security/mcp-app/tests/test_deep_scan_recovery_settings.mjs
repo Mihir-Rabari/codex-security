@@ -156,6 +156,7 @@ http_headers = { Authorization = "synthetic-secret" }
     { model: "original-model", reasoningEffort: "ultra" },
     {
       filesystemDenies: ["/fixture/original-deny"],
+      literalFilesystemDenies: ["/fixture/account [original]"],
       globScanMaxDepth: 3,
     },
     {
@@ -163,6 +164,29 @@ http_headers = { Authorization = "synthetic-secret" }
       CODEX_HOME: root,
       CODEX_SECURITY_CONFIG_PATH: configPath,
     },
+  );
+  assert.deepEqual(captured.parentSandbox.literalFilesystemDenies, [
+    "/fixture/account [original]",
+  ]);
+  const resumedSandbox = restoreSettings(captured, {
+    filesystemDenies: ["/fixture/current-deny"],
+    literalFilesystemDenies: [
+      "/fixture/account [original]",
+      "/fixture/account [current]",
+    ],
+  }).parentSandbox;
+  assert.deepEqual(resumedSandbox.literalFilesystemDenies, [
+    "/fixture/account [original]",
+    "/fixture/account [current]",
+  ]);
+  assert.deepEqual(resumedSandbox.filesystemDenies, [
+    "/fixture/original-deny",
+    "/fixture/current-deny",
+  ]);
+  assert.equal(
+    restoreSettings(settings, { filesystemDenies: [] }).parentSandbox
+      .literalFilesystemDenies,
+    undefined,
   );
   assert.equal(captured.model, "original-model");
   assert.equal(captured.modelProvider, "custom");

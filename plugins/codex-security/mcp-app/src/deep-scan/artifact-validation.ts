@@ -90,11 +90,13 @@ export async function validateDiscoveryArtifacts(
   artifacts: DeepScanArtifacts,
   resultPath: string,
   expectedScanId: string,
+  validateWriteups = true,
 ): Promise<ScanDraftInput> {
   const result = await readDiscoveryAuditDraft(
     artifacts,
     resultPath,
     expectedScanId,
+    validateWriteups,
   );
   if (result.complete === false)
     throw new Error(
@@ -107,6 +109,7 @@ export async function readDiscoveryAuditDraft(
   artifacts: DeepScanArtifacts,
   resultPath: string,
   expectedScanId: string,
+  validateWriteups = true,
 ): Promise<ScanDraftInput> {
   await requireRegularFile(resultPath, artifacts.workersRoot);
   const result = parseStoredScanDraft(
@@ -115,7 +118,8 @@ export async function readDiscoveryAuditDraft(
     expectedScanId,
     parsePersistedScanDraft,
   );
-  if (result.complete !== false) await validateWriteupFiles(artifacts, result);
+  if (result.complete !== false && validateWriteups)
+    await validateWriteupFiles(artifacts, result);
   return result;
 }
 

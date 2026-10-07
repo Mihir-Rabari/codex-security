@@ -564,8 +564,7 @@ async function preserveScanDraft(
                 !terminalOutcomeIds.has(surface.candidateId as string)),
           ),
         },
-        [result.coverage],
-        false,
+        result.coverage,
         ambiguousDeferredIds,
       );
       sources.unshift(progress);
@@ -729,8 +728,7 @@ async function preserveScanDraft(
     );
     result.coverage = preserveScanCoverage(
       result.coverage,
-      [previousCoverage],
-      false,
+      previousCoverage,
       ambiguousDeferredIds,
     );
   }
@@ -1683,10 +1681,9 @@ function coverageEntryIdentities(entry: JsonObject): string[] {
 }
 
 /** Reducers cannot resolve source review by omitting its coverage records. */
-export function preserveScanCoverage(
+function preserveScanCoverage(
   coverage: JsonObject,
-  sources: JsonObject[],
-  preserveCompleteness = true,
+  previous: JsonObject,
   ambiguousDeferredIds = new Set<string>(),
 ): JsonObject {
   const result = structuredClone(coverage);
@@ -1698,21 +1695,19 @@ export function preserveScanCoverage(
   ] as const) {
     const current = (result[field] as unknown[] | undefined) ?? [];
     const values = [...current];
-    for (const source of sources) {
-      for (const value of (source[field] as unknown[] | undefined) ?? []) {
-        const present =
-          field === "deferred" ? deferredEntryPresent : coverageEntryPresent;
-        if (
-          !present(
-            values,
-            value,
-            field === "deferred" || field === "surfaces"
-              ? ambiguousDeferredIds
-              : undefined,
-          )
+    for (const value of (previous[field] as unknown[] | undefined) ?? []) {
+      const present =
+        field === "deferred" ? deferredEntryPresent : coverageEntryPresent;
+      if (
+        !present(
+          values,
+          value,
+          field === "deferred" || field === "surfaces"
+            ? ambiguousDeferredIds
+            : undefined,
         )
-          values.push(structuredClone(value));
-      }
+      )
+        values.push(structuredClone(value));
     }
     if (
       field !== "openQuestions" ||
@@ -1721,22 +1716,7 @@ export function preserveScanCoverage(
     )
       result[field] = values;
   }
-  if (
-    coverageHasOutstandingWork(result) ||
-    (preserveCompleteness &&
-      sources.some(
-        (source) =>
-          source.completeness === "partial" &&
-          !coverageHasOutstandingWork(source),
-      ))
-  )
-    result.completeness = "partial";
-  else if (
-    preserveCompleteness &&
-    sources.some((source) => source.completeness === "unknown")
-  ) {
-    result.completeness = "unknown";
-  }
+  if (coverageHasOutstandingWork(result)) result.completeness = "partial";
   return result;
 }
 

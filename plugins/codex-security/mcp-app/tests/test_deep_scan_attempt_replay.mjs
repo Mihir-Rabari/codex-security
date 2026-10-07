@@ -7,6 +7,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { finding as fixtureFinding } from "./scan-draft-fixture.ts";
 
 const app = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const plugin = path.resolve(app, "..");
@@ -234,6 +235,131 @@ async function testResponseLoss(responseLosses) {
       await readFile(merged.resultPath, "utf8"),
       beforeRecovery,
       "recovery cannot rewrite accepted bytes",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+for (const [workflowVersion, missing] of [
+  ["deep-security-scan/v2", true],
+  ["deep-security-scan/v1", false],
+  ["deep-security-scan/v1", true],
+])
+  await testAcceptedWriteupRecovery(workflowVersion, missing);
+
+async function testAcceptedWriteupRecovery(workflowVersion, missing) {
+  const root = await mkdtemp(path.join(tmpdir(), "deep-accepted-writeup-"));
+  const target = path.join(root, "target");
+  const environment = {
+    ...process.env,
+    CODEX_HOME: path.join(root, "home"),
+    CODEX_SECURITY_STATE_DIR: path.join(root, "state"),
+  };
+  const raw = async (args) => {
+    const selected = [...args];
+    if (selected[0] === "begin-deep-scan") {
+      selected[selected.indexOf("--workflow-version") + 1] = workflowVersion;
+    }
+    const { stdout } = await execute(
+      process.env.PYTHON || "python3",
+      [path.join(plugin, "scripts/workbench_db.py"), ...selected],
+      { env: environment, timeout: 30_000, maxBuffer: 4 * 1024 * 1024 },
+    );
+    return JSON.parse(stdout);
+  };
+  const store = new WorkbenchDeepScanStore(raw);
+  try {
+    await mkdir(target);
+    await writeFile(path.join(target, "fixture.py"), "print('fixture')\n");
+    const run = await store.begin({
+      targetPath: target,
+      scope: ".",
+      threadId: "fixture-owner",
+      scanRoot: path.join(root, "scans"),
+    });
+    assert.equal(run.workflowVersion, workflowVersion);
+    const artifacts = createDeepScanArtifacts(run.scanDir);
+    await ensureDeepScanDirectories(artifacts);
+    const reportPath = "findings/accepted/accepted.md";
+    await mkdir(path.join(run.scanDir, "findings", "accepted"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(run.scanDir, reportPath),
+      "Synthetic accepted evidence.\n",
+    );
+    const runner = new DeepScanWorkerRunner({
+      run,
+      store,
+      artifacts,
+      pluginRoot: plugin,
+      signal: new AbortController().signal,
+      random: () => 0.5,
+      log: () => {},
+      retryDelaysMs: [],
+      clock: { now: () => Date.now(), sleep: async () => {} },
+      executor: {
+        async run(request) {
+          await request.onThreadStarted?.("fixture-worker-session");
+          await writeFile(
+            path.join(request.artifactContext.root, "result.json"),
+            JSON.stringify({
+              scanId: run.scanId,
+              findings: [
+                {
+                  ...fixtureFinding("accepted", "fixture.py"),
+                  writeup: { reportPath },
+                },
+              ],
+              coverage: {
+                completeness: "complete",
+                surfaces: [],
+                explicitExclusions: [],
+                deferred: [],
+              },
+            }),
+          );
+          return { threadId: "fixture-worker-session" };
+        },
+      },
+    });
+    const accepted = await runner.runDiscoveryWorker(
+      randomUUID(),
+      "discovery-1",
+    );
+    assert.equal(accepted.status, "succeeded", accepted.error?.message);
+    const before = await readFile(accepted.worker.resultPath);
+    if (missing) await rm(path.join(run.scanDir, reportPath));
+    const snapshot = await store.get(run.scanId, "fixture-owner");
+    const resumed = new DeepScanCoordinator({
+      run: snapshot,
+      store,
+      pluginRoot: plugin,
+      executor: {
+        run: async () =>
+          assert.fail("accepted recovery must not rerun a model"),
+      },
+    });
+    if (missing && workflowVersion === "deep-security-scan/v2") {
+      await assert.rejects(
+        resumed.recoverAcceptedDiscoveries(),
+        /writeup.reportPath/,
+      );
+    } else {
+      const recovered = await resumed.recoverAcceptedDiscoveries();
+      assert.equal(recovered.length, 1);
+      assert.equal(recovered[0].resultPath, accepted.worker.resultPath);
+      const result = JSON.parse(
+        await readFile(recovered[0].resultPath, "utf8"),
+      );
+      assert.equal(result.findings.length, 1);
+      assert.equal(result.findings[0].writeup.reportPath, reportPath);
+    }
+    assert.deepEqual(
+      await readFile(accepted.worker.resultPath),
+      before,
+      "recovery preserves accepted bytes",
     );
   } finally {
     await rm(root, { recursive: true, force: true });

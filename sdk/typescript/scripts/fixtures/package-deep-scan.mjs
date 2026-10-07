@@ -42,7 +42,17 @@ try {
     "package-rpc.mjs",
     "package-deep-spawn.mjs",
   ]) {
-    await copyFile(new URL(name, import.meta.url), join(root, name));
+    if (name === "package-deep-codex.mjs") {
+      await writeFile(
+        join(root, name),
+        (await readFile(new URL(name, import.meta.url), "utf8")).replace(
+          '"smol-toml"',
+          JSON.stringify(import.meta.resolve("smol-toml")),
+        ),
+      );
+    } else {
+      await copyFile(new URL(name, import.meta.url), join(root, name));
+    }
   }
   const executable = join(
     root,

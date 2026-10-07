@@ -5,6 +5,7 @@ import { appendFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { startRpc } from "./package-rpc.mjs";
+import { parse as parseToml } from "smol-toml";
 
 try {
   await run();
@@ -81,18 +82,12 @@ async function run() {
     const equals = setting.indexOf("=");
     config[setting.slice(0, equals)] = setting.slice(equals + 1);
   }
-  const prefix = "mcp_servers.cs_artifacts.";
-  const env = Object.fromEntries(
-    Object.entries(config)
-      .filter(([name]) => name.startsWith(`${prefix}env.`))
-      .map(([name, value]) => [
-        name.slice(`${prefix}env.`.length),
-        JSON.parse(value),
-      ]),
-  );
+  const servers = parseToml(`mcp_servers = ${config.mcp_servers}`).mcp_servers;
+  const artifacts = servers.cs_artifacts;
+  const env = artifacts.env;
   const root = env.CODEX_SECURITY_ARTIFACT_ROOT;
   assert.ok(root, "The real worker must supply its bound artifact root.");
-  assert.equal(config["mcp_servers.codex-security.enabled"], "false");
+  assert.equal(servers["codex-security"].enabled, false);
   const layout = env.CODEX_SECURITY_ARTIFACT_LAYOUT;
   const threadId = `package-${layout}-${basename(root)}-${basename(join(root, ".."))}`;
   console.log(JSON.stringify({ type: "thread.started", thread_id: threadId }));
@@ -105,11 +100,10 @@ async function run() {
     await trace({ phase: "held", scanId: env.CODEX_SECURITY_SCAN_ID });
     await new Promise(() => setInterval(() => {}, 1_000));
   }
-  const server = await startRpc(
-    JSON.parse(config[`${prefix}command`]),
-    JSON.parse(config[`${prefix}args`]),
-    { cwd: root, env: { ...process.env, ...env } },
-  );
+  const server = await startRpc(artifacts.command, artifacts.args, {
+    cwd: root,
+    env: { ...process.env, ...env },
+  });
   let complete = true;
   try {
     if (layout === "worker") {

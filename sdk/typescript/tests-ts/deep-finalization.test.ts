@@ -141,9 +141,11 @@ const cases: {
   budgetCompletionFault?: BudgetCompletionFault;
   initialResumeUsage?: boolean;
   unpricedUsage?: boolean;
+  statusReadFault?: boolean;
   cancellationFault?: "status-read" | "deep-state-read" | "cancel-response";
 }[] = [
   ...outcomes.map((outcome) => ({ outcome })),
+  { outcome: "restart", statusReadFault: true },
   ...(
     [
       "budget-during-publication",
@@ -200,6 +202,7 @@ for (const {
   cancellationFault,
   initialResumeUsage,
   unpricedUsage,
+  statusReadFault,
 } of cases) {
   const resumedStop = outcome.includes("-resumed-");
   const restart = outcome === "restart" || resumedStop;
@@ -210,7 +213,7 @@ for (const {
   const name =
     outcome === "followup-canceled"
       ? "SDK preserves a selected aggregate when its follow-up is canceled"
-      : `SDK handles selected aggregate: ${outcome}${budgetCompletionFault ? ` (budget completion ${budgetCompletionFault})` : ""}${cancellationFault ? ` (cancellation ${cancellationFault})` : ""}${initialResumeUsage ? " (initial resume cost)" : ""}${unpricedUsage ? " (unpriced remainder)" : ""}`;
+      : `SDK handles selected aggregate: ${outcome}${budgetCompletionFault ? ` (budget completion ${budgetCompletionFault})` : ""}${cancellationFault ? ` (cancellation ${cancellationFault})` : ""}${statusReadFault ? " (selection status unavailable)" : ""}${initialResumeUsage ? " (initial resume cost)" : ""}${unpricedUsage ? " (unpriced remainder)" : ""}`;
   const runCase = async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -234,7 +237,8 @@ for (const {
     );
     let scanId = "";
     let workbenchOptions: WorkbenchCommandOptions;
-    let publicationFails = restart;
+    let publicationFails = restart && !statusReadFault;
+    let selectionReadLost = false;
     let completionReceiptLost = loseCompletionResponse;
     let budgetReceiptLost =
       budgetCompletionFault === "lost" ||
@@ -351,6 +355,15 @@ for (const {
             if (args[0] === "get-cli-scan-resume")
               originalResumeSignal = options.signal;
             commands.push(args[0]!);
+            if (
+              args[0] === "get-deep-scan" &&
+              statusReadFault &&
+              originalFinalizationInput !== undefined &&
+              !selectionReadLost
+            ) {
+              selectionReadLost = true;
+              throw new Error("Synthetic SQLite status lookup failure");
+            }
             if (
               args[0] === "get-scan" &&
               cancellation.signal.aborted &&
@@ -706,7 +719,11 @@ for (const {
             postScanPrompt: resumedStop ? undefined : followUp,
             ...(budgeted ? { maxCostUsd: 0.004 } : {}),
           }),
-        ).rejects.toThrow("Synthetic publication write failure");
+        ).rejects.toThrow(
+          statusReadFault
+            ? parentError.message
+            : "Synthetic publication write failure",
+        );
         const pending = await runWorkbench(workbenchOptions!, [
           "get-deep-scan",
           "--scan-id",
