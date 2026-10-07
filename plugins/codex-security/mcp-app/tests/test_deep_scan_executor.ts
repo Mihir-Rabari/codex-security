@@ -2476,7 +2476,7 @@ async function completedWorkerDrainPreservesCancellation(
       subagents: 0,
       signal: controller.signal,
       ...(resumed ? { resumeThreadId: "fixture-resumed-thread-id" } : {}),
-      onThreadStarted: async (threadId) => {
+      onThreadStarted: async (threadId: string) => {
         assert.equal(
           threadId,
           resumed ? "fixture-resumed-thread-id" : "fixture-thread-id",
