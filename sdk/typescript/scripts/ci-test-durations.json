@@ -6,7 +6,8 @@
     "https://github.com/openai/codex-security/actions/runs/37439758240",
     "https://github.com/openai/codex-security/actions/runs/37420072376",
     "https://github.com/openai/codex-security/actions/runs/37472306800",
-    "https://github.com/openai/codex-security/actions/runs/37482500311"
+    "https://github.com/openai/codex-security/actions/runs/37482500311",
+    "https://github.com/openai/codex-security/actions/runs/37540791930"
   ],
   "unix": {
     "api-attribution-concurrency.test.ts": 1.552,
@@ -29,7 +30,9 @@
     "cli-history-paths.test.ts": 0.0,
     "cli-launcher.test.ts": 1.887,
     "cli-patch-trust.test.ts": 2.484,
-    "cli-patch.test.ts": 5.118,
+    "cli-patch-hosting.test.ts": 49.288,
+    "cli-patch-nested.test.ts": 61.671,
+    "cli-patch.test.ts": 58.726,
     "cli-publish.test.ts": 0.427,
     "cli-scan-prompts.test.ts": 0.503,
     "cli-serve.test.ts": 11.424,
@@ -199,7 +202,9 @@
     "cli-history-paths.test.ts": 0.009,
     "cli-launcher.test.ts": 1.319,
     "cli-patch-trust.test.ts": 9.679,
-    "cli-patch.test.ts": 643.75,
+    "cli-patch-hosting.test.ts": 410.687,
+    "cli-patch-nested.test.ts": 469.988,
+    "cli-patch.test.ts": 268.41,
     "cli-publish.test.ts": 0.402,
     "cli-scan-prompts.test.ts": 0.901,
     "cli-serve.test.ts": 13.64,
