@@ -833,6 +833,7 @@ async function testDeepScanStdioLifecycle() {
     "references",
     "schemas",
     ".codex-plugin",
+    ...(installedPluginRoot ? ["mcp"] : []),
   ]) {
     await cp(
       path.join(pluginRoot, directory),
