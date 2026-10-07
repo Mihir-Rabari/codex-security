@@ -40,7 +40,14 @@ function paxAttributes(contents) {
   return attributes;
 }
 
-function sparseMap(contents) {
+function sparseMap(contents, paxMap) {
+  if (paxMap) {
+    const values = paxMap.split(",").map(Number);
+    const extents = [];
+    for (let index = 0; index < values.length; index += 2)
+      extents.push({ offset: values[index], size: values[index + 1] });
+    return { contents, extents, dataOffset: 0 };
+  }
   let offset = 0;
   function number() {
     while (offset < contents.length) {
@@ -209,8 +216,10 @@ export function readTarArchive(archiveBytes) {
       else {
         const contents = archiveBytes.subarray(contentsStart, contentsEnd);
         archiveMetadata.push(archiveBytes.subarray(offset, contentsStart));
+        const paxSparseMap = nextAttributes.get("GNU.sparse.map");
         if (
           (oldSparse ||
+            paxSparseMap ||
             Number.parseInt(nextAttributes.get("GNU.sparse.major"), 10) ===
               1) &&
           /\.(?:png|br(?:\.part-[0-9]+)?)$/iu.test(path)
@@ -219,7 +228,7 @@ export function readTarArchive(archiveBytes) {
             path,
             oldSparse
               ? { contents, extents: oldSparseExtents, dataOffset: 0 }
-              : sparseMap(contents),
+              : sparseMap(contents, paxSparseMap),
           );
           // Retain sparse framing in order with the surrounding headers and padding.
           archiveMetadata.push(path);

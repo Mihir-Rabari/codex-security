@@ -427,6 +427,17 @@ describe("npm package tar listings", () => {
         },
         { name: "png", files: [["logo.png", logo, true]] },
         {
+          name: "pax-sparse-zero-byte-hole-png",
+          files: [["logo.png", logo, "0.1-hole"]],
+        },
+        {
+          name: "pax-sparse-zero-byte-hole-tail",
+          files: [["logo.png", logo, "0.1-hole"]],
+          tailMarker: true,
+          error:
+            /npm tarball contains (?:an internal reference\.|an invalid tar entry)/u,
+        },
+        {
           name: "oldgnu-brotli",
           files: [["runtime.mjs.br", cleanCompressedPayload, "oldgnu"]],
         },
@@ -508,7 +519,7 @@ describe("npm package tar listings", () => {
         },
       ] satisfies {
         name: string;
-        files: [string, Buffer, boolean | "0.1-tail" | "oldgnu"][];
+        files: [string, Buffer, boolean | "0.1-tail" | "0.1-hole" | "oldgnu"][];
         extents?: { offset: number; size: number }[];
         metadataMarker?: "continuation" | "boundary" | "unused";
         globalSparse?: boolean;
@@ -529,6 +540,29 @@ describe("npm package tar listings", () => {
               scenario.extents,
               scenario.metadataMarker,
             );
+          if (sparse === "0.1-hole") {
+            const hole = contents.indexOf(0);
+            expect(hole).toBeGreaterThan(0);
+            const stored = Buffer.concat([
+              contents.subarray(0, hole),
+              Buffer.alloc((512 - (hole % 512)) % 512),
+              contents.subarray(hole + 1),
+              scenario.tailMarker
+                ? Buffer.from("go/synthetic-reference")
+                : Buffer.alloc(0),
+            ]);
+            return Buffer.concat([
+              tarRecord(
+                paxRecords({
+                  "GNU.sparse.size": String(contents.length),
+                  "GNU.sparse.numblocks": "2",
+                  "GNU.sparse.map": `0,${hole},${hole + 1},${contents.length - hole - 1}`,
+                }),
+                { name: "PaxHeaders/asset", type: 0x78 },
+              ),
+              tarRecord(stored, { name: path }),
+            ]);
+          }
           if (sparse === "0.1-tail") {
             const storedContents = Buffer.concat([
               contents,
