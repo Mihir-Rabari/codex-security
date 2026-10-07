@@ -392,19 +392,29 @@ def _indexed_active_findings(
                 matched_by_target.setdefault(
                     "" if settings.get("repository") else finding["indexed_target_id"], []
                 ).append(finding)
-        for matched in matched_by_target.values():
-            representative = max(
+        representatives = [
+            (
                 matched,
-                key=lambda finding: (
-                    finding["scan_sequence"],
-                    finding["created_at"],
-                    finding["occurrence_id"],
+                max(
+                    matched,
+                    key=lambda finding: (
+                        finding["scan_sequence"],
+                        finding["created_at"],
+                        finding["occurrence_id"],
+                    ),
                 ),
             )
+            for matched in matched_by_target.values()
+        ]
+        active_occurrence_ids = {
+            representative["occurrence_id"] for _, representative in representatives
+        }
+        for matched, representative in representatives:
             combined.append(
                 {
                     **row,
                     **representative,
+                    "active_occurrence_ids": active_occurrence_ids,
                     "status": row["status"],
                     "updated_at": row["updated_at"],
                     "occurrence_count": row["occurrence_count"],
@@ -496,13 +506,23 @@ def _active_findings(
     replaced_targets = []
     transitioned_targets = []
     ownership_epochs = []
-    for target in connection.execute("SELECT id, current_path FROM security_targets"):
+    for target in connection.execute(
+        "SELECT DISTINCT targets.id, targets.current_path "
+        "FROM security_targets AS targets JOIN scans ON scans.target_id = targets.id "
+        f"WHERE 1 = 1 {target_filter} {repository_filter}",
+        target_values,
+    ):
         checkout = Path(target["current_path"])
-        if not checkout.exists():
+        try:
+            checkout.stat()
+        except FileNotFoundError:
             recorded_ownership = scan_history._recorded_target_ownership(connection, target["id"])
             if recorded_ownership is not None and recorded_ownership[1] is not None:
                 transitioned_targets.append(target["id"])
                 ownership_epochs.append((target["id"], recorded_ownership[1]))
+            continue
+        except OSError:
+            replaced_targets.append(target["id"])
             continue
         verified = scan_history._verified_target_metadata(connection, target["id"], checkout)
         if verified is None:

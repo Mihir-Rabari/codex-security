@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import runpy
 import sqlite3
@@ -1323,3 +1324,233 @@ def test_scan_history_fixture_does_not_require_python_test_extras(history):
         ],
         check=True,
     )
+
+
+@pytest.mark.parametrize("inaccessible", [False, True])
+def test_scoped_history_ignores_unrelated_inaccessible_target(history, inaccessible):
+    state, root, repository = history
+    other = repository.with_name("unrelated-repository")
+    other.mkdir()
+    create_cli_scan(state, root, other)
+    scan = create_cli_scan(state, root, repository)
+    namespace = runpy.run_path(str(SCRIPT), run_name="scoped_ownership_fixture")
+    original_stat = Path.stat
+
+    def stat(path, *args, **kwargs):
+        if inaccessible and path == other:
+            raise PermissionError("Synthetic inaccessible unrelated checkout")
+        return original_stat(path, *args, **kwargs)
+
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        selected = connection.execute(
+            "SELECT * FROM scans WHERE id = ?", (scan["scanId"],)
+        ).fetchone()
+        with patch.object(Path, "stat", stat):
+            indexed = namespace["_indexed_scan_findings"](connection, selected)
+        assert len(indexed) == 1
+
+
+@pytest.mark.parametrize("identity", ["recorded", "all-legacy", "mixed", "transition"])
+def test_bulk_matching_preserves_legacy_seals(tmp_path, identity):
+    state, root, repo = tmp_path / "state", tmp_path / "scans", tmp_path / "repository"
+    repo.mkdir()
+    scans = [create_cli_scan(state, root, repo, identity_anchor=a) for a in ["before", "after"]]
+    if identity != "recorded":
+        with sqlite3.connect(state / "workbench.sqlite3") as db:
+            db.execute(
+                "UPDATE scans SET target_device=NULL,target_inode=NULL WHERE id IN (?,?)",
+                tuple(s["scanId"] for s in scans),
+            )
+    if identity == "mixed":
+        create_cli_scan(state, root, repo, identity_anchor="newer")
+    if identity == "transition":
+        repo.rename(repo.with_name("previous-owner"))
+        repo.mkdir()
+        create_cli_scan(state, root, repo)
+        repo.rename(repo.with_name("replacement-owner"))
+        repo.with_name("previous-owner").rename(repo)
+    result = run_workbench(state, "list-unmatched-scan-pairs", "--repository", str(repo))
+    print("ACTUAL BULK", identity, result["scanCount"], len(result["batches"]))
+    assert result["scanCount"] == (
+        0 if identity == "transition" else 3 if identity == "mixed" else 2
+    )
+    assert len(result["batches"]) == (
+        0 if identity == "transition" else 2 if identity == "mixed" else 1
+    )
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_offline_saved_comparison_keeps_pretransition_legacy_seals(tmp_path, legacy):
+    state, root, repo = tmp_path / "state", tmp_path / "scans", tmp_path / "repository"
+    repo.mkdir()
+    scans = [create_cli_scan(state, root, repo, identity_anchor=a) for a in ["before", "after"]]
+    rows = [
+        run_workbench(state, "get-scan", "--scan-id", s["scanId"])["scan"]["findings"][0]
+        for s in scans
+    ]
+    if legacy:
+        with sqlite3.connect(state / "workbench.sqlite3") as db:
+            db.execute("UPDATE scans SET target_device=NULL,target_inode=NULL")
+        create_cli_scan(state, root, repo, identity_anchor="recorded-current-owner")
+    saved = save_scan_matches(state, *scans, confirmed_match(*[r["occurrenceId"] for r in rows]))
+    repo.rename(repo.with_name("offline-owner"))
+    result = compare_scan_pair(state, *scans, check=False)
+    print("ACTUAL OFFLINE", legacy, result)
+    assert result["returncode"] == 0, result["stderr"]
+    assert compare_scan_pair(state, *scans) == saved
+
+
+def verified_patch(state, scan, occurrence, repo, revision):
+    request, token = str(uuid.uuid4()), str(uuid.uuid4())
+    patch = Path(scan["scanDir"]) / "remediation.patch"
+    patch.write_text(
+        "diff --git a/src/extract.py b/src/extract.py\n--- a/src/extract.py\n+++ b/src/extract.py\n@@ -1 +1 @@\n-vulnerable\n+fixed\n",
+        newline="\n",
+    )
+    run_workbench(
+        state,
+        "request-finding-remediation",
+        "--occurrence-id",
+        occurrence,
+        "--request-id",
+        request,
+        "--action-token",
+        token,
+    )
+    run_workbench(
+        state,
+        "set-finding-remediation",
+        "--occurrence-id",
+        occurrence,
+        "--request-id",
+        request,
+        "--action-token",
+        token,
+        "--expected-version",
+        "1",
+        "--state",
+        "generated",
+        "--patch-path",
+        patch.name,
+        "--patch-digest",
+        "sha256:" + hashlib.sha256(patch.read_bytes()).hexdigest(),
+        "--summary",
+        "Synthetic fix",
+    )
+    for action, state_name, version in [("apply", "applied", 2), ("verify", "verified", 4)]:
+        token = str(uuid.uuid4())
+        run_workbench(
+            state,
+            "request-finding-remediation-action",
+            "--occurrence-id",
+            occurrence,
+            "--request-id",
+            request,
+            "--expected-version",
+            str(version),
+            "--action",
+            action,
+            "--action-token",
+            token,
+        )
+        if action == "apply":
+            (repo / "src/extract.py").write_text("fixed\n")
+        if action == "verify":
+            run_workbench(
+                state,
+                "set-finding-remediation",
+                "--occurrence-id",
+                occurrence,
+                "--request-id",
+                request,
+                "--action-token",
+                token,
+                "--expected-version",
+                str(version + 1),
+                "--state",
+                "verifying",
+                "--base-revision",
+                revision,
+            )
+        run_workbench(
+            state,
+            "set-finding-remediation",
+            "--occurrence-id",
+            occurrence,
+            "--request-id",
+            request,
+            "--action-token",
+            token,
+            "--expected-version",
+            str(version + 2 if action == "verify" else version + 1),
+            "--state",
+            state_name,
+            "--base-revision",
+            revision,
+            *(
+                ["--verification-summary", "Synthetic regression passed."]
+                if action == "verify"
+                else []
+            ),
+        )
+
+
+@pytest.mark.parametrize("drift", [False, True])
+def test_inherited_fixed_closure_verifies_each_active_worktree(tmp_path, drift):
+    state, root, repo = tmp_path / "state", tmp_path / "scans", tmp_path / "repository"
+    initialize_git_repository(repo)
+    (repo / "src").mkdir()
+    (repo / "src/extract.py").write_text("vulnerable\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-qm", "Synthetic remediation fixture"], check=True
+    )
+    revision = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+    ).strip()
+    linked = tmp_path / "linked-worktree"
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "-q", "--detach", str(linked)], check=True
+    )
+    scans = [
+        create_cli_scan(state, root, p, identity_anchor=a, target_revision=revision)
+        for p, a in [(repo, "older-source"), (linked, "newer-source")]
+    ]
+    rows = [
+        run_workbench(state, "get-scan", "--scan-id", s["scanId"])["scan"]["findings"][0]
+        for s in scans
+    ]
+    occ = [r["occurrenceId"] for r in rows]
+    save_scan_matches(state, *scans, confirmed_match(*occ))
+    for s, o, p in zip(scans, occ, [repo, linked]):
+        verified_patch(state, s, o, p, revision)
+    if drift:
+        (linked / "src/extract.py").write_text("drifted\n")
+        direct = run_workbench(
+            state,
+            "set-finding-triage",
+            "--occurrence-id",
+            occ[1],
+            "--status",
+            "closed",
+            "--close-reason",
+            "already_fixed",
+            check=False,
+        )
+        assert direct["returncode"] != 0 and "Working-tree contents changed" in direct["stderr"]
+    inherited = run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        occ[0],
+        "--status",
+        "closed",
+        "--close-reason",
+        "already_fixed",
+        check=False,
+    )
+    print("ACTUAL INHERITED CLOSURE", drift, inherited)
+    assert (inherited["returncode"] != 0) == drift
+    if drift:
+        assert "Working-tree contents changed" in inherited["stderr"]

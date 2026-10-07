@@ -1,9 +1,12 @@
+import { spawnSync } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { describe, expect, test, mock } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
 import { DiffTarget, type ScanOptions } from "../src/index.js";
 import { main } from "../src/cli.js";
+import { resolvePluginPython } from "../src/runtime.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
   matchScanFindings,
   type ScanComparisonInput,
@@ -71,6 +74,60 @@ describe("CLI workbench", () => {
           ? "FINDINGS  2 (1 confirmed this scan; 1 previously found; 2 high)"
           : "FINDINGS  0\n",
       );
+    }
+  });
+
+  test("preserves dash-prefixed finding queries through Python argparse", async () => {
+    const python = await resolvePluginPython();
+    const program = [
+      "import json, sys",
+      "sys.path.insert(0, sys.argv.pop(1))",
+      "from workbench_cli import parse_args",
+      "args = parse_args('Synthetic history query')",
+      "print(json.dumps({'query': args.query}))",
+    ].join("\n");
+    for (const options of [
+      [],
+      ["--all-repositories"],
+      ["--scan", "synthetic-scan"],
+    ]) {
+      for (const query of ["ordinary", "--unsafe"]) {
+        const parsed: string[] = [];
+        const stdout = captureCli(main, "stdout");
+        expect(
+          await stdout.run(
+            [
+              "findings",
+              "list",
+              ...options,
+              `--query=${query}`,
+              "--format=json",
+            ],
+            dependencies({
+              onWorkbench: (args) => {
+                const result = spawnSync(
+                  python,
+                  [
+                    "-I",
+                    "-B",
+                    "-c",
+                    program,
+                    join(PLUGIN_ROOT, "scripts"),
+                    ...args,
+                  ],
+                  { encoding: "utf8" },
+                );
+                expect(result.status, result.stderr).toBe(0);
+                parsed.push(
+                  (JSON.parse(result.stdout) as { query: string }).query,
+                );
+                return { findings: [], nextOffset: null };
+              },
+            }),
+          ),
+        ).toBe(0);
+        expect(parsed).toEqual([query]);
+      }
     }
   });
 

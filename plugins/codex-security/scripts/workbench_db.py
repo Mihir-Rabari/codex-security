@@ -1871,7 +1871,9 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
                 """,
                 (json.dumps(sorted(indexed_finding["occurrence_ids"])),),
             ).fetchall()
-            verification_ids.add(indexed_finding["occurrence_id"])
+            verification_ids.update(
+                indexed_finding.get("active_occurrence_ids", {indexed_finding["occurrence_id"]})
+            )
         if args.status == "closed":
             for checked_occurrence in triaged_occurrences:
                 remediation = connection.execute(

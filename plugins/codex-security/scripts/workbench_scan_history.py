@@ -806,6 +806,10 @@ def list_scans(
     return result
 
 
+def _legacy_scan_before_ownership_transition(scan: sqlite3.Row, epoch_start: int | None) -> bool:
+    return epoch_start is None and scan["target_device"] is None and scan["target_inode"] is None
+
+
 def list_unmatched_scan_pairs(
     connection: sqlite3.Connection,
     args: argparse.Namespace,
@@ -836,15 +840,18 @@ def list_unmatched_scan_pairs(
                 else _verified_target_metadata(connection, target_id, Path(target["current_path"]))
             )
         target_metadata = verified_targets[target_id]
-        if target_metadata is None or target_metadata[0] is None or not target_metadata[1]:
+        if target_metadata is None or target_metadata[0] is None:
             return False
         if target_id not in ownership_epochs:
             ownership_epochs[target_id] = _ownership_epoch_start(
                 connection, target_id, target_metadata[0]
             )
         epoch_start = ownership_epochs[target_id]
+        if _legacy_scan_before_ownership_transition(scan, epoch_start):
+            return True
         return (
-            stored_filesystem_identity_matches(scan["target_device"], target_metadata[0].st_dev)
+            target_metadata[1]
+            and stored_filesystem_identity_matches(scan["target_device"], target_metadata[0].st_dev)
             and stored_filesystem_identity_matches(scan["target_inode"], target_metadata[0].st_ino)
             and (epoch_start is None or scan["ownership_sequence"] > epoch_start)
         )
@@ -858,7 +865,10 @@ def list_unmatched_scan_pairs(
             "WHERE scans.status = 'complete' ORDER BY scans.rowid"
         )
         if metadata is not None
-        and _same_repository(scan, requested, before_target_path=scan["current_target_path"])
+        and (
+            scan["target_id"] == requested["target_id"]
+            or _same_repository(scan, requested, before_target_path=scan["current_target_path"])
+        )
         and belongs_to_current_owner(scan)
     ]
 
@@ -952,7 +962,10 @@ def _same_registered_repository(
                 if ownership is None:
                     return False
                 recorded, epoch_start = ownership
-                if any(
+                if not (
+                    before["target_id"] == after["target_id"]
+                    and _legacy_scan_before_ownership_transition(scan, epoch_start)
+                ) and any(
                     scan[field] != recorded[field] for field in ("target_device", "target_inode")
                 ):
                     return False
@@ -961,12 +974,10 @@ def _same_registered_repository(
                 return False
             else:
                 epoch_start = _ownership_epoch_start(connection, scan["target_id"], metadata)
-                legacy_identity = scan["target_device"] is None and scan["target_inode"] is None
                 # Migrated seals predate filesystem identity; retain the existing
                 # legacy allowance only before a recorded ownership transition.
                 if (
-                    legacy_identity
-                    and epoch_start is None
+                    _legacy_scan_before_ownership_transition(scan, epoch_start)
                     and before["target_id"] == after["target_id"]
                 ):
                     scan = {

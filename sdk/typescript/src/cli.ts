@@ -2097,7 +2097,7 @@ export async function main(
             ? ["--include-resolved"]
             : []),
           ...(repository === undefined ? [] : ["--repository", repository]),
-          ...(options.query === undefined ? [] : ["--query", options.query]),
+          ...(options.query === undefined ? [] : [`--query=${options.query}`]),
           ...(options.severity === undefined
             ? []
             : ["--severity", options.severity]),
