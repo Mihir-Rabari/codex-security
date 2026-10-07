@@ -3014,8 +3014,12 @@ async function testIsolatedReconstructedWorkers() {
     const uncappedSandbox = {
       filesystemDenies: trustedParentSandboxWithDenials.filesystemDenies,
     };
-    const currentParentSandbox =
-      name === "first" ? uncappedSandbox : trustedParentSandboxWithDenials;
+    const originalLiteralDenial = `/repo/${name} [original]`;
+    const currentLiteralDenial = `/repo/${name} [current]`;
+    const currentParentSandbox = {
+      ...(name === "first" ? uncappedSandbox : trustedParentSandboxWithDenials),
+      literalFilesystemDenies: [currentLiteralDenial],
+    };
     const expectedProfile = {
       ...structuredClone(deniedWorkerPermissionProfile),
       filesystem: {
@@ -3023,6 +3027,8 @@ async function testIsolatedReconstructedWorkers() {
         "/repo/.env": "deny",
         "/repo/**/*.pem": "deny",
         "/repo/**/.secret": "deny",
+        [originalLiteralDenial]: { ".": "deny" },
+        [currentLiteralDenial]: { ".": "deny" },
       },
     };
     const fixture = await fakeCodexFixture(expectedProfile);
@@ -3103,8 +3109,12 @@ async function testIsolatedReconstructedWorkers() {
         turnId: "original-turn",
         startedAt: "2026-01-01T00:00:00Z",
       },
-      parentSandbox:
-        name === "first" ? trustedParentSandboxWithDenials : uncappedSandbox,
+      parentSandbox: {
+        ...(name === "first"
+          ? trustedParentSandboxWithDenials
+          : uncappedSandbox),
+        literalFilesystemDenies: [originalLiteralDenial],
+      },
     };
     await mkdir(path.join(codexHome, "sessions"));
     await writeFile(
@@ -3175,6 +3185,11 @@ async function testIsolatedReconstructedWorkers() {
         threadId: `fixture-${name}-observer`,
         startedAt: "2026-01-01T00:01:00Z",
       },
+    );
+    assert.deepEqual(
+      saved.parentSandbox?.literalFilesystemDenies,
+      [originalLiteralDenial],
+      "capture retains literal parent denial paths",
     );
     assert.equal(
       saved.nativeServiceTierAbsent,
@@ -3504,10 +3519,15 @@ async function testIsolatedReconstructedWorkers() {
               "--cyber-access-program",
               scan.accessProgram,
             );
+            const workerFeatures = parseToml(
+              child.argv
+                .filter((argument: string) => /^features[.=]/u.test(argument))
+                .join("\n"),
+            ).features as Record<string, unknown>;
             for (const [feature, value] of Object.entries(scan.apiFeatures)) {
               assert.equal(
-                child.argv.includes(`features.${feature}=${value}`),
-                true,
+                workerFeatures[feature],
+                value,
                 `recorded ${feature}=${value}`,
               );
             }
@@ -3567,16 +3587,42 @@ async function testIsolatedReconstructedWorkers() {
                 "a resumed bounded cap must not truncate an original uncapped deny glob, in either order",
               );
             }
+            const filesystem = (
+              parseToml(workerPermissionProfileOverride(child.argv))
+                .permissions as Record<
+                string,
+                { filesystem: Record<string, unknown> }
+              >
+            )["codex_security_deep_scan_worker"].filesystem;
+            for (const origin of ["original", "current"])
+              assert.deepEqual(
+                JSON.parse(
+                  JSON.stringify(filesystem[`/repo/${scan.name} [${origin}]`]),
+                ),
+                {
+                  ".": "deny",
+                },
+              );
+            const otherScan = scan.name === "first" ? "second" : "first";
+            for (const origin of ["original", "current"])
+              assert.equal(
+                filesystem[`/repo/${otherScan} [${origin}]`],
+                undefined,
+              );
             assertReadOnlyWorkerPolicy(child.argv);
             assertWorkerSubagentPolicy(
               child.argv,
               scan.name === "first" ? 0 : 2,
             );
             assert.equal(
-              workerPermissionProfileOverride(child.argv).includes(
-                '"/repo/.env"="deny"',
-              ),
-              true,
+              (
+                parseToml(workerPermissionProfileOverride(child.argv))
+                  .permissions as Record<
+                  string,
+                  { filesystem: Record<string, unknown> }
+                >
+              )["codex_security_deep_scan_worker"].filesystem["/repo/.env"],
+              "deny",
             );
             assert.equal(
               child.argv.includes("resume"),
@@ -3788,19 +3834,10 @@ async function testReducerCoveragePersistenceBinding() {
         launches.push(
           launch.then(async () => {
             const invocation = JSON.parse(await readFile(markerPath, "utf8"));
-            const prefix =
-              "mcp_servers.cs_artifacts.env.CODEX_SECURITY_REDUCER_CONTEXT_JSON=";
-            const encoded = invocation.argv.find((arg: string) =>
-              arg.startsWith(prefix),
-            );
-            assert.ok(
-              encoded,
-              "the launched reducer receives its host-bound artifact context",
-            );
-            assert.deepEqual(
-              JSON.parse(JSON.parse(encoded.slice(prefix.length))),
-              deepReducer,
-            );
+            assertConfigOverrides(invocation.argv, {
+              "mcp_servers.cs_artifacts.env.CODEX_SECURITY_REDUCER_CONTEXT_JSON":
+                JSON.stringify(deepReducer),
+            });
           }),
         );
       }

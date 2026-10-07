@@ -405,6 +405,12 @@ export function restoredDeepScanWorkerSettings(
           ...currentParentSandbox.filesystemDenies,
         ]),
       ],
+      literalFilesystemDenies: [
+        ...new Set([
+          ...(originalSandbox?.literalFilesystemDenies ?? []),
+          ...(currentParentSandbox.literalFilesystemDenies ?? []),
+        ]),
+      ],
       ...(uncapped || depths.length === 0
         ? {}
         : { globScanMaxDepth: Math.max(...depths) }),
@@ -478,6 +484,13 @@ function executionSettings(
       : {
           parentSandbox: {
             filesystemDenies: [...value.parentSandbox.filesystemDenies],
+            ...(value.parentSandbox.literalFilesystemDenies === undefined
+              ? {}
+              : {
+                  literalFilesystemDenies: [
+                    ...value.parentSandbox.literalFilesystemDenies,
+                  ],
+                }),
             ...(value.parentSandbox.globScanMaxDepth === undefined
               ? {}
               : {
