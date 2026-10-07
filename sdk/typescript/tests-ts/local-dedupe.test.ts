@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, expect, mock, test } from "bun:test";
+import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import { LocalDeduplication } from "../src/deduplication/local.js";
 import {
   deduplicateScanDirectoryInternal,
@@ -77,6 +77,45 @@ async function fixture() {
     store: new SqliteFindingsStore(value.environment),
   };
 }
+
+test.each([
+  [undefined, "https://api.openai.com/v1/embeddings"],
+  ["", "https://api.openai.com/v1/embeddings"],
+  [
+    "https://embeddings.example.com/custom/v1/embeddings?api-version=synthetic",
+    "https://embeddings.example.com/custom/v1/embeddings?api-version=synthetic",
+  ],
+])(
+  "local dedupe uses the configured embeddings endpoint %p",
+  async (endpoint, expected) => {
+    const f = await fixture();
+    const request = spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        model: EMBEDDING_MODEL,
+        data: [{ index: 0, embedding: vector }],
+      }),
+    );
+    try {
+      const local = new LocalDeduplication(
+        {
+          ...f.environment,
+          OPENAI_API_KEY: "synthetic-embeddings-key",
+          CODEX_SECURITY_EMBEDDINGS_URL: endpoint,
+        },
+        { repositoryId: f.targetId },
+        f.repository,
+      );
+      await local.prepare(f.document.findings, f.targetId);
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(request.mock.calls[0]?.[0]).toBe(expected);
+      expect(request.mock.calls[0]?.[1]?.headers).toMatchObject({
+        Authorization: "Bearer synthetic-embeddings-key",
+      });
+    } finally {
+      request.mockRestore();
+    }
+  },
+);
 
 test("local dedupe indexes a sealed directory, reuses vectors and never calls the findings API", async () => {
   const f = await fixture();
