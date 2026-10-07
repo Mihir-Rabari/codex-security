@@ -975,7 +975,8 @@ async function testOpenAiCredentialsReachWorker() {
       openai: "synthetic-openai-key",
       expected: "synthetic-openai-key",
       // Optional null auth is omitted from the SDK's private TOML snapshot.
-      projectConfiguration: 'model_provider = "openai"\n[model_providers.openai]\n',
+      projectConfiguration:
+        'model_provider = "openai"\n[model_providers.openai]\n',
     },
     {
       openai: "  synthetic-openai-key  ",
