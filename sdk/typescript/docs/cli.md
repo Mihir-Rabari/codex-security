@@ -102,7 +102,7 @@ explicitly:
 
 ```bash
 codex-security scan /path/to/repository \
-  --auth api-key --model <model> --cyber-access-program daybreak_blue
+  --auth api-key --model "<model>" --cyber-access-program daybreak_blue
 ```
 
 In the SDK, select your model through `codexOverrides.model` and pass
