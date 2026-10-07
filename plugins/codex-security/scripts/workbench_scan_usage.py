@@ -859,19 +859,19 @@ def _read_rollout_usage(
                     local_models.setdefault(current_model, _empty_token_usage()), delta
                 )
 
-    if counter_total["totalTokens"] > total["totalTokens"]:
-        remainder = {key: max(0, value - total[key]) for key, value in counter_total.items()}
-        remainder["cachedInputTokens"] = min(
-            remainder["cachedInputTokens"], remainder["inputTokens"]
-        )
-        remainder["cacheWriteInputTokens"] = min(
-            remainder["cacheWriteInputTokens"],
-            remainder["inputTokens"] - remainder["cachedInputTokens"],
-        )
-        remainder["reasoningOutputTokens"] = min(
-            remainder["reasoningOutputTokens"], remainder["outputTokens"]
-        )
-        remainder["totalTokens"] = remainder["inputTokens"] + remainder["outputTokens"]
+    remainder = {key: max(0, value - total[key]) for key, value in counter_total.items()}
+    remainder["cachedInputTokens"] = min(remainder["cachedInputTokens"], remainder["inputTokens"])
+    remainder["cacheWriteInputTokens"] = min(
+        remainder["cacheWriteInputTokens"],
+        remainder["inputTokens"] - remainder["cachedInputTokens"],
+    )
+    remainder["reasoningOutputTokens"] = min(
+        remainder["reasoningOutputTokens"], remainder["outputTokens"]
+    )
+    remainder["totalTokens"] = remainder["inputTokens"] + remainder["outputTokens"]
+    if remainder["totalTokens"] > 0:
+        if response_usage_observed:
+            warnings.add("token_receipts_incomplete")
         _add_token_usage(total, remainder)
         _add_token_usage(local_models.setdefault(None, _empty_token_usage()), remainder)
     if response_usage_observed:

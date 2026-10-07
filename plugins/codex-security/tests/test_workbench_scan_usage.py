@@ -1278,10 +1278,18 @@ def test_exact_receipts_replace_overlapping_legacy_counter(tmp_path: Path, workb
     "receipt,counter,expected",
     [
         ((150, 15), (100, 200), (150, 200)),
+        ((150, 15), (100, 20), (150, 20)),
+        ((100, 50), (110, 10), (110, 50)),
         ((100, 50), (200, 10), (200, 50)),
         ((100, 10), (100, 10), (100, 10)),
     ],
-    ids=["counter-output", "counter-input", "equal-control"],
+    ids=[
+        "counter-output",
+        "smaller-counter-output",
+        "smaller-counter-input",
+        "counter-input",
+        "equal-control",
+    ],
 )
 def test_completion_retains_receipt_and_counter_categories(tmp_path, receipt, counter, expected):
     fixture = _start_scan(tmp_path)

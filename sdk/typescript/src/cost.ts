@@ -67,7 +67,7 @@ interface SessionUsage {
   expectedResponseTokens: number;
   counterRegressed: boolean;
   calls: Map<string, ScanActivity>;
-  activities: ScanActivity[];
+  activities: { index: number; activity: ScanActivity }[];
   progress: ScanProgress[];
   filesCompleted: number;
   filesTotal: number | null;
@@ -146,6 +146,7 @@ export class ScanCostTracker {
   readonly #workerProgress = new Map<string, number>();
   readonly #reportedProgress = new Set<string>();
   readonly #reportedSessionEvents = new Map<string, Set<string>>();
+  readonly #reportedActivities = new Map<string, Set<string>>();
   #threadId: string | null = null;
   #timer: NodeJS.Timeout | null = null;
   #pending: Promise<void> = Promise.resolve();
@@ -419,7 +420,17 @@ export class ScanCostTracker {
         });
       }
       if (worker !== undefined) {
-        for (const activity of session.activities.splice(0)) {
+        for (const { index, activity } of session.activities.splice(0)) {
+          let reported = this.#reportedActivities.get(threadId);
+          if (reported === undefined) {
+            reported = new Set();
+            this.#reportedActivities.set(threadId, reported);
+          }
+          const identity = `${index}:${createHash("sha256")
+            .update(JSON.stringify(activity))
+            .digest("hex")}`;
+          if (reported.has(identity)) continue;
+          reported.add(identity);
           this.#options.onActivity?.({
             ...activity,
             id: `${threadId}:${activity.id}`,
@@ -466,19 +477,20 @@ export class ScanCostTracker {
       if (!usages.has(threadId)) usages.set(threadId, null);
     }
     for (const [threadId, session] of usageSessions) {
-      const selected = usages.get(threadId);
-      if (
-        selected &&
-        session.usage &&
-        selected.total_tokens > session.usage.total_tokens
-      )
-        usages.set(
-          threadId,
-          addTokenUsage(
-            session.usage,
-            tokenUsageRemainder(selected, session.usage),
-          ),
+      let selected = usages.get(threadId);
+      const counter = counterSessions.get(threadId)?.counterUsage;
+      if (selected && counter)
+        selected = addTokenUsage(
+          selected,
+          tokenUsageRemainder(counter, selected),
         );
+      if (selected && session.usage) {
+        const remainder = tokenUsageRemainder(selected, session.usage);
+        if (remainder.total_tokens > 0) {
+          usages.set(threadId, addTokenUsage(session.usage, remainder));
+          if (session.responseUsageObserved) incomplete = true;
+        }
+      }
       if (
         (session.counterRegressed && !session.responseUsageObserved) ||
         session.expectedResponseTokens > session.responseTokens
@@ -957,7 +969,7 @@ function readSessionEvent(
       if (activity.status === "running") {
         session.calls.set(activity.id, activity);
       }
-      session.activities.push(activity);
+      session.activities.push({ index: session.eventIndex - 1, activity });
       return;
     }
     if (
@@ -968,8 +980,11 @@ function readSessionEvent(
       const call = session.calls.get(payload["call_id"]);
       if (call !== undefined) {
         session.activities.push({
-          ...call,
-          status: payload["status"] === "failed" ? "failed" : "completed",
+          index: session.eventIndex - 1,
+          activity: {
+            ...call,
+            status: payload["status"] === "failed" ? "failed" : "completed",
+          },
         });
         session.calls.delete(call.id);
       }
@@ -1002,7 +1017,7 @@ function readSessionEvent(
       !session.prose.has(`${activity.kind}:${activity.description}`)
     ) {
       session.prose.add(`${activity.kind}:${activity.description}`);
-      session.activities.push(activity);
+      session.activities.push({ index: session.eventIndex - 1, activity });
     }
     return;
   }
@@ -1143,7 +1158,7 @@ function recordReasoningActivity(
   }
   reasoning.activity = activity;
   session.prose.add(`${activity.kind}:${activity.description}`);
-  session.activities.push(activity);
+  session.activities.push({ index: session.eventIndex - 1, activity });
 }
 
 function sessionProgressUpdates(

@@ -2782,6 +2782,8 @@ describe("recorded Deep worker homes", () => {
 
 test.each([
   [150_000, 15_000, 100_000, 200_000],
+  [150_000, 15_000, 100_000, 20_000],
+  [100_000, 50_000, 110_000, 10_000],
   [100_000, 50_000, 200_000, 10_000],
   [100_000, 10_000, 100_000, 10_000],
 ] as const)(
@@ -2837,6 +2839,9 @@ test.each([
         input_tokens: Math.max(input, counterInput),
         output_tokens: Math.max(output, counterOutput),
       });
+      if (counterInput > input || counterOutput > output)
+        expect(snapshot.usage).toMatchObject({ coverage: "partial" });
+      else expect(snapshot.usage).not.toMatchObject({ coverage: "partial" });
       const measured = tokenUsage(snapshot.usage);
       expect(measured).not.toBeNull();
       expect(lowerBounds.length).toBeGreaterThan(0);
@@ -2945,6 +2950,81 @@ test.each(["no-reader", "pending-reader"] as const)(
       const snapshot = await tracker.stop();
       expect(snapshot.cost?.estimatedUsd).toBeGreaterThan(0.003);
       expect(costs.length).toBeGreaterThan(0);
+    } finally {
+      await tracker.stop();
+    }
+  },
+);
+
+test.each(["single", "identical", "prefix-first", "prefix-last"] as const)(
+  "forwards copied worker activities without replaying completed calls: %s",
+  async (copy) => {
+    const { home, worker } = await workerSessionFixture();
+    const recordedHome = await codexHome();
+    await mkdir(join(recordedHome, "sessions"));
+    const second = join(recordedHome, "sessions", "worker-copy.jsonl");
+    const call = (id: string) => ({
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "exec_command",
+        call_id: id,
+        arguments: JSON.stringify({ cmd: "rg -n source routes/login.ts" }),
+      },
+    });
+    const done = (id: string) => ({
+      type: "response_item",
+      payload: { type: "function_call_output", call_id: id },
+    });
+    const prefix =
+      (await readFile(worker, "utf8")) + jsonLines([call("first")]) + "\n";
+    const complete = prefix + jsonLines([done("first")]) + "\n";
+    await writeFile(worker, copy === "prefix-first" ? prefix : complete);
+    if (copy !== "single")
+      await writeFile(second, copy === "prefix-last" ? prefix : complete);
+    const activities: ScanActivity[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      scanDirectory: join(home, "scan"),
+      model: "gpt-5.6-sol",
+      repository: "/code/juice-shop",
+      onActivity: (activity) => activities.push(activity),
+    });
+    tracker.setAttributionReader(async () => ({
+      formatVersion: 1,
+      legacy: true,
+      workerCodexHome: recordedHome,
+      executionThreadIds: [],
+      owner: {
+        threadId: "scan-thread",
+        turnId: null,
+        startedAt: "2026-09-01T00:00:00Z",
+      },
+      startedAt: "2026-09-01T00:00:00Z",
+      completedAt: null,
+    }));
+    tracker.start("scan-thread");
+    try {
+      await tracker.refresh();
+      expect(activities.map(({ id, status }) => [id, status])).toEqual([
+        ["worker-thread:first", "running"],
+        ["worker-thread:first", "completed"],
+      ]);
+      await writeFile(worker, complete);
+      if (copy !== "single") await writeFile(second, complete);
+      await tracker.refresh();
+      expect(activities).toHaveLength(2);
+      const later = jsonLines([call("second"), done("second")]) + "\n";
+      await appendFile(worker, later);
+      await tracker.refresh();
+      if (copy !== "single") await appendFile(second, later);
+      await tracker.stop();
+      expect(activities.map(({ id, status }) => [id, status])).toEqual([
+        ["worker-thread:first", "running"],
+        ["worker-thread:first", "completed"],
+        ["worker-thread:second", "running"],
+        ["worker-thread:second", "completed"],
+      ]);
     } finally {
       await tracker.stop();
     }
