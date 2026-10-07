@@ -1012,17 +1012,17 @@ test("retrieves complete potential duplicates without vectors or review calls", 
   );
 });
 
-test("SQLite filters repository and embedding compatibility before exact cosine ranking", async () => {
+test("SQLite filters repository and embedding compatibility before cosine ranking", async () => {
   const { store, environment } = await fixture();
   await store.initialize();
   const anchor = embedded(1, [7, 0]);
-  const boundary = embedded(2, [0.55, Math.sqrt(1 - 0.55 ** 2)]);
+  const above = embedded(2, [0.56, Math.sqrt(1 - 0.56 ** 2)]);
   const below = embedded(3, [0.54, Math.sqrt(1 - 0.54 ** 2)]);
   const otherModel = embedded(4, [1, 0], "other-model");
   const otherDimensions = embedded(5, [1, 0, 0]);
   const foreign = embedded(6);
   await store.insert(
-    [anchor, below, otherModel, otherDimensions, boundary],
+    [anchor, below, otherModel, otherDimensions, above],
     "repository-a",
   );
   await store.insert([foreign], "repository-b");
@@ -1032,7 +1032,7 @@ test("SQLite filters repository and embedding compatibility before exact cosine 
     }),
   ).toEqual({
     finding: anchor.finding,
-    potentialDuplicates: [boundary.finding],
+    potentialDuplicates: [above.finding],
   });
   expect(
     await store.findPotentialDuplicates(anchor.finding.findingId, {
@@ -1040,7 +1040,7 @@ test("SQLite filters repository and embedding compatibility before exact cosine 
     }),
   ).toEqual({
     finding: anchor.finding,
-    potentialDuplicates: [foreign.finding, boundary.finding],
+    potentialDuplicates: [foreign.finding, above.finding],
   });
   await expect(
     store.findPotentialDuplicates(anchor.finding.findingId, {
@@ -1060,7 +1060,7 @@ print("null")`,
         repositoryId: "repository-a",
       })
     ).potentialDuplicates,
-  ).toEqual([boundary.finding]);
+  ).toEqual([above.finding]);
   await expect(
     store.findPotentialDuplicates(anchor.finding.findingId, {
       allRepositories: true,
