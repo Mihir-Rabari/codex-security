@@ -423,10 +423,11 @@ export function normalizeSavedScanCoverage(sources: ScanDraftInput[]): void {
   }
 }
 
-async function preserveScanDraft(
+export async function preserveScanDraft(
   context: ArtifactContext,
   input: ScanDraftInput,
   saveCheckpoint = true,
+  archivedSources?: SavedScanDraft[],
 ): Promise<{ input: ScanDraftInput; previousDigest: string }> {
   const currentCheckpointName = scanDraftCheckpointName(input);
   const requiresClosureValidation = resolvedDeferred(input.coverage).length > 0;
@@ -446,7 +447,7 @@ async function preserveScanDraft(
   );
   const archived =
     context.layout === "worker"
-      ? await readArchivedWorkerCheckpoints(context)
+      ? (archivedSources ?? (await readArchivedWorkerCheckpoints(context)))
       : [];
   if (previous) {
     current.unshift({ input: previous, modifiedMs: previousState.modifiedMs });

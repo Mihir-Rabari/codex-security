@@ -273,13 +273,17 @@ export function aggregateSourceCoverage(
     "surfaces",
     "explicitExclusions",
     "deferred",
+    "resolvedDeferred",
     "openQuestions",
     "reviews",
   ]) {
     const entries = sources.flatMap(
       (source) => (source[field] as unknown[] | undefined) ?? [],
     );
-    if (entries.length || field !== "openQuestions")
+    if (
+      entries.length ||
+      !["openQuestions", "resolvedDeferred"].includes(field)
+    )
       result[field] = structuredClone(entries);
   }
   if (
@@ -454,6 +458,16 @@ export function projectDiscoveryCoverage(
         };
       },
     ),
+    ...(coverage.resolvedDeferred === undefined
+      ? {}
+      : {
+          resolvedDeferred: (
+            coverage.resolvedDeferred as Record<string, unknown>[]
+          ).map((item) => ({
+            ...item,
+            id: `${worker.id}-attempt-${worker.attempt ?? "unknown"}-resolved-${item.id}`,
+          })),
+        }),
     ...(coverage.openQuestions === undefined
       ? {}
       : {

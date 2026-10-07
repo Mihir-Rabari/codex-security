@@ -14,6 +14,7 @@ import type { DeepReducerPageInput } from "./artifact-deep-reducer-pages.js";
 import {
   normalizeSavedScanCoverage,
   parsePersistedScanDraft,
+  preserveScanDraft,
   readArchivedWorkerCheckpoints,
   saveScanDraftCheckpoint,
 } from "./artifact-scan-draft.js";
@@ -92,7 +93,7 @@ export async function readDeepReductionSources(
           worker.resultPath,
           bound.artifacts.workersRoot,
         );
-        const result = parseStoredScanDraft(
+        let result = parseStoredScanDraft(
           await readJsonObject(worker.resultPath),
           "Accepted Standard worker " + worker.id,
           bound.scanId,
@@ -104,13 +105,6 @@ export async function readDeepReductionSources(
           throw new Error(
             "An assigned Standard worker wrote only a checkpoint, not a complete result.",
           );
-        result.findings = result.findings.map((finding, index) => ({
-          ...finding,
-          provenance: {
-            ...(finding.provenance as Record<string, unknown>),
-            sourceFindingIds: [`${worker.id}:${index}`],
-          },
-        }));
         // Accepted direct-file results may follow an unreadable failed checkpoint.
         const archived = await readArchivedWorkerCheckpoints(
           {
@@ -164,10 +158,32 @@ export async function readDeepReductionSources(
             }
           }),
         );
+        if (archived.length) {
+          result = (
+            await preserveScanDraft(
+              {
+                ...context,
+                root: dirname(worker.resultPath),
+                layout: "worker",
+                scanId: result.scanId,
+              },
+              result,
+              false,
+              archived,
+            )
+          ).input;
+        }
         normalizeSavedScanCoverage([
           result,
           ...archived.map(({ input }) => input),
         ]);
+        result.findings = result.findings.map((finding, index) => ({
+          ...finding,
+          provenance: {
+            ...(finding.provenance as Record<string, unknown>),
+            sourceFindingIds: [`${worker.id}:${index}`],
+          },
+        }));
         const { coverage, ...reduction } = result;
         return {
           workerId: worker.id,

@@ -2200,19 +2200,20 @@ async function testReducerCoveragePersistenceBinding() {
           },
         });
         const invocation = await readJson(fixture.markerPath);
-        const prefix =
-          "mcp_servers.cs_artifacts.env.CODEX_SECURITY_REDUCER_CONTEXT_JSON=";
-        const encoded = invocation.argv.find((arg: string) =>
-          arg.startsWith(prefix),
-        );
+        const encoded = nativeConfigOverrides(invocation.argv)
+          .map((value) => parseToml(value))
+          .map((config) => {
+            const servers = config.mcp_servers as
+              Record<string, { env?: Record<string, string> }> | undefined;
+            return servers?.cs_artifacts?.env
+              ?.CODEX_SECURITY_REDUCER_CONTEXT_JSON;
+          })
+          .findLast((value) => value !== undefined);
         assert.ok(
           encoded,
           "the launched reducer receives its host-bound artifact context",
         );
-        assert.deepEqual(
-          JSON.parse(JSON.parse(encoded.slice(prefix.length))),
-          deepReducer,
-        );
+        assert.deepEqual(JSON.parse(encoded), deepReducer);
       }
     }
   });
