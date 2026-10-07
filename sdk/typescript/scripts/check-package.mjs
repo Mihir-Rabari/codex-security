@@ -18,7 +18,10 @@ import {
 } from "./package-public-content.mjs";
 import { assertExpectedGitHead } from "./package-provenance.mjs";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
-import { plainTarEntries } from "./package-tar-entries.mjs";
+import {
+  assertStoredSparseContents,
+  readTarArchive,
+} from "./package-tar-entries.mjs";
 import {
   assertTarListingSizes,
   regularTarListingLines,
@@ -48,9 +51,10 @@ const compressedArchive = readFileSync(archivePath);
 const archiveBytes = gunzipSync(compressedArchive, {
   maxOutputLength: MAX_EXPANDED_ASSET_BYTES,
 });
-const rawEntries = plainTarEntries(archiveBytes, (entries) =>
-  validatePackagePaths(entries.map(({ path }) => path)),
-);
+const storedArchive = readTarArchive(archiveBytes);
+const rawEntries = storedArchive.entries;
+validatePackagePaths(rawEntries.map(({ path }) => path));
+assertPublicPackageContents(storedArchive.files, storedArchive.metadata);
 const processEnvironment = { ...process.env };
 delete processEnvironment.TAR_OPTIONS;
 const characterLocale =
@@ -304,6 +308,11 @@ assertExpectedGitHead(
 );
 
 assertPublicPackageContents(archiveFiles);
+for (const path of storedArchive.sparseFiles.keys()) {
+  storedArchive.deferredFiles.set(path, archiveFile(path));
+}
+assertPublicPackageContents(storedArchive.deferredFiles);
+assertStoredSparseContents(storedArchive.sparseFiles, archiveFiles);
 
 if (args.length === 1) {
   const smoke = spawnSync(

@@ -14,10 +14,11 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { gzipSync } from "node:zlib";
+import { brotliCompressSync, gzipSync } from "node:zlib";
 import { describe, expect, test } from "bun:test";
 import {
   archive,
+  cleanCompressedPayload,
   octal,
   paxRecords,
   tarRecord,
@@ -365,6 +366,185 @@ describe("npm package tar listings", () => {
           status: result.status,
           stderr: result.stderr,
         }).toEqual({ representation, status: 0, stderr: "" });
+      }
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
+  test("checks reconstructed sparse binary assets and their discarded metadata", () => {
+    const root = mkdtempSync(join(tmpdir(), "codex-package-sparse-assets-"));
+    try {
+      const logo = readFileSync(
+        new URL(
+          "../../../plugins/codex-security/assets/logo.png",
+          import.meta.url,
+        ),
+      );
+      const middle = Math.floor(cleanCompressedPayload.length / 2);
+      const cases = [
+        {
+          name: "brotli",
+          files: [["runtime.mjs.br", cleanCompressedPayload, true]],
+        },
+        {
+          name: "mixed-split-brotli",
+          files: [
+            [
+              "runtime.mjs.br.part-000",
+              cleanCompressedPayload.subarray(0, middle),
+              true,
+            ],
+            [
+              "runtime.mjs.br.part-001",
+              cleanCompressedPayload.subarray(middle),
+              false,
+            ],
+          ],
+        },
+        {
+          name: "mixed-sparse-split-tail",
+          files: [
+            [
+              "runtime.mjs.br.part-000",
+              cleanCompressedPayload.subarray(0, middle),
+              true,
+            ],
+            [
+              "runtime.mjs.br.part-001",
+              cleanCompressedPayload.subarray(middle),
+              "0.1-tail",
+            ],
+          ],
+          error: "npm tarball contains trailing Brotli data",
+        },
+        { name: "png", files: [["logo.png", logo, true]] },
+        {
+          name: "expanded-marker",
+          files: [
+            [
+              "runtime.mjs.br",
+              brotliCompressSync(Buffer.from("go/synthetic-reference")),
+              true,
+            ],
+          ],
+          error: "npm tarball contains an internal reference.",
+        },
+        {
+          name: "map-padding-marker",
+          files: [["runtime.mjs.br", cleanCompressedPayload, true]],
+          mapMarker: true,
+          error: "npm tarball contains an internal reference.",
+        },
+        {
+          name: "discarded-tail-marker",
+          files: [["logo.png", logo, true]],
+          tailMarker: true,
+          error: "npm tarball contains an internal reference.",
+        },
+      ] satisfies {
+        name: string;
+        files: [string, Buffer, boolean | "0.1-tail"][];
+        mapMarker?: boolean;
+        tailMarker?: boolean;
+        error?: string;
+      }[];
+      for (const scenario of cases) {
+        const records = scenario.files.map(([name, contents, sparse]) => {
+          const path = `package/_bundled_plugin/${name}`;
+          if (!sparse) return tarRecord(contents, { name: path });
+          if (sparse === "0.1-tail") {
+            return Buffer.concat([
+              tarRecord(
+                paxRecords({
+                  "GNU.sparse.size": String(contents.length),
+                  "GNU.sparse.numblocks": "1",
+                  "GNU.sparse.map": `0,${contents.length}`,
+                }),
+                { name: "PaxHeaders/asset", type: 0x78 },
+              ),
+              tarRecord(
+                Buffer.concat([
+                  contents,
+                  Buffer.from("go/synthetic-reference"),
+                ]),
+                { name: path },
+              ),
+            ]);
+          }
+          const map = Buffer.alloc(512);
+          map.write(`1\n0\n${contents.length}\n`);
+          if (scenario.mapMarker) map.write("go/synthetic-reference", 128);
+          return Buffer.concat([
+            tarRecord(
+              paxRecords({
+                "GNU.sparse.major": "1",
+                "GNU.sparse.minor": "0",
+                "GNU.sparse.name": path,
+                "GNU.sparse.realsize": String(contents.length),
+              }),
+              { name: "PaxHeaders/asset", type: 0x78 },
+            ),
+            tarRecord(
+              Buffer.concat([
+                map,
+                contents,
+                ...(scenario.tailMarker
+                  ? [Buffer.from("go/synthetic-reference")]
+                  : []),
+              ]),
+              { name: "package/GNUSparseFile.1/asset" },
+            ),
+          ]);
+        });
+        const archivePath = join(root, `${scenario.name}.tgz`);
+        writeFileSync(
+          archivePath,
+          gzipSync(Buffer.concat([packageTar(), ...records])),
+        );
+        const contractPath = join(root, "contract.json");
+        writeFileSync(
+          contractPath,
+          JSON.stringify({
+            ...pluginContract,
+            shippedExact: [
+              ...pluginContract.shippedExact,
+              ...scenario.files.map(([name]) => name),
+            ],
+          }),
+        );
+        const environment = { ...process.env };
+        delete environment["CODEX_SECURITY_EXPECTED_GIT_HEAD"];
+        const result = spawnSync(
+          commandPath("node"),
+          [
+            fileURLToPath(
+              new URL("../scripts/check-package.mjs", import.meta.url),
+            ),
+            archivePath,
+            contractPath,
+          ],
+          {
+            cwd: root,
+            env: environment,
+            encoding: "utf8",
+            timeout: 30_000,
+            windowsHide: true,
+          },
+        );
+        if (scenario.error) {
+          expect({ scenario: scenario.name, status: result.status }).toEqual({
+            scenario: scenario.name,
+            status: 1,
+          });
+          expect(result.stderr).toContain(scenario.error);
+        } else {
+          expect({
+            scenario: scenario.name,
+            status: result.status,
+            stderr: result.stderr,
+          }).toEqual({ scenario: scenario.name, status: 0, stderr: "" });
+        }
       }
     } finally {
       rmSync(root, { force: true, recursive: true });

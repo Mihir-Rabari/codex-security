@@ -1,7 +1,4 @@
-import {
-  assertPublicPackageContents,
-  assertPublicText,
-} from "./package-public-content.mjs";
+import { assertPublicText } from "./package-public-content.mjs";
 
 const blockSize = 512;
 function invalidTarEntry() {
@@ -37,10 +34,72 @@ function paxAttributes(contents) {
   return attributes;
 }
 
-export function plainTarEntries(archiveBytes, validateEntries = () => {}) {
+function sparseMap(contents) {
+  let offset = 0;
+  function number() {
+    while (offset < contents.length) {
+      const end = contents.indexOf(0x0a, offset);
+      if (end === -1) invalidTarEntry();
+      const line = contents.subarray(offset, end).toString("ascii");
+      offset = end + 1;
+      if (line.startsWith("#")) continue;
+      if (!/^[0-9]*$/u.test(line)) invalidTarEntry();
+      return Number(line);
+    }
+    invalidTarEntry();
+  }
+  const count = number();
+  const extents = [];
+  for (let index = 0; index < count; index++) {
+    extents.push({ offset: number(), size: number() });
+  }
+  const dataOffset = Math.ceil(offset / blockSize) * blockSize;
+  if (dataOffset > contents.length) invalidTarEntry();
+  return { contents, extents, dataOffset };
+}
+
+export function assertStoredSparseContents(sparseFiles, extractedFiles) {
+  for (const [path, { contents, extents, dataOffset }] of sparseFiles) {
+    const extracted = extractedFiles.get(path);
+    let metadata;
+    // GNU tar pads stored extents; libarchive also accepts packed extents.
+    for (const padded of [false, true]) {
+      let offset = dataOffset;
+      const discarded = [contents.subarray(0, dataOffset)];
+      const matches = extents.every((extent, index) => {
+        const end = offset + extent.size;
+        if (
+          !contents
+            .subarray(offset, end)
+            .equals(
+              extracted.subarray(extent.offset, extent.offset + extent.size),
+            )
+        )
+          return false;
+        const next =
+          padded && index < extents.length - 1
+            ? Math.ceil(end / blockSize) * blockSize
+            : end;
+        discarded.push(contents.subarray(end, next));
+        offset = next;
+        return true;
+      });
+      if (matches) {
+        discarded.push(contents.subarray(offset));
+        metadata = Buffer.concat(discarded);
+        break;
+      }
+    }
+    if (metadata === undefined) invalidTarEntry();
+    assertPublicText(metadata.toString("utf8"));
+  }
+}
+
+export function readTarArchive(archiveBytes) {
   const entries = [];
   const archiveFiles = new Map();
   const archiveMetadata = [];
+  const sparseFiles = new Map();
   let offset = 0;
   const globalAttributes = new Map();
   const nextAttributes = new Map();
@@ -110,10 +169,13 @@ export function plainTarEntries(archiveBytes, validateEntries = () => {}) {
       if (directory)
         archiveMetadata.push(archiveBytes.subarray(offset, nextOffset));
       else {
-        archiveFiles.set(
-          path,
-          archiveBytes.subarray(offset + blockSize, contentsEnd),
-        );
+        const contents = archiveBytes.subarray(offset + blockSize, contentsEnd);
+        if (
+          Number.parseInt(attribute("GNU.sparse.major"), 10) === 1 &&
+          /\.(?:png|br(?:\.part-[0-9]+)?)$/iu.test(path)
+        )
+          sparseFiles.set(path, sparseMap(contents));
+        else archiveFiles.set(path, contents);
         archiveMetadata.push(
           header,
           archiveBytes.subarray(contentsEnd, nextOffset),
@@ -127,7 +189,21 @@ export function plainTarEntries(archiveBytes, validateEntries = () => {}) {
 
   if (archiveBytes.subarray(offset).some((byte) => byte !== 0))
     invalidTarEntry();
-  validateEntries(entries);
-  assertPublicPackageContents(archiveFiles, Buffer.concat(archiveMetadata));
-  return entries;
+  const deferredStreams = new Set(
+    [...sparseFiles.keys()].map((path) => path.replace(/\.part-[0-9]+$/iu, "")),
+  );
+  const deferredFiles = new Map();
+  for (const [path, contents] of archiveFiles) {
+    if (deferredStreams.has(path.replace(/\.part-[0-9]+$/iu, ""))) {
+      deferredFiles.set(path, contents);
+      archiveFiles.delete(path);
+    }
+  }
+  return {
+    entries,
+    files: archiveFiles,
+    metadata: Buffer.concat(archiveMetadata),
+    sparseFiles,
+    deferredFiles,
+  };
 }

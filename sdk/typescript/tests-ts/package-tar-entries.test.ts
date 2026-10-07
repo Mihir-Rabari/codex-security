@@ -14,12 +14,30 @@ type PlainTarEntry = {
 };
 
 type PackageTarEntries = {
-  plainTarEntries: (archiveBytes: Buffer) => PlainTarEntry[];
+  readTarArchive: (archiveBytes: Buffer) => {
+    entries: PlainTarEntry[];
+    files: Map<string, Buffer>;
+    metadata: Buffer;
+  };
 };
 
-const { plainTarEntries } = (await import(
+const { readTarArchive } = (await import(
   new URL("../scripts/package-tar-entries.mjs", import.meta.url).href
 )) as PackageTarEntries;
+const { assertPublicPackageContents } = (await import(
+  new URL("../scripts/package-public-content.mjs", import.meta.url).href
+)) as {
+  assertPublicPackageContents: (
+    files: Map<string, Buffer>,
+    metadata: Buffer,
+  ) => void;
+};
+
+function plainTarEntries(bytes: Buffer): PlainTarEntry[] {
+  const archive = readTarArchive(bytes);
+  assertPublicPackageContents(archive.files, archive.metadata);
+  return archive.entries;
+}
 
 const invalidTarEntryError = "npm tarball contains an invalid tar entry.";
 const internalReferenceError = "npm tarball contains an internal reference.";
