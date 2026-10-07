@@ -792,20 +792,29 @@ def test_diff_inventory_includes_type_changed_files(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows paths cannot retain arbitrary non-UTF-8 bytes")
-def test_diff_inventory_preserves_non_utf8_path_bytes(tmp_path: Path) -> None:
+def test_diff_inventory_rejects_non_utf8_path_and_preserves_output(tmp_path: Path) -> None:
     repository = make_repository(tmp_path)
     git(repository, "add", ".")
     git(repository, "commit", "-qm", "base")
     base = git(repository, "rev-parse", "HEAD")
-    write_file(repository, os.fsdecode(b"app/caf\xe9.py"), b"changed = True\n")
-    git(repository, "add", ".")
-    git(repository, "commit", "-qm", "Add byte path")
-    output = tmp_path / "in_scope_files.txt"
-    result = run_inventory(
-        repository, ".", output, arguments=["--diff-base", base, "--diff-head", "HEAD"]
+    blob = git(repository, "rev-parse", f"{base}:app/routes.py")
+    subprocess.run(
+        ["git", "-C", str(repository), "update-index", "-z", "--index-info"],
+        input=b"100644 " + blob.encode("ascii") + b"\tapp/caf\xe9.py\0",
+        check=True,
+        capture_output=True,
     )
-    assert result.returncode == 0, result.stderr
-    assert output.read_bytes() == b"app/caf\xe9.py\n"
+    head = git(
+        repository, "commit-tree", git(repository, "write-tree"), "-p", base, "-m", "Byte path"
+    )
+    output = tmp_path / "in_scope_files.txt"
+    output.write_text("previous.py\n", encoding="utf-8")
+    result = run_inventory(
+        repository, ".", output, arguments=["--diff-base", base, "--diff-head", head]
+    )
+    assert result.returncode == 2
+    assert "cannot be encoded as UTF-8 for the file inventory" in result.stderr
+    assert output.read_text(encoding="utf-8") == "previous.py\n"
 
 
 def test_local_diff_inventory_skips_unreadable_files(
