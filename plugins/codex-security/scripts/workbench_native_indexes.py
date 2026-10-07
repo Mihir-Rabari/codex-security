@@ -448,7 +448,7 @@ def _active_findings(
 ) -> Iterator[dict[str, Any]]:
     target_filters = []
     target_values = []
-    if target_ids:
+    if target_ids is not None:
         placeholders = ", ".join("?" for _ in target_ids)
         target_filters.append(f"targets.id IN ({placeholders})")
         target_values.extend(target_ids)

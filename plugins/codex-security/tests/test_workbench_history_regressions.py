@@ -646,7 +646,9 @@ def test_pruned_coverage_keeps_history_but_tampering_is_rejected(
         assert "changed" in result["stderr"]
 
 
-@pytest.mark.parametrize("selector", ["target", "query"])
+@pytest.mark.parametrize(
+    "selector", ["target", "query", "empty-target", "empty-query", "not-scanned"]
+)
 def test_selected_repository_ignores_an_unrelated_tampered_scan(history, selector) -> None:
     state, root, repository = history
     selected = create_cli_scan(state, root, repository)
@@ -659,15 +661,20 @@ def test_selected_repository_ignores_an_unrelated_tampered_scan(history, selecto
     result = run_workbench(
         state,
         "list-repositories",
-        *(
-            ["--target-id", selected["targetId"]]
-            if selector == "target"
-            else ["--query", str(repository)]
-        ),
+        *{
+            "target": ["--target-id", selected["targetId"]],
+            "query": ["--query", str(repository)],
+            "empty-target": ["--target-id", "synthetic-no-such-target"],
+            "empty-query": ["--query", "synthetic-no-matching-repository"],
+            "not-scanned": ["--status", "not_scanned"],
+        }[selector],
     )
-    assert len(result["repositories"]) == 1
-    assert result["repositories"][0]["targetId"] == selected["targetId"]
-    assert result["repositories"][0]["openFindingsCount"] == 1
+    if selector in {"target", "query"}:
+        assert len(result["repositories"]) == 1
+        assert result["repositories"][0]["targetId"] == selected["targetId"]
+        assert result["repositories"][0]["openFindingsCount"] == 1
+    else:
+        assert result["repositories"] == []
     unfiltered = run_workbench(state, "list-repositories", check=False)
     assert unfiltered["returncode"] != 0
     assert "changed after completion" in unfiltered["stderr"]
