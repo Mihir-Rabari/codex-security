@@ -107,8 +107,8 @@ codex-security scan /path/to/repository \
 
 In the SDK, select your model through `codexOverrides.model` and pass
 `auth: "api-key"` and `cyberAccessProgram: "daybreak_blue"` in the scan options.
-Add `--mode deep` for Deep Scan. The selection reaches discovery and reducer
-workers, including resumed workers. See [Select a Cyber access program](#select-a-cyber-access-program)
+Use `--mode deep` in the CLI or `mode: "deep"` in SDK scan options for Deep Scan.
+The selection reaches discovery and reducer workers, including resumed workers. See [Select a Cyber access program](#select-a-cyber-access-program)
 for configuration precedence and the API-key feature setting.
 
 The previously documented `gpt-daybreak-blue-latest` alias is
