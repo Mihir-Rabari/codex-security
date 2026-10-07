@@ -514,7 +514,7 @@ export class CodexSecurity {
   /** @internal */
   public constructor(
     config: CodexSecurityConfig,
-    dependencies: ClientDependencies,
+    dependencies: ClientDependencies | undefined,
     runtimeOptions: CodexSecurityRuntimeOptions,
   );
   public constructor(
@@ -4013,14 +4013,7 @@ export async function listRepositoryFindings(
 export function createSecurity(
   config: CodexSecurityConfig = {},
 ): CodexSecurity {
-  return createSecurityInternal(config, { surface: "sdk" });
-}
-
-export function createSecurityInternal(
-  config: CodexSecurityConfig = {},
-  runtimeOptions: CodexSecurityRuntimeOptions,
-): CodexSecurity {
-  return new CodexSecurity(config, DEFAULT_DEPENDENCIES, runtimeOptions);
+  return new CodexSecurity(config);
 }
 
 export async function initialCredentialsAvailable(
@@ -4183,14 +4176,7 @@ function scanRecipe({
 }): JsonObject {
   return {
     repository,
-    target: {
-      kind: target.kind,
-      paths: [...target.paths],
-      ...(target.base === undefined ? {} : { base: target.base }),
-      ...(target.head === undefined ? {} : { head: target.head }),
-      ...(target.baseRef === undefined ? {} : { baseRef: target.baseRef }),
-      ...(target.headRef === undefined ? {} : { headRef: target.headRef }),
-    },
+    target: { ...target, paths: [...target.paths] },
     mode,
     ...(repositoryRevision === null ? {} : { repositoryRevision }),
     pluginVersion,

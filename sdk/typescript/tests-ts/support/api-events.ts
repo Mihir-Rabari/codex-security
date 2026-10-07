@@ -11,7 +11,9 @@ import { PLUGIN_ROOT, copyCompletedScan } from "../plugin-root.js";
 type PreparedRuntime = Awaited<
   ReturnType<
     NonNullable<
-      ConstructorParameters<typeof CodexSecurity>[1]["prepareRuntime"]
+      NonNullable<
+        ConstructorParameters<typeof CodexSecurity>[1]
+      >["prepareRuntime"]
     >
   >
 >;

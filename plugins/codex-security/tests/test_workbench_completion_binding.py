@@ -964,7 +964,7 @@ def test_deep_completion_preserves_running_scan_after_transient_report_failure(
     assert completed["scan"]["findingCount"] == 1
 
 
-def test_deep_completion_retries_transient_report_failure_within_one_invocation(
+def test_deep_completion_retries_transient_report_failure_on_next_invocation(
     tmp_path: Path,
 ) -> None:
     state_dir, scan_id, scan_dir = _start_deep_scan_with_draft_findings(tmp_path)
@@ -994,13 +994,17 @@ def test_deep_completion_retries_transient_report_failure_within_one_invocation(
         "importlib.util.spec_from_file_location = injected_spec\n"
     )
 
-    completed = run_workbench(
+    failed = run_workbench(
         state_dir,
         "complete-scan",
         "--scan-id",
         scan_id,
         environment={"PYTHONPATH": str(hook_dir)},
+        check=False,
     )
+    assert failed["returncode"] != 0
+    assert "fixture report projection temporarily unavailable" in str(failed["stderr"])
+    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
 
     assert marker_path.is_file()
     assert completed["scan"]["progress"]["status"] == "complete"

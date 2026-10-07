@@ -103,12 +103,6 @@ export async function runScanTurn(
         }
         reportScanActivities(event, options.repository, options);
         for (const progress of scanProgressUpdatesFromEvent(event)) {
-          if (
-            options.expectedFilesTotal !== undefined &&
-            progress.filesTotal !== options.expectedFilesTotal
-          ) {
-            continue;
-          }
           notifyObserver(options, "onProgress")(progress);
         }
         const workerStatus = workerStatusFromEvent(event);

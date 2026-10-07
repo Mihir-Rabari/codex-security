@@ -1145,9 +1145,21 @@ process.exit(0);
   test.each(["home", "profile", "overrides", "override-away"])(
     "preserves native command auth selection from %s",
     async (selection) => {
-      const home = await temporaryDirectory(
+      const root = await temporaryDirectory(
         "codex-security-command-comparison-",
       );
+      const home =
+        selection === "home" && process.platform !== "win32"
+          ? join(root, " selected home ")
+          : root;
+      if (home !== root) {
+        await mkdir(home, { mode: 0o700 });
+        await mkdir(home.trim());
+        await writeFile(
+          join(home.trim(), "config.toml"),
+          'model_provider = "openai"\n',
+        );
+      }
       const commandAuth = selection !== "override-away";
       const provider = {
         name: "Synthetic",
@@ -1324,13 +1336,24 @@ process.exit(0);
           codex.startThread(options!) as ReturnType<Codex["startThread"]>,
       );
       try {
-        await expect(
-          matchScanFindings(
-            { before: [finding("before")], after: [finding("after")] },
-            options,
-          ),
-        ).rejects.toThrow("conflicts with command authentication");
-        expect(startThread).not.toHaveBeenCalled();
+        for (const codexOverrides of [
+          {},
+          { model_providers: { synthetic: { auth: null } } },
+          { model_providers: null },
+          {
+            profile: "review",
+            profiles: { review: { model_provider: "synthetic" } },
+            model_providers: { synthetic: { auth: null } },
+          },
+        ] as JsonObject[]) {
+          await expect(
+            matchScanFindings(
+              { before: [finding("before")], after: [finding("after")] },
+              { ...options, config: { codexOverrides } },
+            ),
+          ).rejects.toThrow("conflicts with command authentication");
+          expect(startThread).not.toHaveBeenCalled();
+        }
 
         // A complete command provider selected by the caller keeps scan precedence.
         await matchScanFindings(
@@ -1888,6 +1911,24 @@ process.exit(0);
     expect(environment["OPENAI_API_KEY"]).toBe("synthetic-comparison-key");
     expect(environment["CODEX_HOME"]).toBe(ambientHome);
   });
+
+  test.skipIf(process.platform === "win32")(
+    "recognizes stored credentials in a literal spaced home",
+    async () => {
+      const root = await temporaryDirectory("codex-security-spaced-home-");
+      const home = join(root, " selected home ");
+      await mkdir(home);
+      await mkdir(home.trim());
+      await writeFile(join(home, "auth.json"), "{}");
+      const environment = await comparisonEnvironment({
+        CODEX_HOME: home,
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        OPENAI_API_KEY: "",
+      });
+      expect(environment["CODEX_HOME"]).toBe(home);
+      expect(environment["OPENAI_API_KEY"]).toBeUndefined();
+    },
+  );
 
   test.skipIf(process.platform !== "win32")(
     "recognizes stored credentials under a backslash home-relative path",

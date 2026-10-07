@@ -118,10 +118,25 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
-  test.each(["direct", "profile"])(
+  test.each([
+    "direct",
+    "profile",
+    "profile-providers",
+    "profile-providers-ambient",
+    "profile-inherited-cwd",
+    "profile-overridden-cwd",
+    "profile-strict",
+    "null optional args",
+    "null optional cwd",
+  ])(
     "runs native command authentication without importing credentials (%s)",
     async (selection) => {
-      const profile = selection === "profile";
+      const profile =
+        selection === "profile" || selection.startsWith("profile-");
+      const profileProviders = profile && selection !== "profile";
+      const inheritedCwd = selection === "profile-inherited-cwd";
+      const overriddenCwd = selection === "profile-overridden-cwd";
+      const strict = selection === "profile-strict";
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const home = join(root, "model-home");
@@ -135,25 +150,60 @@ describe("CodexSecurity orchestration", () => {
       await writeFile(join(home, "auth.json"), '{"auth_mode":"chatgpt"}\n');
       const auth = {
         command: "./synthetic-auth",
-        args: ["token"],
+        args: selection === "null optional args" ? null : ["token"],
         refresh_interval_ms: 1000,
-        ...(profile ? { cwd: "helpers" } : {}),
+        ...(profile
+          ? { cwd: "helpers" }
+          : selection === "null optional cwd"
+            ? { cwd: null }
+            : {}),
       };
+      const definition = {
+        name: "Synthetic",
+        base_url: "https://provider.example/v1",
+        wire_api: "responses",
+        auth,
+      };
+      const rootDefinition = {
+        ...definition,
+        auth: {
+          ...auth,
+          ...(inheritedCwd || overriddenCwd ? { cwd: "root-helpers" } : {}),
+        },
+      };
+      const selectedDefinition =
+        inheritedCwd || overriddenCwd
+          ? {
+              auth: {
+                command: "./selected-auth",
+                ...(overriddenCwd ? { cwd: "selected-helpers" } : {}),
+              },
+            }
+          : definition;
       const overrides = {
+        ...(strict ? { approval_policy: "never" } : {}),
         ...(profile
           ? {
               profile: "review",
-              profiles: { review: { model_provider: "synthetic.provider" } },
+              profiles: {
+                review: {
+                  model_provider: "synthetic.provider",
+                  service_tier: "fast",
+                  ...(strict ? { approval_policy: "on-request" } : {}),
+                  ...(profileProviders
+                    ? {
+                        model_providers: {
+                          "synthetic.provider": selectedDefinition,
+                        },
+                      }
+                    : {}),
+                },
+              },
             }
           : { model_provider: "synthetic.provider" }),
-        model_providers: {
-          "synthetic.provider": {
-            name: "Synthetic",
-            base_url: "https://provider.example/v1",
-            wire_api: "responses",
-            auth,
-          },
-        },
+        ...(!profileProviders || inheritedCwd || overriddenCwd
+          ? { model_providers: { "synthetic.provider": rootDefinition } }
+          : {}),
       };
       let captured: CodexOptions | undefined;
       const client = new TestClient(
@@ -206,8 +256,25 @@ describe("CodexSecurity orchestration", () => {
         expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
         expect(captured?.env?.["CODEX_HOME"]).toBe(join(state, "codex-home"));
         const provider = {
-          ...overrides.model_providers["synthetic.provider"],
-          auth: { ...auth, cwd: profile ? join(home, "helpers") : home },
+          ...definition,
+          auth: {
+            command: auth.command,
+            refresh_interval_ms: auth.refresh_interval_ms,
+            ...(auth.args === null ? {} : { args: auth.args }),
+            ...(inheritedCwd || overriddenCwd
+              ? { command: "./selected-auth" }
+              : {}),
+            cwd: !profile
+              ? home
+              : join(
+                  home,
+                  inheritedCwd
+                    ? "root-helpers"
+                    : overriddenCwd
+                      ? "selected-helpers"
+                      : "helpers",
+                ),
+          },
         };
         expect(captured!.config).toMatchObject({
           model_provider: "synthetic.provider",
@@ -219,9 +286,9 @@ describe("CodexSecurity orchestration", () => {
           const saved = parseToml(
             await readFile(join(runtimeHome, "config.toml"), "utf8"),
           );
-          expect(saved["model_providers"]).toEqual({
-            "synthetic.provider": provider,
-          });
+          expect(saved["model_provider"]).toBe("openai");
+          expect(saved["model_providers"]).toBeUndefined();
+          expect(saved["profiles"]).toBeUndefined();
         }
         expect(existsSync(join(state, "codex-home", "auth.json"))).toBe(false);
       } finally {
@@ -310,7 +377,7 @@ describe("CodexSecurity orchestration", () => {
                         "plugins",
                         "codex-security",
                         "codex-home",
-                      )]: "read",
+                      )]: { ".": "deny" },
                     },
                   },
                 },
@@ -325,7 +392,7 @@ describe("CodexSecurity orchestration", () => {
                 allow_login_shell: false,
                 model_reasoning_summary: "detailed",
                 show_raw_agent_reasoning: true,
-                windows: { sandbox: "unelevated" },
+                windows: { sandbox: "elevated" },
                 mcp_servers: {
                   private: {
                     command: "echo",
@@ -705,7 +772,20 @@ describe("CodexSecurity orchestration", () => {
     await writeFile(join(ambientHome, "auth.json"), ambientAuthentication);
     const runs: Array<{ home: string; apiKey?: string }> = [];
     const client = new TestClient(
-      { pluginPath: PLUGIN_ROOT },
+      {
+        pluginPath: PLUGIN_ROOT,
+        codexOverrides: {
+          model_provider: "synthetic.account",
+          model_providers: {
+            "synthetic.account": {
+              name: "Synthetic account provider",
+              wire_api: "responses",
+              requires_openai_auth: true,
+              auth: null,
+            },
+          },
+        },
+      },
       {
         environment: {
           CODEX_HOME: ambientHome,

@@ -1,5 +1,4 @@
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   Codex,
@@ -10,6 +9,7 @@ import {
   type TurnOptions,
 } from "@openai/codex-sdk";
 import { z } from "incur";
+import { parse, stringify } from "smol-toml";
 import type { CodexSecuritySurface, ScanAuthMode } from "./api.js";
 import {
   accountStatus,
@@ -48,7 +48,6 @@ import {
 import {
   codexSecurityCredentialHome,
   executablePathForSpawn,
-  expandHome,
   prepareCodexSecurityCredentialHome,
   resolveCodexCommand,
   runCodexCommand,
@@ -580,7 +579,10 @@ async function startReadOnlyCodexThread(
     const homeConfig = await readCodexHomeConfig(source, options.signal);
     homeExecutionConfig = resolveCodexProfile(homeConfig);
     normalizeLegacyWindowsSandboxOverride(homeExecutionConfig);
-    const mergedConfig = deepMerge(homeConfig, requestedConfig ?? {});
+    const mergedConfig = deepMerge(
+      homeConfig,
+      parse(stringify(requestedConfig ?? {})) as JsonObject,
+    );
     const requestedSettings = resolveCodexProfile({
       ...options.config?.codexOverrides,
       profiles: mergedConfig["profiles"] ?? {},
@@ -632,8 +634,9 @@ async function startReadOnlyCodexThread(
     commandAuth &&
     options.auth !== undefined &&
     options.auth !== "auto" &&
-    (!hasCommandAuth(config ?? {}) ||
-      scanModelProvider(config ?? {}) !== scanModelProvider(providerConfig))
+    (!hasCommandAuth(requestedConfig ?? {}) ||
+      scanModelProvider(requestedConfig ?? {}) !==
+        scanModelProvider(providerConfig))
   ) {
     throw new ConfigurationError(
       `Explicit ${options.auth} authentication conflicts with command authentication in the supplied Codex home. ` +
@@ -1325,11 +1328,7 @@ export async function comparisonEnvironment(
     );
     if (status.authenticated) return storedEnvironment;
   }
-  const configuredHome = environmentEntry(environment, "CODEX_HOME")?.trim();
-  const codexHome = configuredHome
-    ? expandHome(configuredHome, environment)
-    : join(homedir(), ".codex");
-  if (existsSync(join(codexHome, "auth.json"))) {
+  if (existsSync(join(home, "auth.json"))) {
     return withoutOpenAiApiKeys(environment);
   }
   return environment;
