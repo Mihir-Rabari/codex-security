@@ -1084,7 +1084,10 @@ function reconcileDeferredSurfaces(
     )
       continue;
     if (inheritedSource) {
-      const latest = matches.find(({ surfaces }) => surfaces.length > 0)!;
+      const latest = matches.find(({ surfaces }) => surfaces.length > 0);
+      // Reconciliation can assign a unique ID to a legacy duplicate surface.
+      // Without an observation for that ID, retain its recovered coverage.
+      if (latest === undefined) continue;
       const latestObservation = observations.get(latest.source);
       const pendingAtSameTime =
         latestObservation &&
