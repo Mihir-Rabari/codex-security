@@ -304,7 +304,7 @@ with ExitStack() as stack:
                 raise FileNotFoundError(errno.ENOENT, "Synthetic missing metadata", str(path)) from None
         # Keep directory checks inside the metadata fixture on every supported Python.
         with patch.object(target_module, "git_command", git_command), \
-             patch.object(os.path, "realpath", side_effect=lambda path, **kwargs: os.path.abspath(path)), \
+             patch.object(os.path, "realpath", side_effect=lambda path, **kwargs: os.path.normpath(path)), \
              patch.object(Path, "stat", recorded_stat), \
              patch.object(Path, "lstat", recorded_stat), \
              patch.object(Path, "is_dir", lambda path, *a, **k: stat.S_ISDIR(records[str(path)].st_mode)), \

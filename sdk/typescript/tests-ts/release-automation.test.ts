@@ -371,8 +371,7 @@ function evaluateWorkflowConditions(
     if (!/^[\s()'/a-z0-9_!=&|-]+$/u.test(expression)) {
       throw new Error(`Unsupported workflow condition: ${condition}`);
     }
-    return `[[ ${expression} ]]
-result=$?
+    return `if [[ ${expression} ]]; then result=0; else result=$?; fi
 if [[ $result != 0 && $result != 1 ]]; then exit "$result"; fi
 printf '%s\n' "$result"`;
   });
@@ -380,7 +379,9 @@ printf '%s\n' "$result"`;
     encoding: "utf8",
   });
   if (result.status !== 0) {
-    throw new Error("Could not evaluate workflow conditions.");
+    throw new Error(
+      `Could not evaluate workflow conditions (status ${result.status}, signal ${result.signal}).\n${result.error?.message ?? ""}\n${result.stderr}`,
+    );
   }
   return result.stdout
     .trimEnd()

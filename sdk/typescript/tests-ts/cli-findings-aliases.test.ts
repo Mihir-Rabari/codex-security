@@ -14,6 +14,7 @@ import sqlite3, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 import workbench_db as workbench
+from filesystem_identity import serialize_filesystem_identity
 state, repository, alias = map(Path, sys.argv[2:5])
 state.mkdir(exist_ok=True)
 with sqlite3.connect(state / "workbench.sqlite3") as connection:
@@ -26,12 +27,12 @@ with sqlite3.connect(state / "workbench.sqlite3") as connection:
         metadata = target.stat()
         insert("security_targets", id=name, current_path=str(target), display_name=name, created_at=timestamp, updated_at=timestamp)
         insert("workspaces", id=name, target_id=name, created_at=timestamp, updated_at=timestamp)
-        insert("scans", id=name, workspace_id=name, target_id=name, target_path=str(target), target_revision="unversioned", target_device=str(metadata.st_dev), target_inode=str(metadata.st_ino), scope=".", mode="standard", scan_dir=str(state / name), status="complete", phase="reporting", started_at=timestamp, completed_at=timestamp, created_at=timestamp, updated_at=timestamp)
+        insert("scans", id=name, workspace_id=name, target_id=name, target_path=str(target), target_revision="unversioned", target_device=serialize_filesystem_identity(metadata.st_dev), target_inode=serialize_filesystem_identity(metadata.st_ino), scope=".", mode="standard", scan_dir=str(state / name), status="complete", phase="reporting", started_at=timestamp, completed_at=timestamp, created_at=timestamp, updated_at=timestamp)
         insert("scan_progress", scan_id=name, updated_at=timestamp)
         insert("findings", id=name, fingerprint=name, rule_id="synthetic-rule", identity_anchor=name, created_at=timestamp, updated_at=timestamp)
         insert("finding_occurrences", id=name, finding_id=name, scan_id=name, title=name, summary="Synthetic finding", severity="high", confidence="high", remediation="Constrain the path", details_json="{}", created_at=timestamp)
     if sys.argv[5] == "stale":
-        connection.execute("UPDATE scans SET target_inode = ? WHERE id = 'alias'", (str(alias.stat().st_ino + 1),))
+        connection.execute("UPDATE scans SET target_inode = ? WHERE id = 'alias'", (serialize_filesystem_identity(alias.stat().st_ino + 1),))
 `;
 
 test("findings list preserves exact saved aliases and rejects their stale ownership", async () => {
@@ -78,7 +79,7 @@ test("findings list preserves exact saved aliases and rejects their stale owners
             "Repository findings are unavailable",
           );
         } else {
-          expect(result).toBe(0);
+          expect(result, stderr.text()).toBe(0);
           const output = JSON.parse(stdout.text());
           expect(output.repository).toBe(await realpath(repository));
           expect(
