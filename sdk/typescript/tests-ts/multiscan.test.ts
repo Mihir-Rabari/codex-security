@@ -6032,7 +6032,9 @@ for (const nested of [false, true]) {
           protectedRoot: root,
           environment: runtime.pluginHelperEnvironment(process.env),
         });
-        expect(selected.executable).toBe(await realpath(PYTHON));
+        expect(await realpath(selected.executable)).toBe(
+          await realpath(PYTHON),
+        );
         return completedScan(settings.outputDir!, "complete", root);
       },
     );
@@ -6640,9 +6642,11 @@ for (const ignoreCase of [false, true]) {
   test(`retained selected restoration respects explicit core.ignorecase=${ignoreCase}`, async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "case-sensitive-source");
+    git(source.path, "mv", "src", "selected-case");
+    git(source.path, "mv", "selected-case", "SRC");
     await writeFile(
       join(paths.root, "other.ts"),
-      "Keep unrelated uppercase path absent.\n",
+      "Keep unrelated case-distinct path absent.\n",
     );
     const blob = git(
       source.path,
@@ -6655,7 +6659,7 @@ for (const ignoreCase of [false, true]) {
       "update-index",
       "--add",
       "--cacheinfo",
-      `100644,${blob},SRC/other.ts`,
+      `100644,${blob},src/other.ts`,
     );
     git(
       source.path,
@@ -6670,7 +6674,7 @@ for (const ignoreCase of [false, true]) {
     const revision = git(source.path, "rev-parse", "HEAD");
     await writeFile(
       paths.input,
-      `id,repository,revision,scope\nrepo,${source.path},${revision},src\n`,
+      `id,repository,revision,scope\nrepo,${source.path},${revision},SRC\n`,
     );
     await runMultiscan(
       options(paths, client(rejecting("Interrupted")), { maxAttempts: 1 }),
@@ -6686,6 +6690,11 @@ for (const ignoreCase of [false, true]) {
     });
     const initial = await runMultiscan(campaign);
     expect(initial).toMatchObject({ completed: 1, skipped: 0 });
+    expect(await results(initial.resultsPath)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ status: "completed", resolvedScope: "SRC" }),
+      ]),
+    );
     const ledger = await readFile(initial.resultsPath);
     const checkout = join(
       paths.output,
@@ -6701,11 +6710,11 @@ for (const ignoreCase of [false, true]) {
       completed: 1,
       skipped: 1,
     });
-    expect(await readFile(join(checkout, "src", "app.ts"), "utf8")).toContain(
+    expect(await readFile(join(checkout, "SRC", "app.ts"), "utf8")).toContain(
       "case-sensitive-source",
     );
     expect(
-      await lstat(join(checkout, "SRC", "other.ts"))
+      await lstat(join(checkout, "src", "other.ts"))
         .then(() => true)
         .catch((error: NodeJS.ErrnoException) => {
           if (error.code === "ENOENT") return false;
