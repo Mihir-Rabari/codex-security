@@ -3,6 +3,7 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { afterEach, expect, test } from "bun:test";
+import { parse as parseToml } from "smol-toml";
 import { main } from "../src/cli.js";
 import { runWorkbench } from "../src/runtime.js";
 import { dependencies } from "./cli-fixtures.js";
@@ -67,8 +68,21 @@ test.each(
       model_provider: provider,
       model_providers: { [provider]: standard },
     };
+    const header = "synthetic-provider-header";
+    let providerProfilePath: string | undefined;
     const client = new TestClient(
-      { pluginPath: PLUGIN_ROOT, codexOverrides: overrides },
+      {
+        pluginPath: PLUGIN_ROOT,
+        codexOverrides: {
+          ...overrides,
+          model_providers: {
+            [provider]: {
+              ...standard,
+              http_headers: { "X-Synthetic-Credential": header },
+            },
+          },
+        },
+      },
       {
         environment,
         prepareRuntime: async () => ({
@@ -77,7 +91,23 @@ test.each(
         }),
         resolvePluginPython: async () => python,
         runWorkbench: async (_runtime, args, input) => command(args, input),
-        createCodex: throwing("Synthetic stop after registration"),
+        createCodex: async (options) => {
+          expect(typeof options.nativeProfile).toBe("string");
+          providerProfilePath = join(
+            options.env!["CODEX_HOME"]!,
+            `${options.nativeProfile}.config.toml`,
+          );
+          expect(
+            parseToml(await readFile(providerProfilePath, "utf8")),
+          ).toMatchObject({
+            model_providers: {
+              [provider]: {
+                http_headers: { "X-Synthetic-Credential": header },
+              },
+            },
+          });
+          throw new Error("Synthetic stop after registration");
+        },
       },
     );
     try {
@@ -104,12 +134,23 @@ test.each(
         home,
       );
       expect(replay["model_providers"]).toEqual(initial["model_providers"]);
+      expect(JSON.stringify(recipe)).not.toContain(header);
+      expect(
+        JSON.stringify(
+          await command(["get-scan", "--scan-id", scans[0]!.scanId]),
+        ),
+      ).not.toContain(header);
       expect(JSON.stringify(recipe)).not.toContain("synthetic-launch-key");
       expect(JSON.stringify(recipe)).not.toContain(
         "SYNTHETIC_OLD_PROVIDER_KEY",
       );
     } finally {
       await client.close();
+      if (providerProfilePath !== undefined) {
+        await expect(readFile(providerProfilePath)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      }
     }
   },
 );

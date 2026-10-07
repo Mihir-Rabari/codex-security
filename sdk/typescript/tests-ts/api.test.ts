@@ -1667,7 +1667,12 @@ describe("CodexSecurity orchestration", () => {
             exporter: {
               "otlp-http": {
                 endpoint: "https://telemetry.example.test/first",
-                tls: { "ca-certificate": join(root, "tls-1", "ca.pem") },
+                protocol: "binary",
+                tls: {
+                  "ca-certificate": "tls-1/ca.pem",
+                  "client-certificate": "tls-1/client.pem",
+                  "client-private-key": "tls-1/client.key",
+                },
               },
             },
           },
@@ -1814,9 +1819,26 @@ describe("CodexSecurity orchestration", () => {
                     expect(options.config?.[key] as unknown).toEqual(
                       resolveCodexProfile(overrides)[key],
                     );
-                    expect(workerConfig[key]).toEqual(
+                    const expected = structuredClone(
                       resolveCodexProfile(overrides)[key],
                     );
+                    if (key === "otel" && index === 1) {
+                      const exporter = (expected as JsonObject)[
+                        "exporter"
+                      ] as JsonObject;
+                      const exporterSettings = exporter[
+                        "otlp-http"
+                      ] as JsonObject;
+                      const tls = exporterSettings["tls"] as JsonObject;
+                      for (const field of [
+                        "ca-certificate",
+                        "client-certificate",
+                        "client-private-key",
+                      ]) {
+                        tls[field] = join(scanDir, tls[field] as string);
+                      }
+                    }
+                    expect(workerConfig[key] as unknown).toEqual(expected);
                   }
                   expect(workerConfig["model_verbosity"]).toBe(
                     resolveCodexProfile(overrides)["model_verbosity"],

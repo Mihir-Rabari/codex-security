@@ -311,31 +311,34 @@ export async function readCodexFileProfile(
         }
       }
     }
-    const otel = nativeProfile["otel"];
-    if (isObject(otel)) {
-      for (const key of ["exporter", "trace_exporter", "metrics_exporter"]) {
-        const exporter = otel[key];
-        if (!isObject(exporter)) continue;
-        for (const configuration of Object.values(exporter)) {
-          if (!isObject(configuration) || !isObject(configuration["tls"]))
-            continue;
-          const tls = configuration["tls"];
-          for (const field of [
-            "ca-certificate",
-            "client-certificate",
-            "client-private-key",
-          ]) {
-            const path = tls[field];
-            if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
-              tls[field] = resolve(profileHome, path);
-            }
-          }
-        }
-      }
-    }
+    resolveOtelPaths(nativeProfile, profileHome);
     normalizeLegacyWindowsSandboxOverride(nativeProfile);
   }
   return nativeProfile;
+}
+
+/** @internal Preserve TLS file origins when a native config changes directories. */
+export function resolveOtelPaths(config: JsonObject, directory: string): void {
+  const otel = config["otel"];
+  if (!isObject(otel)) return;
+  for (const key of ["exporter", "trace_exporter", "metrics_exporter"]) {
+    const exporter = otel[key];
+    if (!isObject(exporter)) continue;
+    for (const configuration of Object.values(exporter)) {
+      if (!isObject(configuration) || !isObject(configuration["tls"])) continue;
+      const tls = configuration["tls"];
+      for (const field of [
+        "ca-certificate",
+        "client-certificate",
+        "client-private-key",
+      ]) {
+        const path = tls[field];
+        if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
+          tls[field] = resolve(directory, path);
+        }
+      }
+    }
+  }
 }
 
 export async function mergedCodexConfig(

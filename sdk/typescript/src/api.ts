@@ -65,6 +65,7 @@ import {
   readCodexFileProfile,
   resolveCodexProfile,
   resolveCommandAuthConfig,
+  resolveOtelPaths,
   scanApprovalPolicy,
   scanCyberAccessConfig,
   scanModelConfiguration,
@@ -1638,8 +1639,8 @@ export class CodexSecurity {
         !(isRecord(inlineProfiles) && isRecord(inlineProfiles[profileName]))
       ) {
         recipeConfig["profile"] = profileName;
-        // Reload file settings while retaining the caller's explicit provider
-        // refinements rather than preflight's resolved projection.
+        // Reload file settings, retaining only standard provider values that
+        // the caller explicitly overrode rather than preflight's projection.
         const provider = scanModelProvider(preflightConfig);
         if (isExternalModelProvider(provider)) {
           const fileProfile = await readCodexFileProfile(
@@ -1654,9 +1655,14 @@ export class CodexSecurity {
             const explicitProvider = isRecord(explicitProviders)
               ? explicitProviders[provider]
               : undefined;
-            const savedProvider = isRecord(explicitProvider)
-              ? (structuredClone(explicitProvider) as JsonObject)
-              : {};
+            const savedProvider: JsonObject = {};
+            if (isRecord(explicitProvider)) {
+              for (const [key, value] of Object.entries(
+                EXTERNAL_CODEX_PROVIDERS[provider],
+              )) {
+                if (explicitProvider[key] === value) savedProvider[key] = value;
+              }
+            }
             if (Object.keys(savedProvider).length > 0) {
               recipeConfig["model_providers"] = { [provider]: savedProvider };
             }
@@ -5004,6 +5010,7 @@ function selectedWorkerRuntimeConfig(
   const provider =
     typeof selectedProvider === "string" ? selectedProvider : undefined;
   const resolved = resolveCodexProfile(config);
+  resolveOtelPaths(resolved, workingDirectory);
   const providers = resolved["model_providers"];
   const providerEnvironmentNames = isRecord(providers)
     ? Object.values(providers)

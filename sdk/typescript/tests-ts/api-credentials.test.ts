@@ -932,14 +932,28 @@ process.exit(process.exitCode ?? 0);
               savedRecipe = JSON.parse(input!).recipe as JsonObject;
             return mockWorkbench(args, input);
           },
-          createCodex: () => ({
-            startThread: () => ({
-              id: null,
-              runStreamed: rejecting(
-                "synthetic generated provider scan started",
+          createCodex: async (options) => {
+            const profile = parseToml(
+              await readFile(
+                join(runtimeHome, `${options.nativeProfile}.config.toml`),
+                "utf8",
               ),
-            }),
-          }),
+            );
+            expect(profile["model_providers"]).toEqual({
+              [provider]:
+                selection === "generated"
+                  ? EXTERNAL_CODEX_PROVIDERS[provider]
+                  : { ...fileProvider, ...explicitProvider },
+            });
+            return {
+              startThread: () => ({
+                id: null,
+                runStreamed: rejecting(
+                  "synthetic generated provider scan started",
+                ),
+              }),
+            };
+          },
         },
       );
       try {
@@ -948,6 +962,9 @@ process.exit(process.exitCode ?? 0);
         );
         const config = savedRecipe!["config"] as JsonObject;
         expect(config["profile"]).toBe("review");
+        expect(JSON.stringify(savedRecipe)).not.toContain(
+          "synthetic-caller-header",
+        );
         const replay = resolveCodexProfile(
           await mergedCodexConfig({ codexOverrides: config }, home),
         );
@@ -956,7 +973,7 @@ process.exit(process.exitCode ?? 0);
           [provider]:
             selection === "generated"
               ? EXTERNAL_CODEX_PROVIDERS[provider]
-              : { ...fileProvider, ...explicitProvider },
+              : fileProvider,
         });
       } finally {
         await client.close();
