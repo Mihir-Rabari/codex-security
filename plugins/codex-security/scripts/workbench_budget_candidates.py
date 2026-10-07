@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from candidate_identity import (
+    _deferred_owner,
     candidate_key,
     coverage_candidate_key,
     diff_candidate_disposition,
@@ -143,11 +144,9 @@ def recover_candidate_receipts(
         if closures:
             # Reopened candidate work must not invalidate unrelated valid closures.
             active = {
-                identity
+                row["id"]
                 for row in coverage["deferred"]
-                if isinstance(row, dict)
-                for identity in (row.get("id"), row.get("candidateId"))
-                if isinstance(identity, str)
+                if isinstance(row, dict) and isinstance(row.get("id"), str)
             }
             coverage["resolvedDeferred"] = [row for row in closures if row["id"] not in active]
         return parent
@@ -685,6 +684,62 @@ def current_report(
     key = finding_candidate_key(finding, owner)
     deferred = draft["coverage"].get("deferred")
     return not any(
-        isinstance(row, dict) and (row.get("candidateId") or row.get("id")) == key[1]
+        isinstance(row, dict) and coverage_candidate_key(row, owner) == key
         for row in (deferred if isinstance(deferred, list) else [])
     )
+
+
+def deferred_identity_collisions(
+    sources: list[tuple[str, dict[str, Any], str | None]],
+    deferred_rows: dict[str, list[Any]],
+) -> tuple[set[tuple[str | None, str]], set[tuple[str | None, str]]]:
+    """Keep generic task IDs distinct from candidate identities and ambiguous task IDs."""
+    ambiguous: set[tuple[str | None, str]] = set()
+    unclosable: set[tuple[str | None, str]] = set()
+    for relative, draft, owner in sources:
+        rows = deferred_rows[relative]
+        candidates = [
+            row
+            for row in rows
+            if isinstance(row, dict)
+            and any(key in row for key in ("candidateId", "candidate", "finding"))
+        ]
+        aliases = {
+            identity
+            for row in candidates
+            for identity in (row.get("id"), row.get("candidateId"))
+            if isinstance(identity, str)
+        }
+        for row in candidates:
+            if isinstance(identity := row.get("id") or row.get("candidateId"), str):
+                unclosable.add((_deferred_owner(row, owner), identity))
+        aliases.update(
+            key[1]
+            for finding in draft["findings"]
+            if isinstance(finding, dict)
+            and (key := finding_candidate_key(finding, owner)) is not None
+            and key[0] == owner
+        )
+        for field in ("surfaces", "explicitExclusions"):
+            items = draft["coverage"].get(field, [])
+            aliases.update(
+                key[1]
+                for row in (items if isinstance(items, list) else [])
+                if isinstance(row, dict)
+                and (key := coverage_candidate_key(row, owner)) is not None
+                and key[0] == owner
+            )
+        by_id: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(identity := row.get("id"), str):
+                continue
+            if any(key in row for key in ("candidateId", "candidate", "finding")):
+                continue
+            key = (owner, identity)
+            if identity in aliases:
+                ambiguous.add(key)
+            if identity in by_id and row != by_id[identity]:
+                ambiguous.add(key)
+                unclosable.add(key)
+            by_id[identity] = row
+    return ambiguous, unclosable

@@ -62,6 +62,7 @@ from workbench_budget_candidates import (
     archive_resolved_diff_payloads,
     copied_report_has_later_pending,
     current_report,
+    deferred_identity_collisions,
     project_resolved_candidate_rows,
     recover_candidate_receipts,
 )
@@ -1102,11 +1103,9 @@ def _merge_tied_parent_observations(
                 if row not in output:
                     output.append(copy.deepcopy(row))
     pending_ids = {
-        identity
+        row["id"]
         for row in _deferred_rows(coverage)
-        if isinstance(row, dict)
-        for identity in (row.get("id"), row.get("candidateId"))
-        if isinstance(identity, str)
+        if isinstance(row, dict) and isinstance(row.get("id"), str)
     }
     closure_schema = _read_json(
         Path(__file__).resolve().parent.parent / "schemas" / "coverage.schema.json"
@@ -1842,27 +1841,7 @@ def merge_saved_results(
     deferred_rows = {
         relative: _deferred_rows(draft["coverage"]) for relative, draft, _ in all_sources
     }
-    # A legacy source can contain independent tasks with the same explicit ID.
-    # Later rewrites cannot make an ID-only closure identify one of those tasks.
-    ambiguous_deferred: set[tuple[str | None, str]] = set()
-    for relative, _, owner in all_sources:
-        by_id: dict[str, dict[str, Any]] = {}
-        candidate_aliases = {
-            identity
-            for row in deferred_rows[relative]
-            if isinstance(row, dict)
-            and any(key in row for key in ("candidateId", "candidate", "finding"))
-            for identity in (row.get("id"), row.get("candidateId"))
-            if isinstance(identity, str)
-        }
-        for row in deferred_rows[relative]:
-            if not isinstance(row, dict) or not isinstance(identity := row.get("id"), str):
-                continue
-            if any(key in row for key in ("candidateId", "candidate", "finding")):
-                continue
-            if identity in candidate_aliases or (identity in by_id and row != by_id[identity]):
-                ambiguous_deferred.add((owner, identity))
-            by_id[identity] = row
+    ambiguous_deferred, unclosable_tasks = deferred_identity_collisions(all_sources, deferred_rows)
     current_drafts = ([("parent", parent, None)] if parent else []) + [
         source for source in sources if source[0] in current_results | selected_observations.keys()
     ]
@@ -1936,11 +1915,9 @@ def merge_saved_results(
         reopened = [
             active
             for (owner, identity), active in active_deferred.items()
-            if owner == key[0]
-            and (identity == key[1] or active[1].get("candidateId") == key[1])
-            and active[0] >= order
+            if owner == key[0] and identity == key[1] and active[0] >= order
         ]
-        if key in candidate_ids or key in ambiguous_deferred or reopened:
+        if key in unclosable_tasks or reopened:
             del closed_deferred[key]
         for _, item, _ in reopened:
             reopened_rows.append((key[0], item))

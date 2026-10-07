@@ -339,12 +339,14 @@ function retainSourceFindings(
 ): void {
   type Finding = Record<string, unknown>;
   const sources = new Map<string, Finding>();
-  const workers = new Set(inputs.discoveries.map((source) => source.workerId));
+  const owners = new Map<string, string | undefined>();
   for (const discovery of inputs.discoveries) {
     for (const [index, finding] of discovery.result.findings.entries()) {
       const original = structuredClone(finding);
       delete (original.provenance as Finding).sourceFindingIds;
-      sources.set(`${discovery.workerId}:${index}`, original);
+      const id = `${discovery.workerId}:${index}`;
+      sources.set(id, original);
+      owners.set(id, discovery.workerId);
     }
   }
   for (const [index, finding] of (inputs.previous?.findings ?? []).entries()) {
@@ -354,12 +356,12 @@ function retainSourceFindings(
     if (originals?.length) {
       for (const original of originals) {
         sources.set(original.id, original.finding);
-        const worker = original.id.slice(0, original.id.lastIndexOf(":"));
-        // Legacy aggregate references keep their saved finding owner.
-        if (worker !== "previous") workers.add(worker);
+        // Persisted source IDs are opaque; ownership travels with the finding.
+        owners.set(original.id, findingCandidateOwner(original.finding));
       }
     } else {
       sources.set(`previous:${index}`, finding);
+      owners.set(`previous:${index}`, findingCandidateOwner(finding));
     }
   }
   const claimed = new Set<string>();
@@ -406,13 +408,7 @@ function retainSourceFindings(
       const original = sources.get(id)!;
       const candidateId = findingCandidateId(original);
       if (candidateId === undefined) return [];
-      const worker = id.slice(0, id.lastIndexOf(":"));
-      return [
-        {
-          candidateId,
-          owner: workers.has(worker) ? worker : findingCandidateOwner(original),
-        },
-      ];
+      return [{ candidateId, owner: owners.get(id) }];
     });
     const association =
       associations.find(

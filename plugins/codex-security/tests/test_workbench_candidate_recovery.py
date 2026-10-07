@@ -1243,3 +1243,67 @@ def test_worker_terminal_copies_do_not_reopen_their_own_candidate(
             if decisions:
                 assert decisions[0]["disposition"] == outcome
     assert all(file.read_bytes() == original for file, original in originals.items())
+
+
+@pytest.mark.parametrize("work", ["general-same", "general-other", "candidate"])
+@pytest.mark.parametrize("complete", [False, True])
+@pytest.mark.parametrize("selected", [False, True])
+def test_selected_reopened_report_keeps_general_task_identity_separate(
+    tmp_path: Path, generic_review_recovery, work: str, complete: bool, selected: bool
+) -> None:
+    module, pending, _, binding = generic_review_recovery
+    pending["coverage"]["deferred"][0]["candidateId"] = "review"
+    terminal = copy.deepcopy(pending)
+    terminal["complete"] = complete
+    contract = tmp_path / "contract"
+    contract.mkdir()
+    write_completed_contract(contract, pending["scanId"], tmp_path, relative_path="app.py")
+    finding = json.loads((contract / "findings.json").read_text())["findings"][0]
+    finding["provenance"].update(candidateId="review", candidateReopened=True)
+    terminal["findings"] = [finding]
+    work_row = {
+        "id": "other-review" if work == "general-other" else "review",
+        "reason": "Independent review remains.",
+        **({"candidateId": "review"} if work == "candidate" else {}),
+    }
+    terminal["coverage"]["deferred"] = [work_row]
+    output = tmp_path / "worker"
+    output.mkdir()
+    result = output / "result.json"
+    result.write_text(json.dumps(terminal))
+    os.utime(result, ns=(200, 200))
+    current = write_checkpoint(output / "checkpoints", terminal)
+    older = write_checkpoint(output / "checkpoints", pending)
+    for checkpoint in (current, older):
+        os.utime(checkpoint, ns=(100, 100))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": current.name}))
+    os.utime(head, ns=(200, 200))
+    if not selected:
+        module._capture_saved_source(tmp_path, "worker/checkpoint-head.json", pending["scanId"])
+        head.write_text(json.dumps({"checkpoint": older.name}))
+        os.utime(head, ns=(300, 300))
+    originals = {file: file.read_bytes() for file in output.rglob("*.json")}
+    workers = [saved_discovery_worker(output, "worker", 1)]
+    first = module.merge_saved_results(
+        tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
+    )
+    assert first is not None
+    replay = replay_saved_results(
+        module, first, tmp_path, pending["scanId"], binding, workers, stopped=True
+    )
+    expected_pending = not (selected and complete and work != "candidate")
+    for recovered in (first, replay):
+        assert len(module.unresolved_candidates(recovered[2], recovered[1])) == int(
+            expected_pending
+        )
+        assert len(recovered[1]["findings"]) == 1
+        assert (
+            recovered[1]["findings"][0]["provenance"].get("candidateReopened") is True
+        ) is expected_pending
+        if work != "candidate":
+            assert any(
+                row.get("reason") == work_row["reason"] and not row.get("candidateId")
+                for row in recovered[2]["deferred"]
+            )
+    assert all(file.read_bytes() == original for file, original in originals.items())

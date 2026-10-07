@@ -1315,8 +1315,7 @@ def _recover_unsealed_coverage(
 
         coverage[field] = recovered
 
-    saved_deferred = list(coverage["deferred"])
-    deferred_ids = {item["id"] for item in saved_deferred}
+    deferred_ids = {item["id"] for item in coverage["deferred"]}
     closures = coverage.get("resolvedDeferred")
     if isinstance(closures, list):
         deferred_ids.update(
@@ -1368,11 +1367,6 @@ def _recover_unsealed_coverage(
                 properties["resolvedDeferred"],
                 "coverage.resolvedDeferred",
             )
-            _validate_resolved_deferred({**coverage, "deferred": saved_deferred})
-            reopened = {surface["candidateId"] for surface, _ in recovered_candidates}
-            coverage["resolvedDeferred"] = [
-                row for row in coverage["resolvedDeferred"] if row["id"] not in reopened
-            ]
             _validate_resolved_deferred(coverage)
         except ContractError as exc:
             coverage.pop("resolvedDeferred")
@@ -1682,11 +1676,9 @@ def _validate_resolved_deferred(coverage: dict[str, Any]) -> None:
     if "resolvedDeferred" not in coverage:
         return
     active = {
-        identity
+        row["id"]
         for row in coverage.get("deferred", [])
-        if isinstance(row, dict)
-        for identity in (row.get("id"), row.get("candidateId"))
-        if isinstance(identity, str)
+        if isinstance(row, dict) and isinstance(row.get("id"), str)
     }
     resolved: set[str] = set()
     for index, closure in enumerate(_require_list(coverage, "resolvedDeferred", "coverage")):

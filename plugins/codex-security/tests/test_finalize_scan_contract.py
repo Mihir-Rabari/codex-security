@@ -3179,7 +3179,8 @@ The extraction root is not enforced.
                         self.scan_dir, completion_warnings=[]
                     )
                     self.assertEqual((self.scan_dir / "coverage.json").read_bytes(), source_bytes)
-                    expected = None if malformed else closures if valid_receipt else closures[1:]
+                    # Task IDs remain independent of the reopened candidate's semantic ID.
+                    expected = None if malformed else closures
                     self.assertEqual(prepared[4].get("resolvedDeferred"), expected)
                     _, _, published = FINALIZER._write_prepared_scan_finalization(prepared)
                     _, _, sealed = FINALIZER.finalize_scan(self.scan_dir)
