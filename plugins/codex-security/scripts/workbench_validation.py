@@ -137,9 +137,12 @@ def _valid_measured_scan_usage(usage: object) -> bool:
                 return False
             if part["model"] is not None and not isinstance(part["model"], str):
                 return False
-            if not _valid_scan_token_counts({key: part[key] for key in SCAN_USAGE_TOKEN_KEYS}):
+            if (
+                not all(type(part[key]) is int and part[key] >= 0 for key in SCAN_USAGE_TOKEN_KEYS)
+                or part["cachedInputTokens"] + part["cacheWriteInputTokens"] > part["inputTokens"]
+            ):
                 return False
-        if any(sum(part[key] for part in parts) != counts[key] for key in SCAN_USAGE_TOKEN_KEYS):
+        if any(sum(part[key] for part in parts) != usage[key] for key in SCAN_USAGE_TOKEN_KEYS):
             return False
     missing = usage.get("missingThreadCount", 0)
     if type(missing) is not int or missing < 0:
