@@ -200,13 +200,33 @@ def test_reviewed_patch_preserves_readonly_junction(
 
 
 @pytest.mark.parametrize(
-    "case", ["ordering", "ignore_add", "ignore_remove", "git_metadata", "git_objects"]
+    "case",
+    [
+        "ordering",
+        "ignore_add",
+        "ignore_remove",
+        "git_metadata",
+        "git_metadata_crlf",
+        "git_metadata_lf",
+        "git_objects",
+    ],
 )
 def test_reviewed_patch_restores_junction_git_context(
-    tmp_path: Path, junction_factory: Callable[[Path, Path], None], case: str
+    tmp_path: Path,
+    junction_factory: Callable[[Path, Path], None],
+    case: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = tmp_path / "source"
     initialize_unborn_git_repository(source)
+    newline = None
+    if case in {"git_metadata_crlf", "git_metadata_lf"}:
+        global_config = tmp_path / "global.gitconfig"
+        global_config.write_text("[core]\n\tautocrlf = false\n")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+        monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+        subprocess.run(["git", "config", "core.autocrlf", "true"], cwd=source, check=True)
+        newline = "\r\n" if case == "git_metadata_crlf" else "\n"
     (source / "src").mkdir()
     (source / "src" / "app.txt").write_text("stable contents\n")
     (source / "src.py").write_text("adjacent contents\n")
@@ -215,8 +235,8 @@ def test_reviewed_patch_restores_junction_git_context(
     (source / "cache").mkdir()
     (source / "cache" / "output.txt").write_text("ignored output\n")
     outside = tmp_path / "outside"
-    if case in {"git_metadata", "git_objects"}:
-        junction = source / (".git" if case == "git_metadata" else ".git/objects")
+    if case.startswith("git_metadata") or case == "git_objects":
+        junction = source / (".git" if case.startswith("git_metadata") else ".git/objects")
         junction.rename(outside)
     else:
         outside.mkdir()
@@ -238,12 +258,23 @@ def test_reviewed_patch_restores_junction_git_context(
         if case == "ignore_remove"
         else "after\n"
     )
-    assert_reviewed_change(source, tmp_path, patched, before, after)
+    metadata = (outside / "config").read_bytes() if case.startswith("git_metadata") else None
+    assert_reviewed_change(source, tmp_path, patched, before, after, newline=newline)
     assert outside.is_dir()
+    if metadata is not None:
+        assert (outside / "config").read_bytes() == metadata
+    if newline is not None:
+        assert (source / patched).read_bytes() == after.replace("\n", newline).encode()
 
 
 def assert_reviewed_change(
-    source: Path, tmp_path: Path, relative: str, before: str, after: str
+    source: Path,
+    tmp_path: Path,
+    relative: str,
+    before: str,
+    after: str,
+    *,
+    newline: str | None = None,
 ) -> None:
     import workbench_db
 
@@ -267,14 +298,14 @@ def assert_reviewed_change(
         "target_revision": "unversioned",
         "scan_dir": str(scan_dir),
     }
-    (source / relative).write_text(before)
+    (source / relative).write_text(before, newline=newline)
     revision, digest = workbench_db.remediation_checkout_snapshot(scan)
     remediation = {
         "base_revision": revision,
         "base_content_digest": digest,
         "patch_digest": "sha256:" + hashlib.sha256(patch).hexdigest(),
     }
-    (source / relative).write_text(after)
+    (source / relative).write_text(after, newline=newline)
     assert workbench_db.require_reviewed_patch_applied(scan, remediation, "reviewed.patch")
 
 
