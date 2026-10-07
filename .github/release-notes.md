@@ -76,6 +76,7 @@
 - remove duplicate benchmark checks and line collection ([#1359](https://github.com/openai/codex-security/pull/1359))
 - inherit null overrides and preserve literal paths ([#1290](https://github.com/openai/codex-security/pull/1290))
 - resolve path aliases consistently across scan workflows ([#1267](https://github.com/openai/codex-security/pull/1267))
+- include text files in scans regardless of extension ([#1347](https://github.com/openai/codex-security/pull/1347))
 
 <!-- release-section: highlights:end -->
 
