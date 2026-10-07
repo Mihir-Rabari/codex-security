@@ -169,7 +169,7 @@ test.each([false, true])(
       expect(existsSync(bootstrapDirectory)).toBe(false);
       expect(
         await readFile(join(protectedDirectory!, "config.toml"), "utf8"),
-      ).toContain("synthetic-client-secret");
+      ).not.toContain("synthetic-client-secret");
       if (process.platform !== "win32") {
         expect((await stat(protectedDirectory!)).mode & 0o777).toBe(0o700);
         expect(

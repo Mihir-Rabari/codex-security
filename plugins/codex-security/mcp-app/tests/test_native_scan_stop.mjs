@@ -36,7 +36,8 @@ const bundle = await build({
           export function missingPythonHelperMessage() {}
           export function workbenchCommandTimeout() { return 30000; }`,
           "../../../sdk/typescript/src/scan-execution.js": `
-          export const ScanPermissionError = fixture.ScanPermissionError;`,
+          export const ScanPermissionError = fixture.ScanPermissionError;
+          export const acquireScanExecution = (...args) => fixture.acquire?.(...args) ?? Promise.resolve(() => {});`,
           "node:child_process": `
           export function execFile() {}
           execFile[Symbol.for("nodejs.util.promisify.custom")] = (_command, args) =>
@@ -57,6 +58,11 @@ const bundle = await build({
 
 function serverFor(fixture) {
   fixture.ScanPermissionError = class ScanPermissionError extends Error {};
+  const workbench = fixture.workbench.bind(fixture);
+  fixture.workbench = (args) =>
+    args[0] === "database-info"
+      ? Promise.resolve({ databasePath: "/synthetic/state/workbench.sqlite3" })
+      : workbench(args);
   const module = { exports: {} };
   new Function(
     "require",
@@ -176,8 +182,10 @@ for (const entry of [
   });
 }
 
-for (const operation of ["cancel", "fail"]) {
-  test(`native ${operation} authorizes, drains late child output, then publishes`, async () => {
+for (const [operation, owner] of ["cancel", "fail"].flatMap((operation) =>
+  ["local", "external"].map((owner) => [operation, owner]),
+)) {
+  test(`native ${operation} authorizes, drains ${owner} child output, then publishes`, async () => {
     const scanId = "synthetic-parent";
     const claimToken = "synthetic-current-claim";
     const events = [];
@@ -187,8 +195,10 @@ for (const operation of ["cancel", "fail"]) {
     let rejectAuthority = true;
     let interrupted = true;
     let active = true;
+    let locked = false;
     const scan = () => ({
       scanId,
+      scanDir: "/synthetic/scan",
       handoffClaimToken: claimToken,
       findings: [...lateFindings],
     });
@@ -217,6 +227,7 @@ for (const operation of ["cancel", "fail"]) {
           );
         }
         assert.equal(active, false);
+        assert.equal(locked, true);
         assert.deepEqual(lateFindings, ["synthetic-child-finding"]);
         if (interrupted)
           throw new Error("Interrupted before result publication.");
@@ -233,12 +244,31 @@ for (const operation of ["cancel", "fail"]) {
           operation === "fail" ? "Synthetic terminal failure." : undefined,
         );
         events.push("drain");
-        if (!active) return;
+        if (!active || owner === "external") return;
         draining.resolve();
         await release.promise;
         lateFindings.push("synthetic-child-finding");
         active = false;
         events.push("drained");
+      },
+      async acquire(state, directory, _pluginRoot, wait) {
+        assert.equal(state, "/synthetic/state");
+        assert.equal(directory, "/synthetic/scan");
+        assert.equal(wait, true);
+        events.push("acquire");
+        if (active) {
+          assert.equal(owner, "external");
+          draining.resolve();
+          await release.promise;
+          lateFindings.push("synthetic-child-finding");
+          active = false;
+          events.push("drained");
+        }
+        locked = true;
+        return () => {
+          locked = false;
+          events.push("released");
+        };
       },
     };
     const server = serverFor(fixture);
@@ -263,7 +293,11 @@ for (const operation of ["cancel", "fail"]) {
     );
     try {
       await draining.promise;
-      assert.deepEqual(events, [`${operation}-scan`, "drain"]);
+      assert.deepEqual(events, [
+        `${operation}-scan`,
+        "drain",
+        ...(owner === "external" ? ["get-scan", "acquire"] : []),
+      ]);
       assert.deepEqual(lateFindings, []);
     } finally {
       release.resolve();
@@ -272,10 +306,13 @@ for (const operation of ["cancel", "fail"]) {
     assert.deepEqual(events, [
       `${operation}-scan`,
       "drain",
-      "drained",
-      "get-scan",
+      ...(owner === "local"
+        ? ["drained", "get-scan", "acquire"]
+        : ["get-scan", "acquire", "drained"]),
       "preserve-scan-results",
+      "released",
     ]);
+    assert.equal(locked, false);
     interrupted = false;
     const completed = await call();
     const context = completed.structuredContent;

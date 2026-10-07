@@ -2130,6 +2130,15 @@ export class CodexSecurity {
               scanDir,
             )
           : undefined;
+      const draftWriter = {
+        restore: async (relativePath: string, contents: Uint8Array) => {
+          artifactWriter ??= await prepareArtifactRestorer(
+            { ...workbenchOptions, signal: undefined },
+            scanDir,
+          );
+          await artifactWriter.restore(relativePath, contents);
+        },
+      };
       const mergeDirectory = join(scanDir, "artifacts", "deep-scan", "merge");
       await artifactWriter?.prepareDirectory("artifacts/deep-scan/merge");
       checkOpen();
@@ -2243,6 +2252,7 @@ export class CodexSecurity {
           await tracker.refresh().catch(reportTrackingError);
           checkOpen();
           await runCustomValidation({
+            writer: draftWriter,
             repository: repo,
             target: normalized,
             scanDir,
@@ -2533,6 +2543,7 @@ export class CodexSecurity {
       checkOpen();
       let { result, warnings } = await publishScan(
         {
+          writer: draftWriter,
           scanId,
           scanDir,
           pluginRoot: runtime.plugin.installedRoot,
@@ -3028,9 +3039,11 @@ export class CodexSecurity {
   async #startLogin(deviceCode: boolean): Promise<CodexLoginHandle> {
     const authentication = await this.#authentication();
     this.#requireOpen();
+    const command = await this.#codexCommand();
+    this.#requireOpen();
     const handle = this.#trackLoginHandle(
       new CodexLoginHandle(
-        this.#codexCommand(),
+        command,
         deviceCode ? ["login", "--device-auth"] : ["login"],
         authentication.environment,
         () => this.#recordLogin(authentication.codexHome, "stored_credentials"),

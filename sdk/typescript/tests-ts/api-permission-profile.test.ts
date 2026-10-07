@@ -962,6 +962,14 @@ test("ambient project history stays file-backed for fresh and resumed native wor
           "exec",
         ]);
         expect(observations[1].args.includes("resume")).toBe(resumed);
+        expect(observations[0].args).not.toContain("--profile");
+        expect(observations[1].args).toContain("--profile");
+        expect(observations[0].permissions).toEqual(
+          observations[1].permissions,
+        );
+        expect(observations[1].mcpServers["synthetic.literal"].env).toEqual({
+          "SETTING.KEY": "literal-value",
+        });
         for (const launch of observations) {
           expect(launch.projects).toEqual(h.projects);
           expect(

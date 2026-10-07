@@ -21,10 +21,7 @@ import { VERSION } from "./version.js";
 /** Verify managed permissions before each fresh or resumed Deep Scan worker turn. */
 export function createPermissionCheckedCodex(
   { config, configOverrides, ...options }: CodexOptions,
-  nativeProfile?: {
-    codex: Pick<Codex, "startThread" | "resumeThread">;
-    profileName: string;
-  },
+  suppliedCodex?: Pick<Codex, "startThread" | "resumeThread">,
 ) {
   // Raw tables preserve literal MCP server names and filesystem selectors.
   const overrides = [
@@ -35,7 +32,7 @@ export function createPermissionCheckedCodex(
   environment["CODEX_INTERNAL_ORIGINATOR_OVERRIDE"] ||= "codex_sdk_ts";
   if (options.apiKey) environment["CODEX_API_KEY"] = options.apiKey;
   const codex =
-    nativeProfile?.codex ??
+    suppliedCodex ??
     new Codex({
       ...options,
       env: environment,
@@ -111,7 +108,6 @@ export function createPermissionCheckedCodex(
       try {
         await verifyPermissionProfile({
           executable: options.codexPathOverride,
-          profileName: nativeProfile?.profileName,
           cwd: threadOptions.workingDirectory ?? process.cwd(),
           environment,
           overrides: effectiveOverrides,
@@ -170,7 +166,6 @@ export function createPermissionCheckedCodex(
 
 async function verifyPermissionProfile(options: {
   executable: string;
-  profileName?: string;
   cwd: string;
   environment: Record<string, string>;
   overrides: readonly string[];
@@ -182,9 +177,6 @@ async function verifyPermissionProfile(options: {
   const child = spawn(
     options.executable,
     [
-      ...(options.profileName === undefined
-        ? []
-        : ["--profile", options.profileName]),
       ...options.overrides.flatMap((override) => ["--config", override]),
       "app-server",
       "--stdio",

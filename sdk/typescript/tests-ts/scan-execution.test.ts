@@ -81,9 +81,14 @@ test("Node and Bun serialize one parent; release and owner death permit recovery
     ).rejects.toThrow("already running");
     const releaseOther = await acquireScanExecution(state, other, PLUGIN_ROOT);
     releaseOther();
+    const waiting = acquireScanExecution(state, first, PLUGIN_ROOT, true);
+    void waiting.catch(() => undefined);
+    await expect(
+      acquireScanExecution(state, first, PLUGIN_ROOT),
+    ).rejects.toThrow("already running");
     child.stdin!.write("release\n");
     expect((await output.next()).value).toBe("released");
-    const release = await acquireScanExecution(state, first, PLUGIN_ROOT);
+    const release = await waiting;
     try {
       await expect(
         acquireScanExecution(state, first, PLUGIN_ROOT),

@@ -14,10 +14,11 @@ import { IncompleteScanError, errorMessage } from "./errors.js";
 import type { CoverageDocument, FindingsDocument } from "./models.js";
 import { requirePrivateOutputDirectory } from "./runtime.js";
 import type { NormalizedTarget } from "./targets.js";
+import type { ScanPublicationContext } from "./scan-publication.js";
 import {
   writePreparedScanDraft,
-  type ScanPublicationContext,
-} from "./scan-publication.js";
+  type ScanDraftPublicationOptions,
+} from "./scan-draft-publication.js";
 
 type CanonicalFinding = FindingsDocument["findings"][number];
 type Finding = Pick<
@@ -200,6 +201,7 @@ export async function runCustomValidation(options: {
   falsePositives?: readonly unknown[];
   signal: AbortSignal;
   workbench: ScanPublicationContext["workbench"];
+  writer: ScanDraftPublicationOptions["writer"];
   run(prompt: string, outputSchema: unknown): Promise<string>;
 }): Promise<void> {
   const { scanDir, scanId, signal } = options;
@@ -450,11 +452,15 @@ export async function runCustomValidation(options: {
   delete manifest.scan.complete;
   // Rewrite the captured draft, not any canonical-file edits made during validation.
   try {
-    await writePreparedScanDraft(options.workbench, scanId, {
-      manifest,
-      findings: findingsDocument,
-      coverage,
-    });
+    await writePreparedScanDraft(
+      { scanDir, workbench: options.workbench, writer: options.writer },
+      scanId,
+      {
+        manifest,
+        findings: findingsDocument,
+        coverage,
+      },
+    );
   } catch (error) {
     for (const [index, name] of DOCUMENTS.entries())
       await writeJson(scanDir, name, documents[index]);

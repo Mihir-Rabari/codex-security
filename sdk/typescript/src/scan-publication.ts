@@ -1,4 +1,8 @@
 import {
+  writePreparedScanDraft as writeStagedScanDraft,
+  type ScanDraftPublicationOptions,
+} from "./scan-draft-publication.js";
+import {
   prepareSemanticScanDraft,
   type SemanticScan,
 } from "./scan-semantics.js";
@@ -39,6 +43,7 @@ interface ScanResultContext {
 
 export interface ScanPublicationContext extends ScanResultContext {
   scanId: string;
+  writer?: ScanDraftPublicationOptions["writer"];
   workbench: (args: readonly string[], input?: string) => Promise<JsonObject>;
 }
 
@@ -270,15 +275,19 @@ export async function publishScan(
             contents.has("findings.json") &&
             contents.has("coverage.json")
           )
-            await writePreparedScanDraft(workbench, scanId, {
-              manifest,
-              findings: JSON.parse(
-                contents.get("findings.json")!.toString("utf8"),
-              ),
-              coverage: JSON.parse(
-                contents.get("coverage.json")!.toString("utf8"),
-              ),
-            });
+            await writeStagedScanDraft(
+              { scanDir, workbench, writer: context.writer! },
+              scanId,
+              {
+                manifest,
+                findings: JSON.parse(
+                  contents.get("findings.json")!.toString("utf8"),
+                ),
+                coverage: JSON.parse(
+                  contents.get("coverage.json")!.toString("utf8"),
+                ),
+              },
+            );
         }
       }
       preparation = await workbench([

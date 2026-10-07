@@ -3,7 +3,6 @@ import { join } from "node:path";
 import {
   prepareSemanticScanDraft,
   type SemanticScan,
-  type PreparedScanDraft,
 } from "./scan-semantics.js";
 
 export interface ScanDraftPublicationOptions {
@@ -26,19 +25,22 @@ export async function writeSemanticScanDraft(
 ): Promise<void> {
   await writePreparedScanDraft(
     options,
-    draft,
+    draft.scanId,
     prepareSemanticScanDraft(options.contract, draft),
+    draft,
   );
 }
 
 /** Stage the semantic checkpoint and already-reconciled canonical documents once. */
 export async function writePreparedScanDraft(
   options: ScanDraftPublicationOptions,
-  draft: SemanticScan,
-  documents: PreparedScanDraft,
+  scanId: string,
+  documents: { manifest: unknown; findings: unknown; coverage: unknown },
+  draft?: SemanticScan,
 ): Promise<unknown> {
   const draftPath = `drafts/${randomUUID()}.json`;
-  const checkpointPath = `drafts/${randomUUID()}.checkpoint.json`;
+  const checkpointPath =
+    draft === undefined ? undefined : `drafts/${randomUUID()}.checkpoint.json`;
   // The locked workbench writer owns acknowledgement and successful-stage cleanup.
   await options.writer.restore(
     draftPath,
@@ -49,19 +51,22 @@ export async function writePreparedScanDraft(
       }),
     ),
   );
-  const { handoffClaimToken: _claim, ...checkpoint } = draft;
-  await options.writer.restore(
-    checkpointPath,
-    Buffer.from(JSON.stringify(checkpoint)),
-  );
+  if (draft !== undefined && checkpointPath !== undefined) {
+    const { handoffClaimToken: _claim, ...checkpoint } = draft;
+    await options.writer.restore(
+      checkpointPath,
+      Buffer.from(JSON.stringify(checkpoint)),
+    );
+  }
   return options.workbench([
     "write-scan-draft",
     "--scan-id",
-    draft.scanId,
+    scanId,
     "--draft-path",
     join(options.scanDir, draftPath),
-    "--checkpoint-path",
-    join(options.scanDir, checkpointPath),
+    ...(checkpointPath === undefined
+      ? []
+      : ["--checkpoint-path", join(options.scanDir, checkpointPath)]),
     ...(options.expectedDigest === undefined
       ? []
       : ["--expected-draft-digest", options.expectedDigest]),

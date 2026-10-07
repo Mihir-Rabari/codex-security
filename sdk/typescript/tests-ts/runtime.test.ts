@@ -5412,9 +5412,10 @@ describe("runtime directories and plugin Python boundary", () => {
       await writeFile(
         script,
         [
-          "import json, runpy",
-          `storage = runpy.run_path(${JSON.stringify(join(PLUGIN_ROOT, "scripts", "workbench", "storage.py"))})`,
-          "print(json.dumps({'stateDir': str(storage['state_dir']())}))",
+          "import json, sys",
+          `sys.path.insert(0, ${JSON.stringify(join(PLUGIN_ROOT, "scripts"))})`,
+          "from workbench import storage",
+          "print(json.dumps({'stateDir': str(storage.state_dir())}))",
         ].join("\n"),
       );
       const python = await resolvePluginPython();

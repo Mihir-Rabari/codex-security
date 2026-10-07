@@ -8,7 +8,7 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
@@ -25,7 +25,10 @@ import {
 } from "./src/server/handoff-tools.js";
 import { registerCompactArtifactTools } from "./src/server/compact-artifact-tools.js";
 import { NativeScanHost, type NativeScanInput } from "./src/native-scan.js";
-import { ScanPermissionError } from "../../../sdk/typescript/src/scan-execution.js";
+import {
+  acquireScanExecution,
+  ScanPermissionError,
+} from "../../../sdk/typescript/src/scan-execution.js";
 import {
   CODEX_SANDBOX_STATE_META_CAPABILITY,
   resolveNativeParentSandbox,
@@ -1145,9 +1148,7 @@ export function createCodexSecurityServer(): McpServer {
             parentSandbox,
             pluginRoot: PLUGIN_ROOT,
             pythonPath: await resolvePythonCommand(),
-            stateDirectory: fallbackWorkbenchStateDir
-              ? await fallbackWorkbenchStateDir
-              : undefined,
+            stateDirectory: await workbenchStateDirectory(),
           },
           abortSignalFromExtra(extra),
         );
@@ -2343,19 +2344,34 @@ async function finalizeNativeStoppedScan(
   await nativeScans.cancel(scanId, message);
   const current = await runWorkbench(["get-scan", "--scan-id", scanId]);
   const scan = isJsonObject(current.scan) ? current.scan : undefined;
-  return runWorkbench([
-    "preserve-scan-results",
-    "--scan-id",
-    scanId,
-    "--after-stop",
-    ...optionalArg("--thread-id", threadId),
-    ...optionalArg(
-      "--claim-token",
-      typeof scan?.handoffClaimToken === "string"
-        ? scan.handoffClaimToken
-        : undefined,
-    ),
-  ]);
+  const release = await acquireScanExecution(
+    await workbenchStateDirectory(),
+    scan!.scanDir as string,
+    PLUGIN_ROOT,
+    true,
+  );
+  try {
+    return await runWorkbench([
+      "preserve-scan-results",
+      "--scan-id",
+      scanId,
+      "--after-stop",
+      ...optionalArg("--thread-id", threadId),
+      ...optionalArg(
+        "--claim-token",
+        typeof scan?.handoffClaimToken === "string"
+          ? scan.handoffClaimToken
+          : undefined,
+      ),
+    ]);
+  } finally {
+    release();
+  }
+}
+
+async function workbenchStateDirectory(): Promise<string> {
+  const info = await runWorkbench(["database-info"]);
+  return dirname(info.databasePath as string);
 }
 
 async function nativeScanTerminalResult(

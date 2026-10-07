@@ -23,7 +23,7 @@ import {
 } from "../src/index.js";
 import { createMarketplace, resolveCodexCommand } from "../src/runtime.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
-import { runWorkbench } from "../src/runtime.js";
+import { runWorkbench, prepareScanArtifactRestorer } from "../src/runtime.js";
 import { writePreparedScanDraft } from "../src/scan-publication.js";
 import { TestClient } from "./support/api-client.js";
 import { completedEvents, preparedRuntime } from "./support/api-events.js";
@@ -136,21 +136,18 @@ async function fixture(count = 1) {
     new URL("../../../plugins/codex-security/", import.meta.url),
   );
   const signal = new AbortController().signal;
+  const workbenchOptions = {
+    python,
+    pluginRoot,
+    signal,
+    environment: {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    },
+  };
   const workbench = (args: readonly string[], input?: string) =>
-    runWorkbench(
-      {
-        python,
-        pluginRoot,
-        signal,
-        environment: {
-          PATH: process.env["PATH"],
-          SystemRoot: process.env["SystemRoot"],
-          CODEX_SECURITY_STATE_DIR: join(root, "state"),
-        },
-      },
-      args,
-      input,
-    );
+    runWorkbench(workbenchOptions, args, input);
   const registration = await workbench(
     [
       "register-cli-scan",
@@ -174,6 +171,7 @@ async function fixture(count = 1) {
     scanId,
     findings,
     pluginRoot,
+    writer: await prepareScanArtifactRestorer(workbenchOptions, scanDir),
     prompt: "Run the selected fixture workflow.",
     signal,
     workbench,
@@ -306,7 +304,7 @@ describe("custom validation", () => {
     });
   });
 
-  test("publishes captured validation results while the workbench retires accepted checkpoints", async () => {
+  test("publishes captured validation through the legacy file protocol while retiring accepted checkpoints", async () => {
     const f = await fixture();
     const snapshotPath = join(f.scanDir, "artifacts/scan-draft.json");
     const documents = {
@@ -338,8 +336,21 @@ describe("custom validation", () => {
       ...f,
       workbench: async (args, input) => {
         publications += 1;
-        expect(args).toEqual(["write-scan-draft", "--scan-id", f.scanId]);
-        expect(Object.keys(JSON.parse(input!))).toEqual(["documents"]);
+        expect(args.slice(0, 4)).toEqual([
+          "write-scan-draft",
+          "--scan-id",
+          f.scanId,
+          "--draft-path",
+        ]);
+        expect(input).toBeUndefined();
+        expect(args).not.toContain("--checkpoint-path");
+        const staged = await json<Record<string, unknown>>(args[4]!);
+        expect(Object.keys(staged).sort()).toEqual([
+          "coverage",
+          "findings",
+          "manifest",
+          "reconciledCheckpointIds",
+        ]);
         expect(await json(snapshotPath)).toMatchObject({
           reconciledCheckpointIds: [checkpointId],
         });
@@ -681,6 +692,7 @@ describe("custom validation", () => {
             return runtime;
           },
           resolvePluginPython: async () => python!,
+          prepareScanArtifactRestorer,
           prepareOutputDir: async () => scanDir,
           createCodex: (options) => {
             expect(options.config?.["mcp_servers"]).toMatchObject({

@@ -64,10 +64,7 @@ export function createExecutionProfileCodex(
                 profileName: name,
               }) as Pick<Codex, "startThread" | "resumeThread">;
               const checked = checkPermissions
-                ? createPermissionCheckedCodex(options, {
-                    codex,
-                    profileName: name,
-                  })
+                ? createPermissionCheckedCodex(options, codex)
                 : codex;
               const current =
                 id === null

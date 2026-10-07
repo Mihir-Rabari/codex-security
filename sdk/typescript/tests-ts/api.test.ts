@@ -7177,7 +7177,7 @@ console.error("Logged in using ChatGPT");
 process.exit(0);
 `,
     );
-    await mkdir(codexHome);
+    await mkdir(codexHome, { mode: 0o700 });
     await mkdir(scanDir, { mode: 0o700 });
     const environment: Record<string, string | undefined> = {
       ...fakeCommand.environment,

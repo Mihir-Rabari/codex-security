@@ -170,8 +170,9 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
             },
             workbench: (args) => runWorkbench([...args]),
           },
-          checkpoint,
+          checkpoint.scanId,
           documents,
+          checkpoint,
         );
         return isObject(result) && Array.isArray(result.warnings)
           ? result.warnings.filter(

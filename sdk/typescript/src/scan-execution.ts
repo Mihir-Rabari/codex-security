@@ -4,6 +4,7 @@ import { lstat, mkdir, realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { constants as osConstants } from "node:os";
 import { join, resolve, toNamespacedPath } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 interface UnixBinding {
   fileLock(
@@ -41,6 +42,7 @@ export async function acquireScanExecution(
   stateDirectory: string,
   scanDirectory: string,
   pluginRoot: string,
+  wait = false,
 ): Promise<() => void> {
   const directory = join(stateDirectory, "scan-execution");
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -101,7 +103,11 @@ export async function acquireScanExecution(
         );
       if ((info.attributes & (0x10 | 0x400)) !== 0 || type.value !== 1)
         throw new Error("Scan execution lock must be an ordinary file.");
-      const error = handle.lock(true);
+      let error = handle.lock(true);
+      while (wait && error === 33) {
+        await delay(50);
+        error = handle.lock(true);
+      }
       if (error !== 0)
         throw new Error(
           error === 33
@@ -131,7 +137,15 @@ export async function acquireScanExecution(
     const info = fstatSync(fd);
     if (!info.isFile())
       throw new Error("Scan execution lock must be an ordinary file.");
-    const { errno } = native.fileLock(fd, false, true);
+    let { errno } = native.fileLock(fd, false, true);
+    while (
+      wait &&
+      (errno === osConstants.errno.EAGAIN ||
+        errno === osConstants.errno.EWOULDBLOCK)
+    ) {
+      await delay(50);
+      ({ errno } = native.fileLock(fd, false, true));
+    }
     if (errno !== 0)
       throw new Error(
         errno === osConstants.errno.EAGAIN ||

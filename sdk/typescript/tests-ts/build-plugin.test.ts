@@ -102,6 +102,14 @@ describe("bundled plugin build", () => {
         new URL("../package.json", import.meta.url),
         join(packageRoot, "package.json"),
       );
+      await writeFixture(
+        packageRoot,
+        "tests-ts/helpers/semantic-scan.ts",
+        await readFile(
+          new URL("./helpers/semantic-scan.ts", import.meta.url),
+          "utf8",
+        ),
+      );
       await symlink(
         fileURLToPath(new URL("../node_modules/", import.meta.url)),
         join(packageRoot, "node_modules"),

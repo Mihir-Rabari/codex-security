@@ -472,6 +472,14 @@ test.each([
     );
     const publication = publishScan(
       {
+        writer: await prepareScanArtifactRestorer(
+          {
+            python: f.python,
+            pluginRoot: PLUGIN_ROOT,
+            environment: f.environment,
+          },
+          f.scanDir,
+        ),
         scanId: f.scanId,
         scanDir: f.scanDir,
         pluginRoot: PLUGIN_ROOT,
