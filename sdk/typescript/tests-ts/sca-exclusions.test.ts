@@ -87,7 +87,7 @@ async function scan(
 }
 
 test.each([false, true])(
-  "effective local package exclusions preserve complete coverage when all excluded: %s",
+  "effective local package exclusions preserve complete coverage when all excluded: %p",
   async (allExcluded) => {
     const result = await scan(
       "Package npm/@synthetic/local/1.0.0 has been filtered out because: synthetic exclusion\n",

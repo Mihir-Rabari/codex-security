@@ -107,7 +107,7 @@ test.each(["missing-git", "broken-metadata", "standalone"] as const)(
 );
 
 test.each([true, false])(
-  "scoped Git inventory matches indexed prefixes by filesystem identity, same directory: %s",
+  "scoped Git inventory matches indexed prefixes by filesystem identity, same directory: %p",
   async (sameDirectory) => {
     const root = await realpath(
       await mkdtemp(join(tmpdir(), "sca-git-scope-")),

@@ -251,7 +251,7 @@ describe("SCA input selection", () => {
     ).toBe(true);
   });
   test.each([true, false])(
-    "gitlink coverage remains incomplete when initialized: %s",
+    "gitlink coverage remains incomplete when initialized: %p",
     async (initialized) => {
       const { repository, output } = await setup();
       await writeFile(join(repository, "package-lock.json"), npmLock());
@@ -889,7 +889,7 @@ describe("SCA scanner execution", () => {
     },
   );
   test.each([127, 128, 130, null])(
-    "never reports clean for error/no-package exit %s",
+    "never reports clean for error/no-package exit %p",
     async (exitCode) => {
       const result = await scanFixture({
         stdout:
@@ -1107,7 +1107,7 @@ packages:
     },
   );
   test.each([false, true])(
-    "keeps relative Composer archive coverage incomplete with advisory matches: %s",
+    "keeps relative Composer archive coverage incomplete with advisory matches: %p",
     async (matched) => {
       const { repository, output } = await setup();
       await writeFile(
@@ -1178,7 +1178,7 @@ packages:
     },
   );
   test.each([2, 3])(
-    "keeps npm v%s local Git provenance when OSV emits a registry tuple",
+    "keeps npm v%p local Git provenance when OSV emits a registry tuple",
     async (lockfileVersion) => {
       const resolved = `git+file:///synthetic/local-repository#${"a".repeat(40)}`;
       for (const matched of [false, true]) {
@@ -1214,7 +1214,7 @@ packages:
     },
   );
   test.each([true, false])(
-    "counts npm workspace links once when an unresolved tuple is emitted: %s",
+    "counts npm workspace links once when an unresolved tuple is emitted: %p",
     async (emitted) => {
       const raw = rawOutput("package-lock.json");
       if (emitted)
@@ -1249,7 +1249,7 @@ packages:
     },
   );
   test.each([true, false])(
-    "accounts for pnpm local and direct URL references when file tuples are emitted: %s",
+    "accounts for pnpm local and direct URL references when file tuples are emitted: %p",
     async (emitted) => {
       const raw = rawOutput("package-lock.json");
       const pnpm = rawOutput("pnpm-lock.yaml", [advisory("A")]);
