@@ -577,3 +577,177 @@ test("a failed nonregular attempt preserves readable retry origin history", asyn
     await rm(f.root, { recursive: true, force: true });
   }
 });
+
+for (const checkpointCollection of ["file", "linked", "readable"]) {
+  test(`an unusable checkpoint collection preserves independent retry history: ${checkpointCollection}`, async () => {
+    const f = await fixture();
+    try {
+      const original = workerDraft([], {
+        complete: false,
+        coverage: {
+          completeness: "partial",
+          surfaces: [
+            {
+              id: "review",
+              label: "First accepted review",
+              disposition: "needs_follow_up",
+              receiptRefs: [],
+            },
+          ],
+          explicitExclusions: [],
+          deferred: [
+            { id: "gap", reason: "The first review still needs proof." },
+          ],
+        },
+      });
+      await writeFile(f.resultPath, JSON.stringify(original));
+      const first = path.join(f.workerRoot, "attempts", "attempt-01");
+      await archiveDirectory(f.output, first);
+      const second = path.join(f.workerRoot, "attempts", "attempt-02");
+      await mkdir(second, { recursive: true });
+      await writeFile(
+        path.join(second, "result.json"),
+        JSON.stringify(workerDraft([], { complete: false })),
+      );
+      if (checkpointCollection === "file") {
+        await writeFile(
+          path.join(second, "checkpoints"),
+          "Unusable failed checkpoint collection.\n",
+        );
+      } else if (checkpointCollection === "linked") {
+        const outside = path.join(f.root, "unrelated-checkpoints");
+        await mkdir(outside);
+        await writeFile(
+          path.join(outside, "unrelated.json"),
+          "{unrelated bytes}",
+        );
+        await symlink(
+          outside,
+          path.join(second, "checkpoints"),
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      } else {
+        await mkdir(path.join(second, "checkpoints"));
+      }
+      await mkdir(f.output, { recursive: true });
+      await writeFile(
+        f.resultPath,
+        JSON.stringify({ ...original, complete: true }),
+      );
+      await validateDiscoveryArtifacts(
+        { workersRoot: path.dirname(f.workerRoot) },
+        f.resultPath,
+        scanId,
+      );
+      const oldBytes = await readFile(path.join(first, "result.json"));
+      if (checkpointCollection !== "readable") {
+        await assert.rejects(
+          readArchivedWorkerCheckpoints({
+            root: f.output,
+            repoRoot: f.root,
+            scanId,
+            layout: "worker",
+          }),
+          /safe directory/,
+        );
+      }
+      const coverage = (await readDeepReductionSources(f.context))
+        .discoveries[0].coverage;
+      assert.equal(coverage.surfaces[0].provenance.attempt, 1);
+      assert.equal(coverage.deferred[0].provenance.attempt, 1);
+      assert.ok(
+        coverage.reviews.some(
+          (review: { attempt: number }) => review.attempt === 1,
+        ),
+      );
+      assert.deepEqual(
+        await readFile(path.join(first, "result.json")),
+        oldBytes,
+      );
+      if (checkpointCollection === "linked") {
+        assert.equal(
+          await readFile(
+            path.join(f.root, "unrelated-checkpoints", "unrelated.json"),
+            "utf8",
+          ),
+          "{unrelated bytes}",
+        );
+      }
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const changedReceipt of [false, true]) {
+  test(`actual receipt bytes determine a retried surface origin: changed=${changedReceipt}`, async () => {
+    const f = await fixture();
+    try {
+      const original = workerDraft([], {
+        complete: false,
+        coverage: {
+          completeness: "partial",
+          surfaces: [
+            {
+              id: "surface",
+              label: "Same review metadata",
+              disposition: "needs_follow_up",
+              receiptRefs: ["artifacts/review.txt"],
+            },
+          ],
+          explicitExclusions: [],
+          deferred: [
+            { id: "gap", reason: "The same review still needs proof." },
+          ],
+        },
+      });
+      await mkdir(path.join(f.output, "artifacts"));
+      await writeFile(
+        path.join(f.output, "artifacts/review.txt"),
+        "Original synthetic review.\n",
+      );
+      await writeFile(f.resultPath, JSON.stringify(original));
+      const archive = path.join(f.workerRoot, "attempts", "attempt-01");
+      await archiveDirectory(f.output, archive);
+      await mkdir(path.join(f.output, "artifacts"));
+      const currentBytes = changedReceipt
+        ? "Changed synthetic review.\n"
+        : "Original synthetic review.\n";
+      await writeFile(
+        path.join(f.output, "artifacts/review.txt"),
+        currentBytes,
+      );
+      await writeFile(
+        f.resultPath,
+        JSON.stringify({ ...original, complete: true }),
+      );
+      await validateDiscoveryArtifacts(
+        { workersRoot: path.dirname(f.workerRoot) },
+        f.resultPath,
+        scanId,
+      );
+      const coverage = (await readDeepReductionSources(f.context))
+        .discoveries[0].coverage;
+      assert.equal(
+        coverage.surfaces[0].provenance.attempt,
+        changedReceipt ? 3 : 1,
+      );
+      assert.equal(coverage.deferred[0].provenance.attempt, 1);
+      assert.equal(
+        await readFile(path.join(f.output, "artifacts/review.txt"), "utf8"),
+        currentBytes,
+      );
+      assert.equal(
+        await readFile(path.join(archive, "artifacts/review.txt"), "utf8"),
+        "Original synthetic review.\n",
+      );
+      assert.ok(
+        coverage.reviews.some(
+          (review: { attempt: number }) => review.attempt === 1,
+        ),
+      );
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+}

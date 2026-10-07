@@ -203,7 +203,8 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
                 "_write_prepared_scan_finalization",
                 fail_publication,
             )
-        stopped = workbench_api["fail_scan"](
+        stopped = workbench_api["saved_results"].fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             workbench_db,
             Namespace(
                 scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."
@@ -221,8 +222,8 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
                 {"id": "outside-frozen-sources", "reason": "Written after sources were frozen."}
             )
             (scan.scan_dir / "coverage.json").write_text(json.dumps(mutable_coverage))
-        stopped = workbench_api["recover_scan_results"](
-            workbench_db, Namespace(scan_id=scan.scan_id)
+        stopped = workbench_api["saved_results"].recover_scan_results(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
         )["scan"]
         assert stopped["resultsRecoveryNeeded"] is False
 
@@ -340,7 +341,8 @@ def test_stopped_recovery_keeps_unmerged_coverage_after_accepted_review(
         )
     )
 
-    workbench_api["fail_scan"](
+    workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
     )
@@ -394,14 +396,15 @@ def test_standard_publication_preserves_uninterpreted_coverage_provenance(
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
 
     if stopped:
-        workbench_api["fail_scan"](
+        workbench_api["saved_results"].fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             workbench_db,
             Namespace(
                 scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."
             ),
         )
-        published = workbench_api["recover_scan_results"](
-            workbench_db, Namespace(scan_id=scan.scan_id)
+        published = workbench_api["saved_results"].recover_scan_results(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
         )["scan"]
     else:
         published = complete(workbench_api, workbench_db, scan)
@@ -456,7 +459,8 @@ def test_standard_recovery_resolves_local_candidates_with_uninterpreted_provenan
         },
     )
 
-    workbench_api["fail_scan"](
+    workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
     )
@@ -572,12 +576,13 @@ def test_partial_parent_projection_keeps_only_missing_worker_records(
                 "_write_prepared_scan_finalization",
                 fail_publication,
             )
-        workbench_api["fail_scan"](
+        workbench_api["saved_results"].fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             workbench_db,
             Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
         )
-    recovered = workbench_api["recover_scan_results"](
-        workbench_db, Namespace(scan_id=scan.scan_id)
+    recovered = workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
@@ -649,15 +654,16 @@ def test_standard_recovery_keeps_distinct_candidate_with_descriptive_provenance(
                 "_write_prepared_scan_finalization",
                 fail_publication,
             )
-        stopped = workbench_api["fail_scan"](
+        stopped = workbench_api["saved_results"].fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             workbench_db,
             Namespace(
                 scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."
             ),
         )["scan"]
     assert stopped["resultsRecoveryNeeded"] is retry_publication
-    recovered = workbench_api["recover_scan_results"](
-        workbench_db, Namespace(scan_id=scan.scan_id)
+    recovered = workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
     assert recovered["findingCount"] == 1
@@ -670,7 +676,9 @@ def test_standard_recovery_keeps_distinct_candidate_with_descriptive_provenance(
         for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
     }
     assert deferred["reason"] in published["report.md"].decode()
-    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
+    )
     assert all((scan.scan_dir / name).read_bytes() == data for name, data in published.items())
     assert checkpoint.read_bytes() == original
 
@@ -743,12 +751,13 @@ def test_deep_recovery_reconciles_recognized_projected_candidates(
             expected_draft_digest=None,
         ),
     )
-    workbench_api["fail_scan"](
+    workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
     )
-    recovered = workbench_api["recover_scan_results"](
-        workbench_db, Namespace(scan_id=scan.scan_id)
+    recovered = workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
@@ -877,13 +886,18 @@ def test_generic_closeout_preserves_projected_surface_receipts(
     if prior_receipt == "omitted":
         projected["receiptRefs"].append(previous_receipt.relative_to(scan.scan_dir).as_posix())
     saved = {file: file.read_bytes() for file in (scan.scan_dir / "artifacts").rglob("*.json")}
-    workbench_api["fail_scan"](
+    workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
     )
     for replay in (False, True):
         if replay:
-            workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+            workbench_api["saved_results"].recover_scan_results(
+                workbench_api["_WORKBENCH_DB_CONTEXT"],
+                workbench_db,
+                Namespace(scan_id=scan.scan_id),
+            )
         coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
         assert coverage["surfaces"] == [projected]
         assert len(coverage["deferred"]) == 1
@@ -1122,7 +1136,8 @@ def test_reopened_generic_work_uses_worker_projection(
         interrupted.setattr(
             workbench_api["saved_results"], "_write_prepared_scan_finalization", fail_publication
         )
-        stopped = workbench_api["fail_scan"](
+        stopped = workbench_api["saved_results"].fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             workbench_db,
             Namespace(
                 scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."
@@ -1138,8 +1153,8 @@ def test_reopened_generic_work_uses_worker_projection(
 
     monkeypatch.setattr(workbench_api["saved_results"], "merge_saved_results", observe_merge)
     for _ in range(2):
-        recovered = workbench_api["recover_scan_results"](
-            workbench_db, Namespace(scan_id=scan.scan_id)
+        recovered = workbench_api["saved_results"].recover_scan_results(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
         )["scan"]
         assert recovered["resultsRecoveryNeeded"] is False
         coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
@@ -1269,12 +1284,13 @@ def test_frozen_parent_projection_keeps_selected_surface_notes(
                 "_write_prepared_scan_finalization",
                 fail_publication,
             )
-        workbench_api["fail_scan"](
+        workbench_api["saved_results"].fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             workbench_db,
             Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
         )
-    recovered = workbench_api["recover_scan_results"](
-        workbench_db, Namespace(scan_id=scan.scan_id)
+    recovered = workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
@@ -1362,12 +1378,13 @@ def test_retained_source_finding_owner_does_not_close_another_worker_gap(
                 "_write_prepared_scan_finalization",
                 fail_publication,
             )
-        workbench_api["fail_scan"](
+        workbench_api["saved_results"].fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             workbench_db,
             Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
         )
-    recovered = workbench_api["recover_scan_results"](
-        workbench_db, Namespace(scan_id=scan.scan_id)
+    recovered = workbench_api["saved_results"].recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
@@ -1438,7 +1455,8 @@ def test_stopped_retry_copies_keep_one_observation_per_worker(
     source_bytes = {
         p: p.read_bytes() for p in (scan.scan_dir / "artifacts").rglob("*") if p.is_file()
     }
-    workbench_api["fail_scan"](
+    workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(
             scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit interrupted."
@@ -1446,8 +1464,123 @@ def test_stopped_retry_copies_keep_one_observation_per_worker(
     )
     for replay in (False, True):
         if replay:
-            workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+            workbench_api["saved_results"].recover_scan_results(
+                workbench_api["_WORKBENCH_DB_CONTEXT"],
+                workbench_db,
+                Namespace(scan_id=scan.scan_id),
+            )
         coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
         rows = [row for row in coverage["surfaces"] if row["label"] == "Original review"]
         assert len(rows) == 1 + int(changed) + int(independent_worker)
         assert all(path.read_bytes() == data for path, data in source_bytes.items())
+
+
+@pytest.mark.parametrize("publication", ["interrupted", "completed", "legacy"])
+def test_stopped_recovery_binds_reducer_projection_to_host_checkpoint(
+    workbench_api, workbench_db, publication_scan, publication
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = 'deep-security-scan/v2' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        (scan.scan_dir / name).unlink()
+    discovery = add_worker(workbench_db, scan)
+    discovery.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": [],
+                "coverage": {
+                    "completeness": "partial",
+                    "surfaces": [],
+                    "explicitExclusions": [],
+                    "deferred": [
+                        {"id": "review", "reason": "Supported validation remains unresolved."}
+                    ],
+                },
+            }
+        )
+    )
+    reducer = add_worker(workbench_db, scan)
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none', status = ? WHERE result_manifest_path = ?",
+            ("failed" if publication == "interrupted" else "succeeded", str(reducer)),
+        )
+    reducer.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": [],
+                "sourceCoverage": {
+                    "completeness": "complete",
+                    "surfaces": [],
+                    "explicitExclusions": [],
+                    "deferred": [],
+                    "reviews": [
+                        {
+                            "workerId": discovery.parent.name,
+                            "attempt": 99,
+                            "completeness": "complete",
+                        }
+                    ],
+                },
+            }
+        )
+    )
+    worker_id = discovery.parent.name
+    accepted = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "sourceCoverage": {
+            "completeness": "partial",
+            "surfaces": [],
+            "explicitExclusions": [],
+            "deferred": [
+                {
+                    "id": f"{worker_id}-attempt-1-deferred-1",
+                    "reason": "Supported validation remains unresolved.",
+                    "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "review"},
+                }
+            ],
+            "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "partial"}],
+        },
+    }
+    if publication != "legacy":
+        write_checkpoint(reducer.parent / "checkpoints", accepted)
+    if publication != "interrupted":
+        reducer.write_text(json.dumps(accepted))
+    saved = {path: path.read_bytes() for path in (scan.scan_dir / "workers").rglob("*.json")}
+    workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Synthetic stop."
+        ),
+    )
+    for replay in (False, True):
+        if replay:
+            workbench_api["saved_results"].recover_scan_results(
+                workbench_api["_WORKBENCH_DB_CONTEXT"],
+                workbench_db,
+                Namespace(scan_id=scan.scan_id),
+            )
+        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+        assert coverage["reviews"] == [
+            {
+                "workerId": discovery.parent.name,
+                "attempt": 1,
+                "completeness": "partial",
+            }
+        ]
+        assert any(
+            row.get("reason") == "Supported validation remains unresolved."
+            for row in coverage["deferred"]
+        )
+        assert all(path.read_bytes() == contents for path, contents in saved.items())

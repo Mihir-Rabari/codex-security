@@ -1450,7 +1450,10 @@ export async function readArchivedWorkerCheckpoints(
           "archived",
           head?.checkpoint,
           skipInvalid,
-        )
+        ).catch((error) => {
+          if (!skipInvalid) throw error;
+          return [];
+        })
       ).map((draft) => ({ ...draft, result: false })),
     );
     if (checkpointHead !== undefined) {

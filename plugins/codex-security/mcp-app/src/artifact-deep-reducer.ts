@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { readArtifactBytes } from "./artifact-io.js";
 import type { JsonObject } from "./types.js";
 import { dirname, join, relative, sep } from "node:path";
 import type { ZodType } from "zod/v4";
@@ -123,6 +125,45 @@ export async function readDeepReductionSources(
           structuredClone(input.coverage),
         );
         const originalCoverage = structuredClone(result.coverage);
+        const artifactPrefix = relative(
+          bound.artifacts.scanDir,
+          dirname(worker.resultPath),
+        )
+          .split(sep)
+          .join("/");
+        const archivePrefix =
+          artifactPrefix.slice(0, artifactPrefix.lastIndexOf("/")) +
+          "/attempts/";
+        const receiptRefs = new Set(
+          [originalCoverage, ...originalArchivedCoverage].flatMap((source) =>
+            (source.surfaces as JsonObject[]).flatMap(
+              (surface) => (surface.receiptRefs as string[] | undefined) ?? [],
+            ),
+          ),
+        );
+        const receiptDigests = new Map<string, string>();
+        await Promise.all(
+          [...receiptRefs].map(async (ref) => {
+            try {
+              const bytes = await readArtifactBytes(
+                {
+                  ...context,
+                  root: ref.startsWith(archivePrefix)
+                    ? bound.artifacts.scanDir
+                    : dirname(worker.resultPath),
+                },
+                ref.split("/"),
+                "Saved discovery receipt",
+              );
+              receiptDigests.set(
+                ref,
+                createHash("sha256").update(bytes).digest("hex"),
+              );
+            } catch {
+              // Unreadable evidence cannot establish an earlier receipt origin.
+            }
+          }),
+        );
         normalizeSavedScanCoverage([
           result,
           ...archived.map(({ input }) => input),
@@ -133,9 +174,7 @@ export async function readDeepReductionSources(
           coverage: projectDiscoveryCoverage(
             coverage,
             worker,
-            relative(bound.artifacts.scanDir, dirname(worker.resultPath))
-              .split(sep)
-              .join("/"),
+            artifactPrefix,
             archived.flatMap(({ input, attempt }, index) => {
               const number = /^attempt-(\d+)$/.exec(attempt ?? "")?.[1];
               return number === undefined
@@ -160,6 +199,7 @@ export async function readDeepReductionSources(
                   ];
             }),
             originalCoverage,
+            receiptDigests,
           ),
           result: reduction,
         };

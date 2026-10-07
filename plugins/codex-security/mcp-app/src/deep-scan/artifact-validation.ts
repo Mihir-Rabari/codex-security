@@ -312,6 +312,7 @@ export function projectDiscoveryCoverage(
   artifactPrefix: string,
   archived: { attempt: number; coverage: ScanDraftInput["coverage"] }[] = [],
   originalCoverage: ScanDraftInput["coverage"] = coverage,
+  receiptDigests?: ReadonlyMap<string, string>,
 ): ScanDraftInput["coverage"] {
   const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;
   const provenance = {
@@ -345,6 +346,20 @@ export function projectDiscoveryCoverage(
             if (field === "surfaces" && isRecord(original)) {
               original.receiptRefs ??= [];
               normalized.receiptRefs ??= [];
+              if (
+                receiptDigests !== undefined &&
+                !(original.receiptRefs as string[]).every((ref, index) => {
+                  const digest = receiptDigests.get(ref);
+                  return (
+                    digest !== undefined &&
+                    digest ===
+                      receiptDigests.get(
+                        (normalized.receiptRefs as string[])[index]!,
+                      )
+                  );
+                })
+              )
+                return false;
               for (const row of [original, normalized])
                 row.receiptRefs = (row.receiptRefs as string[]).map((ref) => {
                   if (!ref.startsWith(archivePrefix)) return ref;

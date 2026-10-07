@@ -1117,13 +1117,6 @@ def merge_saved_results(
             if _checkpoint_head_directory(relative) is not None:
                 saved_heads[relative] = draft["checkpoint"]
                 continue
-            # The host supplies reducer coverage separately from model output.
-            # Preserve the digest of the original accepted document.
-            if relative in reducer_paths:
-                draft = {
-                    **draft,
-                    "coverage": draft.get("sourceCoverage", draft.get("coverage", {})),
-                }
             sources.append((relative, draft, worker_id))
         except (ContractError, OSError, ValueError) as exc:
             if (scan_dir / relative).exists():
@@ -1131,6 +1124,30 @@ def merge_saved_results(
     if frozen_source_digests is not None:
         if frozen_source_digests.keys() - source_digests.keys():
             raise ContractError("Frozen stopped-scan checkpoint set is incomplete.")
+
+    # A failed result replacement leaves model input beside its accepted host snapshot.
+    # Compare the original documents before promoting host coverage. Legacy results
+    # without a saved host projection retain their existing recovery format.
+    saved_documents = {relative: draft for relative, draft, _ in sources}
+    unaccepted_reducer_results = set()
+    for _, result_path, checkpoint_paths, _ in reducer_outputs:
+        accepted = [
+            draft
+            for checkpoint_path in checkpoint_paths
+            if "sourceCoverage" in (draft := saved_documents.get(checkpoint_path, {}))
+        ]
+        if accepted and saved_documents.get(result_path) not in accepted:
+            unaccepted_reducer_results.add(result_path)
+    for index, (relative, draft, worker_id) in enumerate(sources):
+        if relative not in reducer_paths:
+            continue
+        if relative in unaccepted_reducer_results:
+            draft = {key: value for key, value in draft.items() if key != "sourceCoverage"}
+        sources[index] = (
+            relative,
+            {**draft, "coverage": draft.get("sourceCoverage", draft.get("coverage", {}))},
+            worker_id,
+        )
 
     # Frozen observations retain checkpoint selection even if a worker moves its head.
     headed_workers = {

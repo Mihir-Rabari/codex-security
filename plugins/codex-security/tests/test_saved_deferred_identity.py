@@ -15,6 +15,7 @@ from test_workbench_standard_deep_results import (
 )
 from workbench_test_support import (
     preserve_scan_results,
+    run_workbench,
     saved_discovery_worker,
     saved_draft,
     write_checkpoint,
