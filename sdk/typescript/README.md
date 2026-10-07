@@ -84,6 +84,15 @@ Sign in with ChatGPT:
 cs login
 ```
 
+If you installed only the SDK locally, sign in from your project directory:
+
+```bash
+npx @openai/codex-security login
+```
+
+In the following CLI examples, replace `cs` with `npx @openai/codex-security`
+when using a local SDK installation, including the API-key login example below.
+
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` in the scan process's environment.
 These keys apply to the current command without replacing your saved login.
 To save an API key instead, pass it on stdin:
