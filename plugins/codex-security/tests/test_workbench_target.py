@@ -338,6 +338,47 @@ def test_native_reviewed_patch_preserves_indexed_junction_spelling(tmp_path: Pat
     assert_reviewed_change(source, tmp_path, "app.txt", "before\n", "after\n")
 
 
+def test_indexed_junction_case_aliases_keep_snapshot_identity(
+    tmp_path: Path,
+    junction_factory: Callable[[Path, Path], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import workbench_target
+
+    source = tmp_path / "source"
+    initialize_unborn_git_repository(source)
+    subprocess.run(["git", "config", "core.ignorecase", "true"], cwd=source, check=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "file.txt").write_text("external contents\n")
+    junction = source / "linked"
+    junction_factory(junction, outside)
+    subprocess.run(["git", "add", "."], cwd=source, check=True)
+    metadata = junction.lstat()
+    renamed = junction.rename(source / "Linked")
+    if not getattr(renamed.lstat(), "st_reparse_tag", 0):
+        # Supply case aliases for the emulated junction on a case-sensitive volume.
+        real_lstat = Path.lstat
+        real_readlink = os.readlink
+        monkeypatch.setattr(
+            Path,
+            "lstat",
+            lambda path: metadata if path in (junction, renamed) else real_lstat(path),
+        )
+        monkeypatch.setattr(
+            os,
+            "readlink",
+            lambda path: str(outside) if Path(path) in (junction, renamed) else real_readlink(path),
+        )
+    before = workbench_target.directory_content_digest(source)
+
+    (renamed / "new.txt").write_text("new external contents\n")
+    assert workbench_target.directory_content_digest(source) == before
+    (renamed / "file.txt").unlink()
+    (renamed / "new.txt").unlink()
+    assert workbench_target.directory_content_digest(source) == before
+
+
 def test_reverse_patch_cannot_write_through_junction(
     tmp_path: Path, junction_factory: Callable[[Path, Path], None]
 ) -> None:
@@ -833,15 +874,17 @@ def test_content_digest_expands_nested_git_repositories(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="requires POSIX directory permissions")
-@pytest.mark.parametrize("git_repository", [False, True], ids=["plain", "git"])
+@pytest.mark.parametrize("inventory", ["plain", "git", "git-junctions"])
 def test_directory_inventory_skips_inaccessible_descendants(
-    tmp_path: Path, git_repository: bool
+    tmp_path: Path, inventory: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     target = tmp_path / "target"
-    if git_repository:
+    if inventory != "plain":
         initialize_unborn_git_repository(target)
     else:
         target.mkdir()
+    if inventory == "git-junctions":
+        monkeypatch.setitem(directory_content_digest.__globals__, "_WINDOWS", True)
     source = target / "app.py"
     source.write_text("before\n")
     inaccessible = target / "unreadable"

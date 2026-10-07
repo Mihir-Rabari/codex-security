@@ -580,6 +580,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
         "--cached",
         "--others",
         "--exclude-standard",
+        "-t",
         "-z",
         "--",
         inventory_pathspec,
@@ -587,8 +588,9 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     if listed is None:
         raise SystemExit("Could not inspect files in the selected Git working tree.")
     paths: list[Path] = []
-    for raw_path in (raw_path for raw_path in listed.split(b"\0") if raw_path):
-        relative = Path(os.fsdecode(raw_path))
+    junctions: dict[tuple[int, int], Path] = {}
+    for entry in (entry for entry in listed.split(b"\0") if entry):
+        relative = Path(os.fsdecode(entry[2:]))
         if scope_depth:
             if len(relative.parts) <= scope_depth:
                 continue
@@ -612,11 +614,15 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
         except (FileNotFoundError, NotADirectoryError):
             # The index can retain deleted paths, including directory-to-file replacements.
             continue
+        if getattr(metadata, "st_reparse_tag", 0) & 0x20000000:
+            # Case aliases share the link's identity. Prefer the stable index
+            # spelling over untracked descendants added in its external target.
+            identity = metadata.st_dev, metadata.st_ino
+            if entry[:1] != b"?" or identity not in junctions:
+                junctions[identity] = path
+            continue
         paths.append(path)
-        if (
-            not stat.S_ISDIR(metadata.st_mode)
-            or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
-        ):
+        if not stat.S_ISDIR(metadata.st_mode):
             continue
         nested_repository_root = git_output(path, "rev-parse", "--show-toplevel")
         if nested_repository_root is not None and Path(nested_repository_root).samefile(path):
@@ -651,6 +657,13 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
                 work_tree=repository,
             )
             if directories is None:
+                if directory != target:
+                    try:
+                        with os.scandir(directory):
+                            pass
+                    except PermissionError:
+                        # Git's root inventory also skips unreadable descendants.
+                        continue
                 raise SystemExit("Could not inspect directories in the selected Git working tree.")
             for raw_path in (item for item in directories.split(b"\0") if item):
                 try:
@@ -660,13 +673,13 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
                     metadata = path.lstat()
                 except (FileNotFoundError, NotADirectoryError):
                     continue
-                if (
-                    stat.S_ISLNK(metadata.st_mode)
-                    or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
-                ):
+                if getattr(metadata, "st_reparse_tag", 0) & 0x20000000:
+                    junctions.setdefault((metadata.st_dev, metadata.st_ino), path)
+                elif stat.S_ISLNK(metadata.st_mode):
                     paths.append(path)
                 elif stat.S_ISDIR(metadata.st_mode):
                     pending.append(path)
+    paths.extend(junctions.values())
     return sorted({str(path): path for path in paths}.values(), key=str)
 
 
