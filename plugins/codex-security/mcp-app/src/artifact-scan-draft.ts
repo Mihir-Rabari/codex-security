@@ -690,7 +690,19 @@ function reconcileScanDraft(
       const matches = result.findings.filter((current) =>
         sameSavedFinding(current, finding),
       );
-      if (
+      const inferredMatches = findingIdentitySchema.safeParse(
+        (finding.provenance as JsonObject).preservedIdentity,
+      ).success
+        ? matches.filter(
+            (current) =>
+              current.identity === undefined &&
+              containsSavedFinding(current, finding),
+          )
+        : [];
+      if (inferredMatches.length > 0) {
+        for (const current of inferredMatches)
+          preserveFindingDetails(current, finding);
+      } else if (
         matches.length === 1 &&
         source.findings.filter((current) => sameSavedFinding(current, finding))
           .length === 1
@@ -1643,8 +1655,11 @@ function containsSavedFinding(
   if (
     current.identity === undefined &&
     findingIdentitySchema.safeParse(previous.identity).success
-  )
+  ) {
     delete original.identity;
+    if (isObject(original.provenance))
+      delete original.provenance.preservedIdentity;
+  }
   return containsSavedValue(current, original);
 }
 
