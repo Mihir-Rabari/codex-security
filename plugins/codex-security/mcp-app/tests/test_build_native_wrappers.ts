@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import test from "node:test";
-import { buildNativeWrappers } from "../scripts/build_native_wrappers.mjs";
 
 const builder = new URL(
   "../scripts/build_native_wrappers.mjs",
   import.meta.url,
 );
 const platform = new URL("../../native/platform.mjs", import.meta.url);
+const { buildNativeWrappers } = await import(builder.href);
 
 test("concurrent runtime builds preserve complete native wrapper exports", async () => {
   await buildNativeWrappers();
@@ -26,7 +26,7 @@ test("concurrent runtime builds preserve complete native wrapper exports", async
     Array.from(
       { length: 3 },
       () =>
-        new Promise((resolve, reject) => {
+        new Promise<void>((resolve, reject) => {
           const child = spawn(
             process.execPath,
             ["--input-type=module", "--eval", source],
