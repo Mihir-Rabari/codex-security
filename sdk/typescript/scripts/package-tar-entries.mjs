@@ -171,7 +171,7 @@ export function readTarArchive(archiveBytes) {
       else {
         const contents = archiveBytes.subarray(offset + blockSize, contentsEnd);
         if (
-          Number.parseInt(attribute("GNU.sparse.major"), 10) === 1 &&
+          Number.parseInt(nextAttributes.get("GNU.sparse.major"), 10) === 1 &&
           /\.(?:png|br(?:\.part-[0-9]+)?)$/iu.test(path)
         )
           sparseFiles.set(path, sparseMap(contents));

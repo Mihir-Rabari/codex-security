@@ -420,6 +420,11 @@ describe("npm package tar listings", () => {
         },
         { name: "png", files: [["logo.png", logo, true]] },
         {
+          name: "global-sparse-keys",
+          files: [["runtime.mjs.br", cleanCompressedPayload, false]],
+          globalSparse: true,
+        },
+        {
           name: "expanded-marker",
           files: [
             [
@@ -445,6 +450,7 @@ describe("npm package tar listings", () => {
       ] satisfies {
         name: string;
         files: [string, Buffer, boolean | "0.1-tail"][];
+        globalSparse?: boolean;
         mapMarker?: boolean;
         tailMarker?: boolean;
         error?: string;
@@ -500,7 +506,23 @@ describe("npm package tar listings", () => {
         const archivePath = join(root, `${scenario.name}.tgz`);
         writeFileSync(
           archivePath,
-          gzipSync(Buffer.concat([packageTar(), ...records])),
+          gzipSync(
+            Buffer.concat([
+              ...(scenario.globalSparse
+                ? [
+                    tarRecord(
+                      paxRecords({
+                        "GNU.sparse.major": "1",
+                        "GNU.sparse.minor": "0",
+                      }),
+                      { name: "GlobalHead", type: 0x67 },
+                    ),
+                  ]
+                : []),
+              packageTar(),
+              ...records,
+            ]),
+          ),
         );
         const contractPath = join(root, "contract.json");
         writeFileSync(
