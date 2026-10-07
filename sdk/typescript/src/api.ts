@@ -5060,6 +5060,8 @@ function selectedWorkerRuntimeConfig(
       [
         "features",
         "agents",
+        "model_auto_compact_token_limit",
+        "model_context_window",
         "model_instructions_file",
         "model_catalog_json",
         "experimental_compact_prompt_file",
