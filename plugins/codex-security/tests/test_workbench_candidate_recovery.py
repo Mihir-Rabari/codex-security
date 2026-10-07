@@ -676,3 +676,46 @@ def test_new_worker_pending_keeps_parent_outcome_chronology(
     assert replay is not None
     assert len(module.unresolved_candidates(replay[2], replay[1])) == int(pending_time >= 200)
     assert result.read_bytes() == original
+
+
+@pytest.mark.parametrize("malformed", [None, 1, ["Malformed saved row"]])
+def test_resolved_owned_gap_preserves_valid_parent_findings_with_malformed_rows(
+    tmp_path: Path, generic_review_recovery, malformed
+) -> None:
+    module, pending, closed, binding = generic_review_recovery
+    contract = tmp_path / "contract"
+    contract.mkdir()
+    write_completed_contract(contract, pending["scanId"], tmp_path, relative_path="app.py")
+    finding = json.loads((contract / "findings.json").read_text())["findings"][0]
+    pending["findings"] = [malformed, finding]
+    row = pending["coverage"]["deferred"][0]
+    row.update(candidateId="review", sourceWorkerId="worker")
+    write_saved_parent(tmp_path, pending, 100)
+    output = tmp_path / "worker"
+    output.mkdir()
+    closed["coverage"].pop("resolvedDeferred")
+    closed["coverage"]["surfaces"] = [
+        {
+            "candidateId": "review",
+            "label": "Final review",
+            "disposition": "rejected",
+            "receiptRefs": [],
+        }
+    ]
+    (output / "result.json").write_text(json.dumps(closed))
+    os.utime(output / "result.json", ns=(200, 200))
+    saved = module.merge_saved_results(
+        tmp_path,
+        pending["scanId"],
+        binding,
+        [saved_discovery_worker(output, "worker", 1)],
+        [],
+        stopped=True,
+        reason="interrupted",
+    )
+    assert saved is not None
+    assert malformed in saved[1]["findings"]
+    assert any(
+        isinstance(row, dict) and row.get("title") == finding["title"]
+        for row in saved[1]["findings"]
+    )

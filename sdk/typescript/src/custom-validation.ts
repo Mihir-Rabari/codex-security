@@ -610,12 +610,18 @@ export async function runCustomValidation(options: {
         .get(surface.id)
         ?.has(candidateIdentity(surface.candidateId, surface["sourceWorkerId"]))
     ) {
-      const baseId = `${surface.id}-decision`;
-      let id = baseId;
-      let suffix = 2;
-      while (reservedIds.has(id)) id = `${baseId}-${suffix++}`;
-      reservedIds.add(id);
-      independentDecisions.push({ ...structuredClone(surface), id });
+      if (
+        !candidateIdentityCounts.has(
+          candidateIdentity(surface.candidateId, surface["sourceWorkerId"]),
+        )
+      ) {
+        const baseId = `${surface.id}-decision`;
+        let id = baseId;
+        let suffix = 2;
+        while (reservedIds.has(id)) id = `${baseId}-${suffix++}`;
+        reservedIds.add(id);
+        independentDecisions.push({ ...structuredClone(surface), id });
+      }
       delete surface.candidateId;
     }
     const values = updates.map((update) => update.validation.disposition);

@@ -744,6 +744,13 @@ async function preserveScanDraft(
               : [],
             [pending.candidate],
           );
+        if (Array.isArray(pending.originalCandidates))
+          provenance.originalCandidates = exactUnion(
+            Array.isArray(provenance.originalCandidates)
+              ? provenance.originalCandidates
+              : [],
+            pending.originalCandidates,
+          );
         if (isObject(pending.finding))
           preserveFindingDetails(finding, pending.finding);
         if (Array.isArray(pending.previousFindings))
@@ -769,6 +776,13 @@ async function preserveScanDraft(
                 ? candidateRow.originalCandidates
                 : [],
               [pending.candidate],
+            );
+          if (Array.isArray(pending.originalCandidates))
+            candidateRow.originalCandidates = exactUnion(
+              Array.isArray(candidateRow.originalCandidates)
+                ? candidateRow.originalCandidates
+                : [],
+              pending.originalCandidates,
             );
           for (const field of ["candidate", "finding"] as const) {
             if (pending[field] !== undefined)

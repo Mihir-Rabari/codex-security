@@ -2017,3 +2017,44 @@ for (const disposition of ["reportable", "suppressed"] as const) {
     }
   }
 }
+
+for (const reassessed of [false, true]) {
+  test(`mapped historical decision respects current reassessment: ${reassessed}`, async () => {
+    const f = await fixture(reassessed ? 2 : 1);
+    f.findings.findings[0]!.provenance["candidateId"] = "candidate-a";
+    if (reassessed)
+      f.findings.findings[1]!.provenance["candidateId"] = "candidate-b";
+    await save(join(f.scanDir, "findings.json"), f.findings);
+    const coverage = await json<CoverageDocument>(
+      join(f.scanDir, "coverage.json"),
+    );
+    const previous = {
+      ...coverage.surfaces[0]!,
+      candidateId: "candidate-b",
+      disposition: "rejected" as const,
+      notes: "Original candidate B rejection evidence.",
+    };
+    coverage.surfaces[0] = previous;
+    await save(join(f.scanDir, "coverage.json"), coverage);
+    await runCustomValidation({
+      ...f,
+      run: async () =>
+        JSON.stringify(
+          reassessed ? result("reportable", "deferred") : result("reportable"),
+        ),
+    });
+    const saved = await loadResult(f.scanDir);
+    const old = saved.coverage.surfaces.filter(
+      (row) =>
+        row.candidateId === "candidate-b" && row.disposition === "rejected",
+    );
+    expect(old).toHaveLength(reassessed ? 0 : 1);
+    if (reassessed) {
+      expect(saved.unresolvedCandidates).toHaveLength(1);
+      expect(saved.unresolvedCandidates[0]!.candidateId).toBe("candidate-b");
+      expect(saved.unresolvedCandidates[0]!.candidate).toMatchObject({
+        provenance: { originalCandidates: expect.arrayContaining([previous]) },
+      });
+    }
+  });
+}

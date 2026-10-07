@@ -3456,3 +3456,58 @@ for (const variant of ["identical", "evidence", "phases"] as const) {
     }
   });
 }
+
+for (const outcome of ["reportable", "suppressed", "not_applicable"] as const) {
+  test(`resolved Diff snapshot carries its saved candidate archive: ${outcome}`, async (t) => {
+    const current = candidate("snapshot-resolution", "deferred");
+    const context = await fixture(t, [current]);
+    const authored = {
+      ...current,
+      evidence: "Original authored snapshot evidence.",
+    };
+    const first = draft([
+      {
+        candidateId: current.candidate_id,
+        candidate: authored,
+        reason: "Original authored review remains pending.",
+      },
+    ]);
+    first.complete = false;
+    first.coverage.completeness = "partial";
+    await recordCodexSecurityScanDraft(context, first);
+    await writeLedger(context, [
+      candidate(current.candidate_id, outcome, outcome),
+    ]);
+    const resolved = draft();
+    resolved.complete = true;
+    if (outcome === "reportable")
+      resolved.findings = [finding(current.candidate_id)];
+    await recordCodexSecurityScanDraft(context, resolved);
+    for (const replay of [false, true]) {
+      if (replay) await recordCodexSecurityScanDraft(context, resolved);
+      const saved =
+        outcome === "reportable"
+          ? JSON.parse(
+              await readFile(path.join(context.root, "findings.json"), "utf8"),
+            )
+          : await readCoverage(context);
+      const contains = (value: unknown): boolean =>
+        isDeepStrictEqual(value, authored) ||
+        (Array.isArray(value)
+          ? value.some(contains)
+          : value !== null &&
+            typeof value === "object" &&
+            Object.values(value).some(contains));
+      assert.ok(
+        contains(saved),
+        "Resolution retains the original saved snapshot evidence.",
+      );
+      assert.equal(
+        (await readCoverage(context)).deferred.some(
+          (row: FixtureObject) => row.candidateId === current.candidate_id,
+        ),
+        false,
+      );
+    }
+  });
+}

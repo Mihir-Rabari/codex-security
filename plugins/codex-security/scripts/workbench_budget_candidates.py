@@ -90,7 +90,9 @@ def archive_resolved_deferred_payloads(
     states = {
         key: ("reported", finding)
         for finding in findings
-        if (key := finding_candidate_key(finding)) is not None and resolved.get(key) == "reported"
+        if isinstance(finding, dict)
+        and (key := finding_candidate_key(finding)) is not None
+        and resolved.get(key) == "reported"
     }
     for field in ("surfaces", "explicitExclusions"):
         rows = coverage.get(field)
