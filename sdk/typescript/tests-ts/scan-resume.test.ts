@@ -329,7 +329,7 @@ test.each([
               : "running scan; completed, failed, and canceled",
     );
     expect(savedState()).toBe(stateBefore);
-    if (scenario === "replaced") {
+    if (before === undefined) {
       await expect(
         f.command(["get-scan", "--scan-id", f.scanId]),
       ).rejects.toThrow("unavailable for the current checkout owner");
