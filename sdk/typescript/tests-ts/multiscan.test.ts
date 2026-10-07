@@ -36,6 +36,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { zipSync } from "fflate";
 import Papa from "papaparse";
+import { build } from "esbuild";
 import { main } from "../src/cli.js";
 import { loadContract } from "../src/contract.js";
 import * as contract from "../src/contract.js";
@@ -6172,4 +6173,188 @@ for (const tracked of [false, true]) {
       );
     }
   });
+}
+
+for (const missingCode of ["native", "ENOENT"]) {
+  for (const obstructed of [false, true]) {
+    test(`retained requested-file recovery preserves a regular-file ancestor=${obstructed} missing-code=${missingCode}`, async () => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "retained-ancestor-source");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
+      );
+      const selected = { standard: { target: ["src/app.ts"] } };
+      await runMultiscan(
+        options(paths, client(rejecting("Interrupted")), {
+          maxAttempts: 1,
+          scanOptionsByMode: selected,
+        }),
+      );
+      const runs = mock(completedConfiguredPaths);
+      const campaign = options(paths, client(runs), {
+        recoverScan: async () => undefined,
+        scanOptionsByMode: selected,
+      });
+      const initial = await runMultiscan(campaign);
+      expect(initial).toMatchObject({ completed: 1, skipped: 0 });
+      const ledger = await readFile(initial.resultsPath);
+      const checkout = join(
+        paths.output,
+        "recovery-checkouts",
+        "repo",
+        "attempt-2",
+      );
+      git(paths.root, "clone", "--quiet", source.path, checkout);
+      await rm(join(checkout, "src"), { recursive: true });
+      if (obstructed)
+        await writeFile(
+          join(checkout, "src"),
+          "Preserve retained ancestor contents.\n",
+        );
+      const originalLstat = filesystem.lstat;
+      const inspect =
+        missingCode === "ENOENT"
+          ? spyOn(filesystem, "lstat").mockImplementation((async (
+              ...args: Parameters<typeof filesystem.lstat>
+            ) => {
+              try {
+                return await originalLstat(...args);
+              } catch (error) {
+                if (
+                  String(args[0]) === join(checkout, "src", "app.ts") &&
+                  (error as NodeJS.ErrnoException).code === "ENOTDIR"
+                )
+                  (error as NodeJS.ErrnoException).code = "ENOENT";
+                throw error;
+              }
+            }) as typeof filesystem.lstat)
+          : undefined;
+      let outcome: unknown;
+      try {
+        outcome = await runMultiscan(campaign).catch((error: unknown) => error);
+      } finally {
+        inspect?.mockRestore();
+      }
+      if (obstructed) {
+        expect(await readFile(join(checkout, "src"), "utf8")).toBe(
+          "Preserve retained ancestor contents.\n",
+        );
+        expect(outcome).toBeInstanceOf(Error);
+      } else {
+        expect(outcome).toMatchObject({ completed: 1, skipped: 1 });
+        expect(await readFile(join(checkout, "src", "app.ts"))).toEqual(
+          await readFile(join(source.path, "src", "app.ts")),
+        );
+      }
+      expect(await readFile(initial.resultsPath)).toEqual(ledger);
+      expect(runs).toHaveBeenCalledTimes(1);
+    });
+  }
+}
+
+for (const parentThroughLink of [false, true]) {
+  testPosix(
+    `retained requested-file recovery follows physical alias parent=${parentThroughLink}`,
+    async () => {
+      const paths = await fixture();
+      const source = await repository(
+        paths.root,
+        "retained-physical-alias-source",
+      );
+      await mkdir(join(source.path, "nested", "deep"), { recursive: true });
+      await mkdir(join(source.path, "nested", "src"));
+      await writeFile(
+        join(source.path, "nested", "deep", "keep.ts"),
+        "export const keep = true;\n",
+      );
+      await writeFile(
+        join(source.path, "nested", "src", "app.ts"),
+        "export const nested = true;\n",
+      );
+      await symlink("nested/deep", join(source.path, "jump"), "dir");
+      await symlink(
+        parentThroughLink ? "jump/../src" : "nested/src",
+        join(source.path, "alias"),
+        "dir",
+      );
+      git(source.path, "add", ".");
+      git(
+        source.path,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.test",
+        "commit",
+        "-qm",
+        "Physical scope alias fixture",
+      );
+      source.revision = git(source.path, "rev-parse", "HEAD");
+      await writeFile(
+        paths.input,
+        `id,repository,revision,scope\nrepo,${source.path},${source.revision},alias/app.ts\n`,
+      );
+      await runMultiscan(
+        options(paths, client(rejecting("Interrupted")), { maxAttempts: 1 }),
+      );
+      const runs = mock(
+        async (
+          checkout: string,
+          settings: Parameters<SecurityClient["run"]>[1] = {},
+        ) => completedScan(settings.outputDir!, "complete", checkout),
+      );
+      const campaign = options(paths, client(runs), {
+        recoverScan: async () => undefined,
+      });
+      const initial = await runMultiscan(campaign);
+      expect(initial).toMatchObject({ completed: 1, skipped: 0 });
+      const ledger = await readFile(initial.resultsPath);
+      const checkout = join(
+        paths.output,
+        "recovery-checkouts",
+        "repo",
+        "attempt-2",
+      );
+      git(paths.root, "clone", "--quiet", source.path, checkout);
+      await rm(join(checkout, "alias"));
+      await rm(join(checkout, "nested", "src", "app.ts"));
+      await writeFile(
+        join(checkout, "retained.txt"),
+        "Preserve retained recovery data.\n",
+      );
+      const sourceModule = new URL("../src/multiscan.ts", import.meta.url);
+      const nodeModule = join(paths.root, "multiscan.cjs");
+      await build({
+        entryPoints: [fileURLToPath(sourceModule)],
+        outfile: nodeModule,
+        bundle: true,
+        platform: "node",
+        format: "cjs",
+        define: { "import.meta.url": JSON.stringify(sourceModule.href) },
+      });
+      const code = `const {runMultiscan} = require(process.argv[1]);
+      const options=${JSON.stringify({ inputPath: paths.input, outputDir: paths.output, workers: 1, mode: "standard", maxAttempts: 2, config: { pythonPath: PYTHON } })};
+      options.createSecurity=()=>({run:async()=>{throw new Error("Completed receipt must be reused");},close:async()=>{}});
+      options.recoverScan=async()=>undefined;
+      runMultiscan(options).then((result)=>console.log(JSON.stringify(result)),(error)=>{console.error(error);process.exitCode=1});`;
+      const summary = JSON.parse(
+        execFileSync("node", ["--eval", code, nodeModule], {
+          encoding: "utf8",
+          env: process.env,
+        }),
+      );
+      expect(summary).toMatchObject({ completed: 1, skipped: 1 });
+      expect(await readFile(join(checkout, "alias", "app.ts"), "utf8")).toBe(
+        "export const nested = true;\n",
+      );
+      expect(await readFile(join(checkout, "src", "app.ts"))).toEqual(
+        await readFile(join(source.path, "src", "app.ts")),
+      );
+      expect(await readFile(join(checkout, "retained.txt"), "utf8")).toBe(
+        "Preserve retained recovery data.\n",
+      );
+      expect(await readFile(initial.resultsPath)).toEqual(ledger);
+      expect(runs).toHaveBeenCalledTimes(1);
+    },
+  );
 }

@@ -12,6 +12,7 @@ import {
   rename,
   rm,
   rmdir,
+  stat,
   truncate,
   utimes,
   writeFile,
@@ -1784,7 +1785,14 @@ async function checkoutRevision(
           await gitOutput(["show", `${task.revision}:${name}`])
         ).toString("utf8");
         selected = posix.join(
-          relative(path, resolve(path, dirname(name), target))
+          relative(
+            path,
+            await canonicalCreationPath(
+              isAbsolute(target)
+                ? target
+                : `${path}${sep}${dirname(name)}${sep}${target}`,
+            ),
+          )
             .split(sep)
             .join("/"),
           selected.slice(name.length + 1),
@@ -1830,12 +1838,28 @@ async function checkoutRevision(
               comparisonName.subarray(0, scope.length).equals(scope)),
         )
       ) {
-        if (
-          start < worktreeDeleted.length ||
-          (await lstat(Buffer.concat([Buffer.from(path + sep), name])).catch(
-            undefinedIfMissingFile,
-          )) === undefined
-        )
+        const existing = await lstat(
+          Buffer.concat([Buffer.from(path + sep), name]),
+        ).catch(async (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOTDIR") return null;
+          undefinedIfMissingFile(error);
+          for (
+            let end = name.lastIndexOf(47);
+            end !== -1;
+            end = name.lastIndexOf(47, end - 1)
+          ) {
+            const ancestor = await stat(
+              Buffer.concat([Buffer.from(path + sep), name.subarray(0, end)]),
+            ).catch((error: NodeJS.ErrnoException) => {
+              if (error.code === "ENOTDIR") return null;
+              return undefinedIfMissingFile(error);
+            });
+            if (ancestor !== undefined)
+              return ancestor?.isDirectory() ? undefined : null;
+          }
+          return undefined;
+        });
+        if (existing === undefined)
           selectedDeleted.push(deletedPaths.subarray(start, end + 1));
       }
       start = end + 1;
