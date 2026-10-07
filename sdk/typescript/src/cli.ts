@@ -7347,11 +7347,9 @@ async function preparePatchPublication(
     ["for-each-ref", "--format=%(refname)", ...refs],
     repository,
   );
-  let existing = local
-    .split("\n")
-    .some(
-      (ref) => refs.includes(ref) || ref.startsWith(`refs/heads/${branch}/`),
-    );
+  const conflicts = (ref: string) =>
+    refs.includes(ref) || ref.startsWith(`refs/heads/${branch}/`);
+  let existing = local.split("\n").some(conflicts);
   if (!existing) {
     const destination = await patchPublicationDestination(
       repository,
@@ -7361,7 +7359,7 @@ async function preparePatchPublication(
     existing = Boolean(destination.existing);
     for (const remote of destination.remotes) {
       if (existing) break;
-      existing = Boolean(
+      existing = (
         await withResolvedPatchRemote(
           remote,
           repository,
@@ -7405,8 +7403,10 @@ async function preparePatchPublication(
               },
             );
           },
-        ),
-      );
+        )
+      )
+        .split("\n")
+        .some((line) => conflicts(line.split("\t")[1] ?? ""));
     }
   }
   if (existing) {
