@@ -27,7 +27,7 @@ const { assertTarListingSizes, regularTarListingLines } = (await import(
   new URL("../scripts/package-tar-listing.mjs", import.meta.url).href
 )) as {
   regularTarListingLines: (listing: string) => string[];
-  assertTarListingSizes: (lines: string[], maximum: number) => void;
+  assertTarListingSizes: (lines: string[], maximum: number) => number[];
 };
 const { packageDistFiles } = (await import(
   new URL("../scripts/package-dist-files.mjs", import.meta.url).href
@@ -45,6 +45,7 @@ function packageTar({
   rootDirectoryMode = 0o755,
   readmeMode = 0o644,
   mtime = 0,
+  readmeSparse,
 }: {
   trailingZeroBytes?: number;
   sizeTerminator?: string;
@@ -53,6 +54,7 @@ function packageTar({
   rootDirectoryMode?: number;
   readmeMode?: number;
   mtime?: number;
+  readmeSparse?: "0.0" | "1.0";
 } = {}): Buffer {
   const executablePaths = [
     "package/bin/codex-security.mjs",
@@ -71,6 +73,37 @@ function packageTar({
     "package/_bundled_plugin/.codex-plugin/plugin.json",
   ];
   const records = paths.map((path) => {
+    if (path === "package/README.md" && readmeSparse !== undefined) {
+      const contents = Buffer.alloc(512, 0x78);
+      const map = Buffer.alloc(512);
+      map.write("1\n512\n512\n");
+      const attributes: Record<string, string> =
+        readmeSparse === "0.0"
+          ? {
+              "GNU.sparse.size": "1024",
+              "GNU.sparse.numblocks": "1",
+              "GNU.sparse.map": "512,512",
+            }
+          : {
+              "GNU.sparse.major": "1",
+              "GNU.sparse.minor": "0",
+              "GNU.sparse.name": path,
+              "GNU.sparse.realsize": "1024",
+            };
+      return Buffer.concat([
+        tarRecord(paxRecords(attributes), {
+          name: "PaxHeaders/readme",
+          type: 0x78,
+        }),
+        tarRecord(
+          readmeSparse === "0.0" ? contents : Buffer.concat([map, contents]),
+          {
+            name:
+              readmeSparse === "0.0" ? path : "package/GNUSparseFile.1/readme",
+          },
+        ),
+      ]);
+    }
     const contents =
       path === "package/package.json"
         ? Buffer.from(
@@ -164,6 +197,19 @@ describe("npm package tar listings", () => {
     ).toThrow();
   });
 
+  test("retains bounded logical sparse sizes in listing order", () => {
+    expect(
+      assertTarListingSizes(
+        [
+          "drwxr-xr-x 0/0 0 1970-01-01 00:00 package/",
+          "-rw-r--r-- 0/0 1024 1970-01-01 00:00 package/README.md",
+          "-rw-r--r--  0 0 0 512 Jan  1 1970 package/LICENSE",
+        ],
+        1536,
+      ),
+    ).toEqual([0, 1024, 512]);
+  });
+
   test("rejects symbolic links and other non-regular entries", () => {
     expect(() =>
       regularTarListingLines("lrwxrwxrwx package/link -> target\r\n"),
@@ -177,6 +223,8 @@ describe("npm package tar listings", () => {
       const archives = [
         ["default", gzipSync(tarBytes)],
         ["level-0", gzipSync(tarBytes, { level: 0 })],
+        ["sparse-0.0", gzipSync(packageTar({ readmeSparse: "0.0" }))],
+        ["sparse-1.0", gzipSync(packageTar({ readmeSparse: "1.0" }))],
         ["npm-size-field", gzipSync(packageTar({ sizeTerminator: " \0" }))],
         ["nul-regular-file", gzipSync(packageTar({ type: 0 }))],
         [

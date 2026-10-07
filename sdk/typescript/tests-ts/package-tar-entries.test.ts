@@ -299,6 +299,29 @@ describe("plain npm tar entries", () => {
     expect(plainTarEntries(bytes)).toEqual([{ path, size }]);
   });
 
+  test("uses the native GNU sparse name while retaining stored content", () => {
+    const path = "package/README.md";
+    const stored = Buffer.alloc(1024);
+    stored.write("1\n512\n512\n");
+    stored.fill(0x78, 512);
+    expect(
+      plainTarEntries(
+        archive(
+          tarRecord(
+            paxRecords({
+              "GNU.sparse.major": "1",
+              "GNU.sparse.minor": "0",
+              "GNU.sparse.name": path,
+              "GNU.sparse.realsize": "1024",
+            }),
+            { name: "PaxHeaders/readme", type: 0x78 },
+          ),
+          tarRecord(stored, { name: "package/GNUSparseFile.1/readme" }),
+        ),
+      ),
+    ).toEqual([{ path, size: stored.byteLength }]);
+  });
+
   test("accepts an empty size field for an empty file", () => {
     expect(
       plainTarEntries(

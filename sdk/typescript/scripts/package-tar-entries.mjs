@@ -74,7 +74,9 @@ export function plainTarEntries(archiveBytes) {
         ? nextAttributes.get(key) || undefined
         : globalAttributes.get(key);
     const path =
-      attribute("path") ?? (prefix === "" ? name : `${prefix}/${name}`);
+      attribute("GNU.sparse.name") ??
+      attribute("path") ??
+      (prefix === "" ? name : `${prefix}/${name}`);
     if (!extended && (path === "" || path.endsWith("/") !== directory))
       invalidTarEntry();
     assertPublicText(path);

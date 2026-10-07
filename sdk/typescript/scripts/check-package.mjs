@@ -156,7 +156,10 @@ if (
 ) {
   invalidTarEntry();
 }
-assertTarListingSizes(listingLines, MAX_EXPANDED_ASSET_BYTES);
+const listingSizes = assertTarListingSizes(
+  listingLines,
+  MAX_EXPANDED_ASSET_BYTES,
+);
 for (const [path, name] of [
   ["package/bin/codex-security.mjs", "CLI"],
   ["package/_bundled_plugin/scripts/launch_codex_security_mcp", "MCP"],
@@ -178,20 +181,20 @@ function privateExtractionDirectories(directory) {
 }
 
 function extractedArchiveFiles() {
-  const rawSizes = new Map();
+  const logicalSizes = new Map();
   const expectedPaths = new Map();
-  for (const { path, size } of rawEntries) {
+  for (const [index, { path }] of rawEntries.entries()) {
     const directory = path.endsWith("/");
     const extractedPath = directory ? path.slice(0, -1) : path;
     const type = directory ? "directory" : "file";
     const previousType = expectedPaths.get(extractedPath);
     if (previousType !== undefined && previousType !== type) invalidTarEntry();
-    if (!directory) rawSizes.set(path, size);
+    if (!directory) logicalSizes.set(path, listingSizes[index]);
     expectedPaths.set(extractedPath, type);
     const parts = extractedPath.split("/");
     for (let index = 1; index < parts.length; index++) {
       const directory = parts.slice(0, index).join("/");
-      if (rawSizes.has(directory)) invalidTarEntry();
+      if (logicalSizes.has(directory)) invalidTarEntry();
       expectedPaths.set(directory, "directory");
     }
   }
@@ -238,7 +241,7 @@ function extractedArchiveFiles() {
         if (
           !stats.isFile() ||
           stats.nlink !== 1 ||
-          stats.size !== rawSizes.get(path) ||
+          stats.size !== logicalSizes.get(path) ||
           stats.size > MAX_EXPANDED_ASSET_BYTES ||
           expandedBytes > MAX_EXPANDED_ASSET_BYTES - stats.size
         ) {
@@ -251,7 +254,7 @@ function extractedArchiveFiles() {
     }
     visit(extractionRoot);
 
-    if (expectedPaths.size !== 0 || archiveFiles.size !== rawSizes.size) {
+    if (expectedPaths.size !== 0 || archiveFiles.size !== logicalSizes.size) {
       invalidTarEntry();
     }
     return archiveFiles;
