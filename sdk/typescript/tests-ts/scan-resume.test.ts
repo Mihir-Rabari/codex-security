@@ -2,6 +2,8 @@ import { createCliTest } from "./support/cli-run.js";
 import { gitText } from "./support/shell.js";
 import { readJsonLines } from "./support/json.js";
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
   appendFile,
   cp,
@@ -442,6 +444,55 @@ test("resumed Bedrock scans retain provider context for the account advisory", a
   expect(code).not.toBe(0);
   expect(stderr.text()).toContain("Resumed Bedrock prompt captured");
 });
+
+test.each(["direct", "profile"])(
+  "resume restores selected settings from an API-created %s recipe",
+  async (shape) => {
+    const root = await temporaryDirectory();
+    const script = fileURLToPath(
+      new URL("./fixtures/resume-selected-settings.ts", import.meta.url),
+    );
+    const run = (stage: string) =>
+      spawnSync(process.execPath, [script, root, stage, shape], {
+        env: process.env,
+        encoding: "utf8",
+        windowsHide: true,
+      });
+    const first = run("first");
+    expect(first.status, first.stderr || first.error?.message).toBe(86);
+    const started = JSON.parse(
+      await readFile(join(root, "first.json"), "utf8"),
+    );
+    const selected = {
+      sqlite_home: join(root, "scan", " selected-state", "nested"),
+      model_context_window: 96_000,
+      model_auto_compact_token_limit: 72_000,
+    };
+    expect(started.codex[0].config).toEqual(selected);
+    expect(started.workerSnapshot).toEqual(selected);
+    expect(started.savedRecipe.config).toMatchObject(selected);
+    const resumed = run("resume");
+    expect(resumed.status, resumed.stderr || resumed.error?.message).toBe(0);
+    const attached = JSON.parse(
+      await readFile(join(root, "resume.json"), "utf8"),
+    );
+    expect(attached.restoredConfig).toEqual(selected);
+    expect(attached.codex[0].config).toEqual(selected);
+    expect(attached.workerSnapshot).toEqual(selected);
+    expect(attached.resumedThread).toBe(started.resumeContext.threadId);
+    expect(attached.ownership.length).toBeGreaterThan(0);
+    for (const lookup of attached.ownership) {
+      expect(lookup.error).toBeUndefined();
+      expect(lookup.paths).toEqual(started.firstOwnershipControl);
+      expect(lookup.selectedSqliteHome).toBe(selected.sqlite_home);
+    }
+    expect(attached.stderr).not.toContain("ownership could not be verified");
+    const requests = await readJsonLines(join(root, "child-transcript.jsonl"));
+    expect(requests.length).toBeGreaterThan(0);
+    for (const request of requests)
+      expect(request.home).toBe(selected.sqlite_home);
+  },
+);
 
 test.each(["budgeted", "unbudgeted"])(
   "resume carries the saved %s setting into the private worker snapshot",

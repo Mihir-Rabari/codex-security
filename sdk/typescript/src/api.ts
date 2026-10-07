@@ -1668,7 +1668,19 @@ export class CodexSecurity {
         mode,
         repositoryRevision: expectation.repositoryRevision,
         pluginVersion: runtime.plugin.version,
-        config: { ...preflightConfig, approval_policy: approvalPolicy },
+        config: {
+          ...preflightConfig,
+          ...Object.fromEntries(
+            [
+              "sqlite_home",
+              "model_context_window",
+              "model_auto_compact_token_limit",
+            ]
+              .filter((key) => workerRuntimeConfig[key] !== undefined)
+              .map((key) => [key, workerRuntimeConfig[key]!]),
+          ),
+          approval_policy: approvalPolicy,
+        },
         failOnSeverity: options.failureSeverity,
         knowledgeBasePaths: knowledgeBase?.sources,
         maxCostUsd,
