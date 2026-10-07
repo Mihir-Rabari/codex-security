@@ -1,3 +1,4 @@
+import { parseJson } from "./value.js";
 import { createHash } from "node:crypto";
 import { open, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
@@ -788,12 +789,7 @@ function readSessionEvent(
   attribution: ScanExecutionAttribution | null = null,
 ): void {
   if (line.length === 0) return;
-  let event: unknown;
-  try {
-    event = JSON.parse(line) as unknown;
-  } catch {
-    return;
-  }
+  const event = parseJson(() => line);
   if (!isRecord(event) || !isRecord(event["payload"])) return;
   const payload = event["payload"];
   const index = session.eventIndex++;

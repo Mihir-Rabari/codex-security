@@ -490,8 +490,8 @@ def scan_execution_fields(connection: sqlite3.Connection, scan: sqlite3.Row) -> 
 
 
 def _codex_state_database(worker_codex_home: Path | None = None) -> Path | None:
-    configured_home = os.environ.get("CODEX_HOME", "").strip()
-    current_home = Path(configured_home).expanduser() if configured_home else Path.home() / ".codex"
+    configured_home = os.environ.get("CODEX_HOME", "")
+    current_home = Path(configured_home) if configured_home.strip() else Path.home() / ".codex"
     codex_home = worker_codex_home if worker_codex_home is not None else current_home
     same_home = worker_codex_home is None or codex_home.resolve() == current_home.resolve()
     configured_database = os.environ.get("CODEX_STATE_DB", "").strip() if same_home else ""
@@ -499,15 +499,17 @@ def _codex_state_database(worker_codex_home: Path | None = None) -> Path | None:
         path = Path(configured_database).expanduser()
         return path.resolve() if path.is_file() and os.access(path, os.R_OK) else None
 
-    configured_sqlite_home = os.environ.get("CODEX_SQLITE_HOME", "").strip() if same_home else ""
+    configured_sqlite_home = os.environ.get("CODEX_SQLITE_HOME", "") if same_home else ""
     search_roots = [
-        *([Path(configured_sqlite_home).expanduser()] if configured_sqlite_home else []),
+        *([Path(configured_sqlite_home)] if configured_sqlite_home.strip() else []),
         codex_home,
         codex_home / "sqlite",
     ]
     seen: set[Path] = set()
     for search_root in search_roots:
         try:
+            if search_root.parts[:1] == ("~",):
+                search_root = search_root.expanduser()
             resolved_root = search_root.resolve()
             if resolved_root in seen:
                 continue

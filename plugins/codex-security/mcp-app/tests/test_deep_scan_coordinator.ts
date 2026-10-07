@@ -19,7 +19,6 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import {
-  DeepScanCoordinator,
   DeepScanCoordinatorRegistry,
   DeepScanNonRetryableError,
   DeepScanRemoteCoordinator,
@@ -2704,7 +2703,6 @@ async function testPausedDiscoverySurvivesCoordinatorRestart() {
   const handoffClaimToken = randomUUID();
   const store = new FakeStore({
     ...fixture.run,
-    phase: "setup" as const,
     coordinatorGeneration: 2,
     updatedAt: "2026-08-03T13:33:08Z",
   });
@@ -2748,7 +2746,7 @@ async function testPausedDiscoverySurvivesCoordinatorRestart() {
     consolidating: false,
   });
   assert.equal(store.run.status, "running");
-  assert.equal(store.run.phase, "discovery");
+  assert.equal(store.progress.at(-1)?.phase, "discovery");
   assert.equal(store.finishCalls.length, 0);
   assert.equal(store.failureMessages.length, 0);
   assert.equal(store.run.manifestPath, undefined);
@@ -2842,7 +2840,6 @@ async function testResumedDiscoveryDeadlineUsesPersistedCreationTime(
   const store = new FakeStore({
     ...fixture.run,
     createdAt,
-    phase: "setup" as const,
     coordinatorGeneration: 2,
   });
   const originalExecutor = new FakeExecutor({
@@ -2921,7 +2918,7 @@ async function testResumedManifestPreservesCompletedReducer(
     stopAfterNoNew: 2,
     maxDiscoveryRuns: 3,
   });
-  const store = new FakeStore({ ...fixture.run, phase: "setup" });
+  const store = new FakeStore(fixture.run);
   store.dedupCommitResponseGate = Promise.withResolvers<void>();
   const original = createCoordinator(
     fixture,
@@ -2973,7 +2970,6 @@ async function testResumedManifestPreservesCompletedReducer(
   store.run = {
     ...store.run,
     status: "running" as const,
-    phase: "discovery" as const,
     persistedWorkers: structuredClone([...store.workers.values()]),
     persistedDedupInputs: store.dedupClaims.flatMap(claimDedupInputs),
   };
@@ -3014,7 +3010,6 @@ async function testResumeUsesHistoricalCandidateSnapshotForEachReducer() {
   store.run = {
     ...store.run,
     status: "running" as const,
-    phase: "discovery" as const,
     terminalReason: undefined,
     manifestPath: undefined,
     persistedWorkers: structuredClone([...store.workers.values()]),
@@ -3074,23 +3069,15 @@ async function testPersistedErrorLimitStopsBeforeRescheduling() {
     }
     const run = {
       ...fixture.run,
-      phase: "discovery" as const,
       consecutiveErrors: 2,
       dispatchedCount: 1,
       persistedWorkers: [failedWorker],
     };
     const store = new FakeStore(run);
     const executor = new FakeExecutor();
-    const coordinator = new DeepScanCoordinator({
+    const terminal = await runCoordinator(fixture, store, executor, {
       run,
-      store,
-      executor,
-      pluginRoot: fixture.pluginRoot,
-      clock: immediateClock,
     });
-    coordinator.start();
-
-    const terminal = await coordinator.wait(undefined, 5_000);
     assert.equal(terminal?.status, "failed");
     assert.equal(executor.discoveryCalls, 0);
     assert.match(
@@ -3132,7 +3119,6 @@ async function testPersistedReducerErrorLimitStopsBeforeRescheduling() {
   );
   const run = {
     ...fixture.run,
-    phase: "discovery" as const,
     consecutiveErrors: 0,
     persistedWorkers: reducers,
   };
@@ -3296,15 +3282,13 @@ async function testDiscoveryAcceptedAtDeadlineIsReduced() {
     discoveryCandidateId: "candidate-1",
     canonicalCandidateId: "candidate-1",
   });
-  const coordinator = createCoordinator(fixture, store, executor, {
+  const terminalWait = runCoordinator(fixture, store, executor, {
     discoveryTimeoutMs: 500,
     log: (event) => {
       if (event.event === "discovery_deadline_reached")
         discoveryDeadlineReached.resolve();
     },
   });
-  coordinator.start();
-  const terminalWait = coordinator.wait(undefined, 5_000);
 
   await acceptancePersisted.promise;
   await discoveryDeadlineReached.promise;
@@ -3690,15 +3674,9 @@ async function testResumeDoesNotRequireHistoricalWorkerPrompt(
     ],
   });
   const executor = new FakeExecutor();
-  const coordinator = new DeepScanCoordinator({
+  const terminal = await runCoordinator(fixture, store, executor, {
     run: store.run,
-    store,
-    executor,
-    pluginRoot: fixture.pluginRoot,
-    clock: immediateClock,
   });
-  coordinator.start();
-  const terminal = await coordinator.wait(undefined, 5_000);
   assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(store.failureMessages.length, 0);
   assert.equal(executor.discoveryCalls, 2);
