@@ -6633,6 +6633,8 @@ for (const scenario of [
   "policy-edited",
   "foreign-scan",
   "registered-scan",
+  "foreign-scan-ordinary",
+  "registered-scan-ordinary",
 ] as const)
   test(`missing report uses registered campaign and severity ${scenario}`, async () => {
     const { paths, source } = await repositoryFixture(
@@ -6726,7 +6728,7 @@ for (const scenario of [
     const [receipt] = await results(first.resultsPath);
     expect(receipt!["policyFailed"]).toBe(true);
     const scanDir = String(receipt!["outputDir"]);
-    if (scenario === "foreign-scan") {
+    if (scenario.startsWith("foreign-scan")) {
       const checkout = join(paths.output, "checkouts", "repo");
       git(paths.root, "clone", "-q", source.path, checkout);
       const replacement = join(paths.root, "replacement-scan");
@@ -6761,12 +6763,18 @@ for (const scenario of [
         ...configured,
         createSecurity: () =>
           client(throwing("Unexpected replacement analysis")),
-        recoverScan,
+        ...(scenario.endsWith("-ordinary") ? {} : { recoverScan }),
       });
     if (scenario === "foreign-scan")
       await expect(resumed()).rejects.toThrow(
         /Scan artifacts do not match selected scan/,
       );
+    else if (scenario === "foreign-scan-ordinary")
+      expect(await resumed()).toMatchObject({
+        completed: 0,
+        skipped: 0,
+        failed: 1,
+      });
     else {
       const value = await resumed();
       expect(value).toMatchObject({
@@ -6775,5 +6783,12 @@ for (const scenario of [
         failed: 0,
         policyFailed: true,
       });
+      if (scenario === "policy-edited")
+        expect(await resumed()).toMatchObject({
+          completed: 1,
+          skipped: 1,
+          failed: 0,
+          policyFailed: true,
+        });
     }
   });

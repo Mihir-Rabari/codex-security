@@ -103,6 +103,7 @@ interface MultiscanReceipt extends MultiscanTask {
   attempt: number;
   outputDir: string;
   targetId?: string;
+  scanId?: string;
   resolvedScope?: string;
   snapshotDigest?: string;
   threatModelPath?: string;
@@ -430,9 +431,8 @@ async function runCampaign(
         const failureSeverity =
           options.scanOptionsByMode?.[task.mode]?.failureSeverity;
         policyFailed ||=
-          resumed.restoredReportFindings !== undefined &&
           failureSeverity !== undefined
-            ? resumed.restoredReportFindings.findings.some((finding) =>
+            ? resumed.findings.findings.some((finding) =>
                 meetsSeverity(finding, failureSeverity),
               )
             : receipt.policyFailed === true;
@@ -497,6 +497,7 @@ async function runCampaign(
         const runWarnings: string[] = [];
         let attemptPolicyFailed: boolean | undefined;
         let targetId: string | undefined;
+        let scanId: string | undefined;
         let resolvedScope: string | undefined;
         let snapshotDigest: string | undefined;
         let coverage: CoverageDocument["completeness"] | undefined;
@@ -630,6 +631,7 @@ async function runCampaign(
             }
           }
           targetId = result.manifest?.scan.target.targetId;
+          scanId = result.manifest?.scan.id;
           snapshotDigest = result.manifest?.scan.target.snapshotDigest;
           const failureSeverity = scanSettings?.failureSeverity;
           if (failureSeverity !== undefined) {
@@ -681,6 +683,7 @@ async function runCampaign(
             attempt,
             outputDir: scanDir,
             ...(targetId === undefined ? {} : { targetId }),
+            ...(scanId === undefined ? {} : { scanId }),
             ...(resolvedScope === undefined ? {} : { resolvedScope }),
             ...(snapshotDigest === undefined ? {} : { snapshotDigest }),
             ...(threatModelPath === null ? {} : { threatModelPath }),
@@ -1115,6 +1118,7 @@ function parseReceipt(line: string, lineNumber: number): MultiscanReceipt {
       "scope",
       "prompt",
       "targetId",
+      "scanId",
       "resolvedScope",
       "snapshotDigest",
       "error",
@@ -1206,7 +1210,7 @@ async function loadResumableScan(
   | {
       completeness: CoverageDocument["completeness"];
       checkout: string;
-      restoredReportFindings?: FindingsDocument;
+      findings: FindingsDocument;
     }
   | undefined
 > {
@@ -1291,6 +1295,13 @@ async function loadResumableScan(
     reportMissing &&
     recoverScan !== undefined &&
     (await recoverScan(path)) === undefined
+  )
+    return undefined;
+  if (
+    reportMissing &&
+    (receipt.scanId === undefined
+      ? recoverScan === undefined
+      : receipt.scanId !== manifest.scan.id)
   )
     return undefined;
   let pythonPath: string | undefined;
@@ -1518,7 +1529,7 @@ async function loadResumableScan(
     return {
       completeness,
       checkout: matchedRoot,
-      ...(reportMissing ? { restoredReportFindings: findings } : {}),
+      findings,
     };
   } finally {
     if (createdCheckout)
