@@ -404,10 +404,7 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
         *diff_args,
         text=False,
     )
-    if result.returncode:
-        raise SystemExit(
-            f"Git diff failed with exit code {result.returncode}: {os.fsdecode(result.stderr).strip()}"
-        )
+    result.check_returncode()
     fields = result.stdout.split(b"\0")
     if fields and not fields[-1]:
         fields.pop()
@@ -517,7 +514,12 @@ def main() -> None:
     elif args.command == "make-repo-scope-input":
         make_repo_scope_input(args)
     elif args.command == "make-diff-rank-input":
-        make_diff_rank_input(args)
+        try:
+            make_diff_rank_input(args)
+        except subprocess.CalledProcessError as error:
+            raise SystemExit(
+                f"Git diff failed with exit code {error.returncode}: {os.fsdecode(error.stderr).strip()}"
+            ) from error
     else:
         raise SystemExit(f"Unknown command: {args.command}")
 
