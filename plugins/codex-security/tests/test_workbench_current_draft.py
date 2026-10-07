@@ -774,7 +774,8 @@ def test_stopped_scan_preserves_newest_model_and_frozen_retry_selection(
 
         with monkeypatch.context() as patch, workbench_api["connect"]() as connection:
             patch.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
-            workbench_api["fail_scan"](
+            saved.fail_scan(
+                workbench_api["_WORKBENCH_DB_CONTEXT"],
                 connection,
                 argparse.Namespace(
                     scan_id=scan["scanId"],
@@ -814,7 +815,9 @@ def test_stopped_scan_preserves_newest_model_and_frozen_retry_selection(
     published = json.loads(manifest_path.read_text())["scan"]
     assert published["sealedAt"]
     assert published["threatModel"] == models[expected]
-    assert models[expected]["summary"] in (directory / "threatmodel.md").read_text()
+    threat_model = (directory / "threatmodel.md").read_text()
+    assert models[expected]["summary"] in threat_model
+    assert f"Snapshot: {published['target']['snapshotDigest']}" in threat_model
     assert committed.read_bytes() == committed_bytes
     sealed = manifest_path.read_bytes()
     run_workbench(state, "preserve-scan-results", "--scan-id", scan["scanId"])

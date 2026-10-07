@@ -126,6 +126,7 @@ def _token_event(
     output_tokens: int,
     *,
     cached_input_tokens: int = 0,
+    reasoning_output_tokens: int = 0,
 ) -> dict[str, Any]:
     return _event(
         timestamp,
@@ -138,7 +139,7 @@ def _token_event(
                     "cached_input_tokens": cached_input_tokens,
                     "cache_write_input_tokens": 0,
                     "output_tokens": output_tokens,
-                    "reasoning_output_tokens": 0,
+                    "reasoning_output_tokens": reasoning_output_tokens,
                     "total_tokens": input_tokens + output_tokens,
                 }
             },
@@ -218,6 +219,7 @@ def _counts(
     input_tokens: int,
     cached_input_tokens: int,
     output_tokens: int,
+    reasoning_output_tokens: int = 0,
     *,
     cache_write_input_tokens: int = 0,
 ) -> dict[str, int]:
@@ -226,7 +228,7 @@ def _counts(
         "cachedInputTokens": cached_input_tokens,
         "cacheWriteInputTokens": cache_write_input_tokens,
         "outputTokens": output_tokens,
-        "reasoningOutputTokens": 0,
+        "reasoningOutputTokens": reasoning_output_tokens,
         "totalTokens": input_tokens + output_tokens,
     }
 
@@ -766,6 +768,7 @@ def test_native_completion_retains_measured_usage_with_sdk_cost(
     repeated = run_workbench(
         fixture.state_dir,
         "complete-scan",
+        "--scan-id",
         fixture.scan_id,
         environment=fixture.environment,
     )["scan"]
