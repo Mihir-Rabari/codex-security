@@ -274,14 +274,14 @@ export function formatCliHelp(text: string, columns = 80): string {
       if (command === "") {
         sections.push(
           "Get started:\n" +
-            "  cs login\n\n" +
+            "  codex-security login\n\n" +
             wrap(
               "In your repository, optionally draft SECURITY.md:",
               width,
               "  ",
               "  ",
             ) +
-            "\n  cs policy .\n" +
+            "\n  codex-security policy .\n" +
             wrap(
               "Review and edit the draft, then copy it to the displayed Policy target.",
               width,
@@ -295,8 +295,8 @@ export function formatCliHelp(text: string, columns = 80): string {
               "  ",
               "  ",
             ) +
-            "\n\n  cs scan .\n" +
-            "  cs findings",
+            "\n\n  codex-security scan .\n" +
+            "  codex-security findings",
         );
       } else if (examples) {
         sections.push(examples);

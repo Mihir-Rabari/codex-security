@@ -66,8 +66,9 @@ describe("CLI help", () => {
     expect(sectionFor("init")).toBe(sectionFor("login"));
     expect(sectionFor("completions")).toBeGreaterThan(sectionFor("scan"));
     expect(text).toContain("Aliases: cs");
-    expect(text).toContain("cs policy .");
-    expect(text).toContain("cs scan .");
+    for (const command of ["login", "policy .", "scan .", "findings"]) {
+      expect(text).toContain(`  codex-security ${command}`);
+    }
     expect(text).toContain("<command> --help");
   });
 
