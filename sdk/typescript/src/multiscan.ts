@@ -43,6 +43,7 @@ import type { CoverageDocument } from "./models.js";
 import { resolveScanPrompts } from "./prompt-files.js";
 import {
   bundledPluginRoot,
+  expandHome,
   executablePathForSpawn,
   pluginHelperEnvironment,
   requireSecureOutputAncestry,
@@ -53,6 +54,7 @@ import {
 import {
   DiffTarget,
   normalizeTarget,
+  relativePathIsOutside,
   type ScanMode,
   type ScanTarget,
 } from "./targets.js";
@@ -392,6 +394,7 @@ async function runCampaign(
         options.signal,
         options.githubHost,
         restoreReport,
+        options.config.pythonPath,
       );
       if (resumed !== undefined) {
         if (receipt.status !== "failed" && receipt.warnings?.length) {
@@ -1154,6 +1157,7 @@ async function loadResumableScan(
     schemaRoot: string,
     protectedRoot: string,
   ) => Promise<void>,
+  configuredPythonPath: string | undefined,
 ): Promise<
   | {
       completeness: CoverageDocument["completeness"];
@@ -1234,10 +1238,19 @@ async function loadResumableScan(
         (receipt.status === "failed" &&
           receipt.error === "Multiscan repository coverage is incomplete.");
   if (!matchesOutcome) return undefined;
+  const reportSealed = await hasSealedReport(path, manifest, signal);
+  const pythonPath =
+    configuredPythonPath === undefined
+      ? undefined
+      : relative(matchedRoot, resolve(expandHome(configuredPythonPath)));
+  const checkoutPython =
+    !reportSealed &&
+    pythonPath !== undefined &&
+    !relativePathIsOutside(pythonPath);
   let expectedPaths = ["."];
   let createdCheckout = false;
   try {
-    if (requestedPaths !== undefined) {
+    if (requestedPaths !== undefined || checkoutPython) {
       // Scope spellings and tracked links are relative to the recorded checkout.
       if (matchedRoot !== checkout) {
         await ensureOutputDirectory(join(campaignRoot, "recovery-checkouts"));
@@ -1252,7 +1265,19 @@ async function loadResumableScan(
       }
       if (createdCheckout) {
         await checkoutRevision(receipt, matchedRoot, signal, githubHost);
+      } else if (
+        checkoutPython &&
+        pythonPath !== undefined &&
+        !(await lstat(join(matchedRoot, pythonPath)).catch(
+          undefinedIfMissingFile,
+        ))
+      ) {
+        await checkoutRevision(receipt, matchedRoot, signal, githubHost, true, [
+          pythonPath,
+        ]);
       }
+    }
+    if (requestedPaths !== undefined) {
       let normalized;
       try {
         normalized = await normalizeTarget(matchedRoot, requestedPaths, signal);
@@ -1272,6 +1297,7 @@ async function loadResumableScan(
           githubHost,
           true,
           scope.includePaths,
+          requestedPaths,
         );
         normalized = await normalizeTarget(matchedRoot, requestedPaths, signal);
       }
@@ -1365,7 +1391,6 @@ async function loadResumableScan(
       }
     }
 
-    const reportSealed = await hasSealedReport(path, manifest, signal);
     if (!reportSealed) await restoreReport(path, pluginRoot, matchedRoot);
     return { completeness, checkout: matchedRoot };
   } finally {
@@ -1504,6 +1529,7 @@ async function checkoutRevision(
   githubHost?: string,
   restoreIncomplete = false,
   restorePaths: readonly string[] = ["."],
+  requestedPaths: readonly string[] = [],
 ): Promise<void> {
   const environment = { ...process.env };
   const repositoryVariables = new Set([
@@ -1554,6 +1580,7 @@ async function checkoutRevision(
   };
   const git = async (...args: string[]): Promise<string> =>
     (await gitOutput(args)).toString("utf8").trim();
+  let retainedGit = false;
   if (restoreIncomplete) {
     const gitDirectory = join(path, ".git");
     const metadata = await lstat(gitDirectory).catch((error: unknown) => {
@@ -1561,10 +1588,15 @@ async function checkoutRevision(
       throw error;
     });
     if (metadata !== undefined) {
+      retainedGit = true;
       const canonicalGit = await ensureOutputDirectory(gitDirectory);
       const canonicalObjects = await ensureOutputDirectory(
         join(gitDirectory, "objects"),
       );
+      for (const entry of await readdir(canonicalObjects)) {
+        if (/^[0-9a-f]{2}$/.test(entry))
+          await ensureOutputDirectory(join(canonicalObjects, entry));
+      }
       if (
         await lstat(join(canonicalObjects, "pack")).catch(
           undefinedIfMissingFile,
@@ -1584,7 +1616,9 @@ async function checkoutRevision(
         );
         if (
           saved?.isSymbolicLink() ||
-          (entry === "FETCH_HEAD" && saved !== undefined && saved.nlink > 1)
+          ((entry === "FETCH_HEAD" || entry === "logs/HEAD") &&
+            saved !== undefined &&
+            saved.nlink > 1)
         ) {
           throw new Error(
             "The retained campaign checkout has linked Git metadata write destinations.",
@@ -1608,7 +1642,11 @@ async function checkoutRevision(
             "The retained campaign checkout has Git bindings outside its own directory.",
           );
         }
-        await git("init", "--quiet");
+        if (
+          await lstat(join(gitDirectory, "refs")).catch(undefinedIfMissingFile)
+        )
+          await ensureOutputDirectory(join(gitDirectory, "refs"));
+        await git("init", "--quiet", "--template=");
       }
       const [common, objects, worktree] = await Promise.all([
         git("rev-parse", "--path-format=absolute", "--git-common-dir"),
@@ -1626,7 +1664,7 @@ async function checkoutRevision(
       }
     }
   }
-  await git("init", "--quiet");
+  if (!retainedGit) await git("init", "--quiet");
   let locallyPinned = false;
   if (restoreIncomplete) {
     try {
@@ -1654,6 +1692,35 @@ async function checkoutRevision(
   }
   await git("checkout", "--quiet", "--detach", task.revision);
   if (restoreIncomplete) {
+    const links = (await gitOutput(["ls-files", "--stage", "-z"]))
+      .toString("utf8")
+      .split("\0")
+      .filter((entry) => entry.startsWith("120000 "))
+      .map((entry) => entry.slice(entry.indexOf("	") + 1));
+    const aliases = new Set<string>();
+    for (const requested of requestedPaths) {
+      let selected = relative(path, resolve(path, expandHome(requested)))
+        .split(sep)
+        .join("/");
+      const visited = new Set<string>();
+      for (;;) {
+        const name = links.find(
+          (link) => selected === link || selected.startsWith(link + "/"),
+        );
+        if (name === undefined || visited.has(name)) break;
+        visited.add(name);
+        aliases.add(name);
+        const target = (
+          await gitOutput(["show", `${task.revision}:${name}`])
+        ).toString("utf8");
+        selected = posix.join(
+          relative(path, resolve(path, dirname(name), target))
+            .split(sep)
+            .join("/"),
+          selected.slice(name.length + 1),
+        );
+      }
+    }
     const deleted = await gitOutput([
       "--literal-pathspecs",
       "ls-files",
@@ -1661,6 +1728,7 @@ async function checkoutRevision(
       "-z",
       "--",
       ...restorePaths,
+      ...aliases,
     ]);
     if (deleted.length !== 0) {
       await gitOutput(

@@ -160,7 +160,7 @@ async function completedScan(
       const scope = task["scope"]?.trim();
       let normalizedScope = scope ? posix.normalize(scope) : ".";
       if (scope) {
-        const checkout = join(campaignRoot, "checkouts", id);
+        const checkout = targetRoot ?? join(campaignRoot, "checkouts", id);
         const canonicalScope = await realpath(join(checkout, scope)).catch(
           () => undefined,
         );
@@ -4597,6 +4597,101 @@ for (const modified of [false, true, "deleted"] as const) {
   });
 }
 
+for (const nested of [false, true, "chain"] as const) {
+  testPosix(
+    `scope alias recovery restores tracked link nested=${nested}`,
+    async () => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "preserved-tracked-source");
+      await writeFile(
+        join(source.path, "README.md"),
+        "Original tracked notes.\n",
+      );
+      await symlink(
+        nested === "chain" ? "middle" : "src",
+        join(source.path, "alias"),
+        "dir",
+      );
+      if (nested === "chain")
+        await symlink("src", join(source.path, "middle"), "dir");
+      await symlink("src", join(source.path, "unrelated-alias"), "dir");
+      git(source.path, "add", ".");
+      git(
+        source.path,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.test",
+        "commit",
+        "-qm",
+        "Tracked notes",
+      );
+      source.revision = git(source.path, "rev-parse", "HEAD");
+      await writeFile(
+        paths.input,
+        `id,repository,revision,scope\nrepo,${source.path},${source.revision},${nested ? "alias/app.ts" : "alias"}\n`,
+      );
+      await runMultiscan(
+        options(paths, client(rejecting("Interrupted")), { maxAttempts: 1 }),
+      );
+      const runs = mock(
+        async (
+          checkout: string,
+          settings: Parameters<SecurityClient["run"]>[1] = {},
+        ) => completedScan(settings.outputDir!, "complete", checkout),
+      );
+      const campaign = options(paths, client(runs), {
+        recoverScan: async () => undefined,
+      });
+      expect(await runMultiscan(campaign)).toMatchObject({
+        completed: 1,
+        skipped: 0,
+      });
+      const checkout = join(
+        paths.output,
+        "recovery-checkouts",
+        "repo",
+        "attempt-2",
+      );
+      git(paths.root, "clone", "--quiet", source.path, checkout);
+      await rm(join(checkout, "alias"));
+      if (nested === "chain") await rm(join(checkout, "middle"));
+      await rm(join(checkout, "unrelated-alias"));
+      await rm(join(checkout, "README.md"));
+      await writeFile(
+        join(checkout, "retained.txt"),
+        "Preserve untracked recovery data.\n",
+      );
+      expect(await runMultiscan(campaign)).toMatchObject({
+        completed: 1,
+        skipped: 1,
+      });
+      expect(
+        await lstat(join(checkout, "README.md")).then(
+          () => true,
+          () => false,
+        ),
+      ).toBe(false);
+      expect(await readFile(join(checkout, "retained.txt"), "utf8")).toBe(
+        "Preserve untracked recovery data.\n",
+      );
+      expect(await readFile(join(checkout, "src", "app.ts"), "utf8")).toBe(
+        await readFile(join(source.path, "src", "app.ts"), "utf8"),
+      );
+      expect(await readFile(join(checkout, "alias", "app.ts"), "utf8")).toBe(
+        await readFile(join(source.path, "src", "app.ts"), "utf8"),
+      );
+      expect(
+        await lstat(join(checkout, "unrelated-alias")).then(
+          () => true,
+          () => false,
+        ),
+      ).toBe(false);
+      expect(runs).toHaveBeenCalledTimes(1);
+    },
+  );
+}
+
 for (const entry of ["logs/HEAD", "logs"] as const) {
   test(`followup recovery refuses linked ${entry} write destinations`, async () => {
     const paths = await fixture();
@@ -4946,3 +5041,143 @@ test("final native recovery refuses a linked pack directory before fetching miss
   expect(failed).toBe(true);
   expect(runs).toHaveBeenCalledTimes(1);
 });
+test("current native recovery refuses hardlinked HEAD reflog before external bytes change", async () => {
+  const paths = await fixture();
+  const source = await repository(paths.root, "hardlinked-fetch-source");
+  await writeFile(
+    paths.input,
+    `id,repository,revision,scope\nrepo,${source.path},${source.revision},src\n`,
+  );
+  const runs = mock(completeRun);
+  const campaign = options(paths, client(runs));
+  await runMultiscan(campaign);
+  const outside = join(paths.root, "external-fetch-head");
+  await writeFile(outside, "Preserve synthetic metadata.\n");
+  const before = await readFile(outside);
+  const checkout = join(paths.output, "checkouts", "repo");
+  git(paths.root, "clone", "--quiet", source.path, checkout);
+  await rm(join(checkout, "src"), { recursive: true });
+  await rm(join(checkout, ".git", "logs", "HEAD"), { force: true });
+  await link(outside, join(checkout, ".git", "logs", "HEAD"));
+  let failed = false;
+  try {
+    await runMultiscan(campaign);
+  } catch {
+    failed = true;
+  }
+  expect(await readFile(outside)).toEqual(before);
+  expect(failed).toBe(true);
+  expect(runs).toHaveBeenCalledTimes(1);
+});
+
+testPosix(
+  "current native recovery retains an unscoped tracked interpreter alias through report recovery",
+  async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "tracked-python-source");
+    const python = await realpath(PYTHON);
+    await symlink(python, join(source.path, "python-alias"));
+    git(source.path, "add", ".");
+    git(
+      source.path,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.test",
+      "commit",
+      "-qm",
+      "Tracked interpreter alias",
+    );
+    const revision = git(source.path, "rev-parse", "HEAD");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nrepo,${source.path},${revision}\n`,
+    );
+    const alias = join(paths.output, "checkouts", "repo", "python-alias");
+    const runs = mock(
+      async (
+        checkout: string,
+        settings: Parameters<SecurityClient["run"]>[1] = {},
+      ) => {
+        const selected = await runtime.resolvePluginPythonCommand({
+          configuredPath: alias,
+          protectedRoot: checkout,
+          environment: runtime.pluginHelperEnvironment(process.env),
+        });
+        expect(selected.executable).toBe(python);
+        return completedScan(settings.outputDir!, "complete", checkout);
+      },
+    );
+    const campaign = options(paths, client(runs), {
+      config: { pythonPath: alias },
+    });
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 0,
+    });
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 1,
+    });
+    expect(runs).toHaveBeenCalledTimes(1);
+  },
+);
+
+for (const entry of ["info", "loose-object", "hooks", "refs"] as const) {
+  test(`current native recovery preserves external ${entry} initialization and fetch destinations`, async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "linked-native-source");
+    const interrupted = join(paths.root, "interrupted-checkout");
+    git(paths.root, "clone", "--quiet", source.path, interrupted);
+    await writeFile(
+      join(source.path, "src", "later.ts"),
+      "Synthetic later revision.\n",
+    );
+    git(source.path, "add", ".");
+    git(
+      source.path,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.test",
+      "commit",
+      "-qm",
+      "Later pinned revision",
+    );
+    const revision = git(source.path, "rev-parse", "HEAD");
+    const object = git(source.path, "rev-parse", "HEAD:src/later.ts");
+    await writeFile(
+      paths.input,
+      `id,repository,revision,scope
+repo,${source.path},${revision},src
+`,
+    );
+    const runs = mock(completeRun);
+    const campaign = options(paths, client(runs));
+    expect(await runMultiscan(campaign)).toMatchObject({
+      completed: 1,
+      skipped: 0,
+    });
+    const checkout = join(paths.output, "checkouts", "repo");
+    await rename(interrupted, checkout);
+    await rm(join(checkout, "src"), { recursive: true });
+    const outside = join(paths.root, "external-native-directory");
+    await mkdir(outside);
+    const destination =
+      entry !== "loose-object"
+        ? join(checkout, ".git", entry)
+        : join(checkout, ".git", "objects", object.slice(0, 2));
+    await rm(destination, { recursive: true, force: true });
+    await symlink(outside, destination, "junction");
+    if (entry !== "loose-object") await rm(join(checkout, ".git", "HEAD"));
+    let failed = false;
+    try {
+      await runMultiscan(campaign);
+    } catch {
+      failed = true;
+    }
+    expect(await readdir(outside)).toEqual([]);
+    expect(failed).toBe(entry === "refs" || entry === "loose-object");
+    expect(runs).toHaveBeenCalledTimes(1);
+  });
+}
