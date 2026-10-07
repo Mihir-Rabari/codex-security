@@ -180,6 +180,7 @@ export interface WorkbenchCommandOptions {
   python: string;
   pluginRoot: string;
   environment: ProcessEnvironment;
+  stateDirectory?: string;
   signal?: AbortSignal;
   failureMessage?: string;
 }
@@ -1590,7 +1591,10 @@ export async function runWorkbench(
       pluginHelperEnvironment(node?.environment ?? options.environment),
       // The SDK owns configuration normalization; the helper receives its resolved location.
       native
-        ? JSON.stringify(codexSecurityStateDirectory(options.environment))
+        ? JSON.stringify(
+            options.stateDirectory ??
+              codexSecurityStateDirectory(options.environment),
+          )
         : input,
       options.signal,
     );
@@ -1648,7 +1652,8 @@ export async function runWorkbench(
     throw new CodexSecurityError(
       databaseFailure
         ? `${failure}: cannot open the workbench database at ${join(
-            codexSecurityStateDirectory(options.environment),
+            options.stateDirectory ??
+              codexSecurityStateDirectory(options.environment),
             "workbench.sqlite3",
           )}. Ensure the state directory and SQLite journal files are writable, or set CODEX_SECURITY_STATE_DIR to a writable directory outside the scanned repository.`
         : `${failure}: ${detail}`,
