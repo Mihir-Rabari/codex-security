@@ -415,6 +415,26 @@ async function preserveScanDraft(
   const findingKey = (finding: JsonObject) =>
     findingCandidateKey(finding, owner);
   const coverageKey = (item: JsonObject) => coverageCandidateKey(item, owner);
+  const currentOutcomes = collectResolvedCandidateKeys(
+    { ...input, findings: currentFindings },
+    owner,
+  );
+  const reopenedCandidates = new Set(
+    (input.coverage.deferred as JsonObject[])
+      .map(coverageKey)
+      .filter(
+        (key): key is string => key !== undefined && !currentOutcomes.has(key),
+      ),
+  );
+  const retainFinding = (finding: JsonObject): JsonObject => {
+    const retained = structuredClone(finding);
+    if (
+      input.complete !== false &&
+      reopenedCandidates.has(findingKey(finding)!)
+    )
+      (retained.provenance as JsonObject).candidateReopened = true;
+    return retained;
+  };
   const surfaceKey = (id: unknown, item: JsonObject) =>
     candidateKey(id, owner ?? item.sourceWorkerId);
   const previousState = await readPreviousScanDraft(context);
@@ -851,7 +871,7 @@ async function preserveScanDraft(
         }
       } else {
         if (!matches.some((current) => containsSavedFinding(current, finding)))
-          result.findings.push(structuredClone(finding));
+          result.findings.push(retainFinding(finding));
       }
     }
     for (const candidateId of [

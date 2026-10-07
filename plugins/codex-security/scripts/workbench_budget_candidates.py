@@ -672,3 +672,19 @@ def copied_report_has_later_pending(
         )
         for finding in reports
     )
+
+
+def current_report(
+    finding: dict[str, Any], draft: dict[str, Any], owner: str | None, selected: bool
+) -> bool:
+    """A selected terminal worker input can accept a previously reopened report."""
+    if finding["provenance"].get("candidateReopened") is not True:
+        return True
+    if not selected or owner is None or draft.get("complete") is False:
+        return False
+    key = finding_candidate_key(finding, owner)
+    deferred = draft["coverage"].get("deferred")
+    return not any(
+        isinstance(row, dict) and (row.get("candidateId") or row.get("id")) == key[1]
+        for row in (deferred if isinstance(deferred, list) else [])
+    )

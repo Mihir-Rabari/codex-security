@@ -61,6 +61,7 @@ from workbench_budget_candidates import (
     archive_resolved_deferred_payloads,
     archive_resolved_diff_payloads,
     copied_report_has_later_pending,
+    current_report,
     project_resolved_candidate_rows,
     recover_candidate_receipts,
 )
@@ -2003,8 +2004,8 @@ def merge_saved_results(
             if (
                 isinstance(finding, dict)
                 and valid_finding(finding)
-                and finding["provenance"].get("candidateReopened") is not True
                 and (key := finding_candidate_key(finding, owner)) is not None
+                and current_report(finding, draft, owner, relative in selected_observations)
             ):
                 outcomes.append((relative, key[0], key[1], "reported"))
         for field in ("surfaces", "explicitExclusions"):
