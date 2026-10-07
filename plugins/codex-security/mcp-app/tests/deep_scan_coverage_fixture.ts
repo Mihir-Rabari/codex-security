@@ -28,6 +28,7 @@ interface CoverageFixtureOptions {
   rewriteReturnedCoverage?: boolean;
   sameNamedNewSurface?: boolean;
   closeRetriedSurface?: boolean;
+  receiptOwnershipRetry?: "ordinary" | "candidate" | "unrelated";
   receiptSpelling?:
     | "worker"
     | "scan"
@@ -111,6 +112,7 @@ export async function publishCoverageFixture(
     rewriteReturnedCoverage = false,
     sameNamedNewSurface = false,
     closeRetriedSurface = false,
+    receiptOwnershipRetry,
     receiptSpelling = "worker",
     activeReceiptSpelling = "worker",
     sharedReceipt = false,
@@ -257,6 +259,67 @@ runpy.run_path(sys.argv[0], run_name="__main__")
                   ? "artifacts/./"
                   : "artifacts/",
               );
+    if (receiptOwnershipRetry) {
+      await recordCodexSecurityWorkerScanDraft(
+        {
+          root: artifactDir,
+          layout: "worker",
+          repoRoot: targetPath,
+          scanId: run.scanId,
+        },
+        {
+          scanId: run.scanId,
+          complete: false,
+          findings: [],
+          coverage: {
+            completeness: "partial",
+            surfaces: [
+              {
+                id: "current",
+                label: "Current review",
+                disposition:
+                  receiptOwnershipRetry === "unrelated"
+                    ? "no_issue_found"
+                    : "needs_follow_up",
+                ...(receiptOwnershipRetry === "candidate"
+                  ? { candidateId: "prior-candidate" }
+                  : {}),
+                receiptRefs: [receiptRef],
+              },
+              ...(receiptOwnershipRetry === "unrelated"
+                ? [
+                    {
+                      id: "closed",
+                      label: "Separate review",
+                      disposition: "needs_follow_up",
+                      receiptRefs: [receiptRef],
+                    },
+                  ]
+                : []),
+            ],
+            explicitExclusions: [],
+            deferred:
+              receiptOwnershipRetry === "ordinary"
+                ? []
+                : [
+                    {
+                      id: "prior-gap",
+                      ...(receiptOwnershipRetry === "candidate"
+                        ? { candidateId: "prior-candidate" }
+                        : {}),
+                      reason: "Verify the earlier boundary.",
+                      surfaceIds: [
+                        receiptOwnershipRetry === "unrelated"
+                          ? "closed"
+                          : "current",
+                      ],
+                    },
+                  ],
+          },
+        },
+      );
+      return;
+    }
     if (closeRetriedSurface) {
       await recordCodexSecurityWorkerScanDraft(
         {
@@ -473,6 +536,76 @@ runpy.run_path(sys.argv[0], run_name="__main__")
               ? activeQualifiedRef
               : activeQualifiedRef.replace("artifacts/", "artifacts/./");
     const resultPath = path.join(artifactDir, "result.json");
+    if (receiptOwnershipRetry) {
+      const newRef = receiptCollision
+        ? receiptSpelling === "shared scan"
+          ? sharedRef
+          : "artifacts/prior.txt"
+        : "artifacts/review.md";
+      const local = path.join(artifactDir, newRef);
+      await mkdir(path.dirname(local), { recursive: true });
+      await writeFile(local, "Synthetic review evidence.\n");
+      const current = {
+        id: "current",
+        label: "Current review",
+        disposition:
+          receiptOwnershipRetry === "candidate" ? "rejected" : "no_issue_found",
+        ...(receiptOwnershipRetry === "candidate"
+          ? { candidateId: "prior-candidate" }
+          : {}),
+        receiptRefs: [newRef],
+      };
+      if (receiptOwnershipRetry === "unrelated") {
+        current.receiptRefs = [
+          receiptSpelling === "shared scan"
+            ? sharedRef
+            : `${path.relative(run.scanDir, path.dirname(artifactDir)).split(path.sep).join("/")}/attempts/attempt-01/artifacts/prior.txt`,
+        ];
+      }
+      await recordCodexSecurityWorkerScanDraft(
+        {
+          root: artifactDir,
+          layout: "worker",
+          repoRoot: targetPath,
+          scanId: run.scanId,
+        },
+        {
+          scanId: run.scanId,
+          complete,
+          findings: [],
+          coverage: {
+            completeness: status,
+            surfaces: [
+              current,
+              ...(receiptOwnershipRetry === "unrelated"
+                ? [
+                    {
+                      id: "closed",
+                      label: "Separate review",
+                      disposition: "no_issue_found",
+                      receiptRefs: [newRef],
+                    },
+                  ]
+                : []),
+            ],
+            explicitExclusions: [],
+            deferred: [],
+            ...(receiptOwnershipRetry === "unrelated"
+              ? {
+                  resolvedDeferred: [
+                    {
+                      id: "prior-gap",
+                      reason: "The separate boundary is verified.",
+                    },
+                  ],
+                }
+              : {}),
+          },
+        },
+      );
+      rawSources.set(resultPath, await readFile(resultPath, "utf8"));
+      return;
+    }
     if (receiptRetry) {
       const saved = await recordCodexSecurityWorkerScanDraft(
         {
@@ -805,6 +938,43 @@ runpy.run_path(sys.argv[0], run_name="__main__")
   }
   for (const [file, bytes] of rawSources)
     assert.equal(await readFile(file, "utf8"), bytes);
+  if (receiptOwnershipRetry) {
+    const coverage = await readFixtureCoverage(run.scanDir);
+    const current = coverage.surfaces.find(
+      (surface) => surface.label === "Current review",
+    );
+    assert.ok(current);
+    assert.equal(
+      current.disposition,
+      receiptOwnershipRetry === "candidate" ? "rejected" : "no_issue_found",
+    );
+    assert.equal(current.receiptRefs.length, 1);
+    assert.equal(
+      await readFile(path.join(run.scanDir, current.receiptRefs[0]), "utf8"),
+      receiptOwnershipRetry === "unrelated"
+        ? "Archived receipt.\n"
+        : "Synthetic review evidence.\n",
+      "Published receipt retains the source context of its actual observation.",
+    );
+    if (receiptOwnershipRetry === "unrelated") {
+      const closed = coverage.surfaces.find(
+        (surface) => surface.label === "Separate review",
+      );
+      assert.ok(closed);
+      const bytes = await Promise.all(
+        closed.receiptRefs.map((ref) =>
+          readFile(path.join(run.scanDir, ref), "utf8"),
+        ),
+      );
+      assert.deepEqual(
+        bytes.sort(),
+        ["Archived receipt.\n", "Synthetic review evidence.\n"].sort(),
+      );
+    }
+    assert.equal(coverage.completeness, "complete");
+    assert.deepEqual(coverage.deferred, []);
+    return { scanDir: run.scanDir, threadId, terminal };
+  }
   if (closeRetriedSurface) {
     const coverage = await readFixtureCoverage(run.scanDir);
     assert.equal(coverage.completeness, "complete");

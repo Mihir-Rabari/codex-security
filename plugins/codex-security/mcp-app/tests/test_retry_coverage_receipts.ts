@@ -316,3 +316,34 @@ for (const resume of [false, true]) {
     });
   }
 }
+
+for (const resume of [false, true]) {
+  for (const receiptOwnershipRetry of [
+    "ordinary",
+    "candidate",
+    "unrelated",
+  ] as const) {
+    for (const [name, receiptSpelling, receiptCollision] of [
+      ["shared same-name collision", "shared scan", true],
+      ["shared distinct-name control", "shared scan", false],
+      ["worker-local control", "worker", true],
+    ] as const) {
+      test(`receipt ownership follows the authored observation: ${receiptOwnershipRetry}, ${name}, ${resume ? "reconstructed" : "live"}`, async () => {
+        const root = await mkdtemp(
+          path.join(tmpdir(), "receipt-owner-observation-"),
+        );
+        try {
+          await publishCoverageFixture(root, "complete", {
+            receiptRetry: true,
+            receiptOwnershipRetry,
+            receiptSpelling,
+            receiptCollision,
+            resume,
+          });
+        } finally {
+          await rm(root, { recursive: true, force: true });
+        }
+      });
+    }
+  }
+}

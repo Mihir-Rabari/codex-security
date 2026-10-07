@@ -362,6 +362,25 @@ export async function saveScanDraftCheckpoint(
   }
 }
 
+function sameAuthoredSurface(left: JsonObject, right: JsonObject): boolean {
+  const content = (surface: JsonObject) => {
+    const { provenance, receiptRefs, ...fields } = surface;
+    const { scanReceiptRefs: _hostRefs, ...authoredProvenance } = isObject(
+      provenance,
+    )
+      ? provenance
+      : {};
+    return {
+      ...fields,
+      receiptRefs: ((receiptRefs as string[] | undefined) ?? []).map((ref) =>
+        posix.normalize(ref),
+      ),
+      provenance: authoredProvenance,
+    };
+  };
+  return isDeepStrictEqual(content(left), content(right));
+}
+
 async function preserveScanDraft(
   context: ArtifactContext,
   input: ScanDraftInput,
@@ -397,14 +416,32 @@ async function preserveScanDraft(
   );
   const savedSources = [...current, ...archived];
   const sources = savedSources.map(({ input }) => input);
-  if (requiresClosureValidation && archived.length > 0) {
-    // Resolve the current worker's receipts before merging archived same-name refs.
+  if (archived.length > 0) {
+    // Retained observations keep saved ownership; fresh observations use this worker.
     const activePrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/output/`;
     for (const surface of result.coverage.surfaces as JsonObject[]) {
       if (!Array.isArray(surface.receiptRefs)) continue;
+      const previous = sources
+        .flatMap((source) => source.coverage.surfaces as JsonObject[])
+        .find((saved) => sameAuthoredSurface(surface, saved));
+      const shared = new Set<string>(
+        isObject(previous?.provenance) &&
+          Array.isArray(previous.provenance.scanReceiptRefs)
+          ? previous.provenance.scanReceiptRefs.filter(
+              (ref): ref is string => typeof ref === "string",
+            )
+          : [],
+      );
+      if (shared.size > 0) {
+        surface.provenance = {
+          ...(isObject(surface.provenance) ? surface.provenance : {}),
+          scanReceiptRefs: [...shared],
+        };
+      }
       surface.receiptRefs = await Promise.all(
         (surface.receiptRefs as string[]).map(async (value) => {
           const ref = posix.normalize(value);
+          if (shared.has(ref)) return ref;
           try {
             await requireRegularFile(
               join(context.root, ref),
@@ -608,7 +645,9 @@ async function preserveScanDraft(
     for (const previous of source.coverage.surfaces as JsonObject[]) {
       const current = (result.coverage.surfaces as JsonObject[]).find(
         (surface) =>
-          coverageEntryPresent([surface], previous, ambiguousDeferredIds),
+          coverageEntryPresent([surface], previous, ambiguousDeferredIds) &&
+          (sameAuthoredSurface(surface, previous) ||
+            resolvedSurfaces.has(previous)),
       );
       if (!current || !isObject(previous.provenance)) continue;
       const inherited = previous.provenance.scanReceiptRefs;
