@@ -1899,7 +1899,7 @@ def merge_saved_results(
             return isinstance(current, list) and all(
                 any(contains_raw_value(item, value) for item in current) for value in previous
             )
-        return current == previous
+        return isinstance(current, bool) == isinstance(previous, bool) and current == previous
 
     def finding_source_order(source, within_worker: bool = False):
         relative, draft, _ = source

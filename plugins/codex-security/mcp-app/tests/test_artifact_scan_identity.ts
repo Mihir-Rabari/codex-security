@@ -108,14 +108,29 @@ for (const layout of ["standard", "diff", "deep"] as const) {
   }
 }
 
-for (const variant of [
-  "candidate",
-  "report",
-  "ledger",
-  "metadata",
-  "moved",
-] as const) {
-  test(`worker: a newer terminal draft collapses contained ${variant} duplicates`, async (t) => {
+const terminalDraftCases: Array<{
+  variant: string;
+  expectedCount: number;
+  observation?: [unknown, unknown];
+}> = [
+  { variant: "candidate", expectedCount: 1 },
+  { variant: "report", expectedCount: 1 },
+  { variant: "ledger", expectedCount: 1 },
+  { variant: "metadata", expectedCount: 1 },
+  { variant: "moved", expectedCount: 2 },
+  { variant: "true-to-number", expectedCount: 2, observation: [true, 1] },
+  { variant: "false-to-number", expectedCount: 2, observation: [false, 0] },
+  { variant: "number-to-true", expectedCount: 2, observation: [1, true] },
+  { variant: "same-boolean", expectedCount: 1, observation: [true, true] },
+  { variant: "same-number", expectedCount: 1, observation: [1, 1.0] },
+  {
+    variant: "different-string",
+    expectedCount: 2,
+    observation: ["old", "new"],
+  },
+];
+for (const { variant, expectedCount, observation } of terminalDraftCases) {
+  test(`worker: a newer terminal draft reconciles ${variant} observations`, async (t) => {
     const normal = await fixture(t, "deep");
     const recovered = await fixture(t, "deep");
     const workerRoot = path.join(normal.root, "worker");
@@ -123,7 +138,12 @@ for (const variant of [
     await Promise.all([mkdir(workerRoot), mkdir(interruptedRoot)]);
     const worker = draftFixture(workerRoot, "worker");
     const interrupted = draftFixture(interruptedRoot, "worker");
-    const plain = finding("Synthetic review");
+    const plain = finding(
+      "Synthetic review",
+      observation
+        ? { extensions: { observation: { value: observation[0] } } }
+        : {},
+    );
     const enriched = finding("Synthetic review", {
       ...(variant === "candidate" || variant === "metadata"
         ? { provenance: { source: "local_plugin", candidateId: "candidate-1" } }
@@ -133,11 +153,19 @@ for (const variant of [
         : {
             extensions: {
               [variant === "ledger" ? "ledgerRowId" : "reportId"]: "report-1",
+              ...(observation
+                ? {
+                    observation: {
+                      value: observation[1],
+                      note: "Additional synthetic observation.",
+                    },
+                  }
+                : {}),
             },
           }),
     });
     const initial =
-      variant === "metadata" || variant === "moved"
+      variant === "metadata" || variant === "moved" || observation
         ? [enriched, plain]
         : [enriched, enriched];
     const latest =
@@ -195,8 +223,8 @@ for (const variant of [
       true,
       true,
     );
-    assert.equal(finalized.normal.length, latest.length);
-    assert.equal(finalized.recovered.length, latest.length);
+    assert.equal(finalized.normal.length, expectedCount);
+    assert.equal(finalized.recovered.length, expectedCount);
     const byId = (left: RecoveredFinding, right: RecoveredFinding) =>
       left.findingId.localeCompare(right.findingId);
     assert.deepEqual(
