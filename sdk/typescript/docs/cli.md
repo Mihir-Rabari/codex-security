@@ -312,8 +312,8 @@ with `2`, returning available results and a coverage warning. Completed scans
 print progress and summaries to stderr and leave stdout empty unless explicit
 output options are selected. `--json` aliases `--format json`; `--headless` uses
 plain progress and skips interactive questions. Select `--auth` when a particular
-credential source is needed. Argument and execution failures with JSON or JSONL
-output produce:
+credential source is needed. `scan` argument and execution failures, and `scans rerun` and `scans resume`
+execution failures with JSON or JSONL output produce:
 
 ```json
 { "status": "failed", "code": "SCAN_FAILED", "message": "..." }
@@ -325,6 +325,12 @@ slice rendered output, not model usage, and may produce incomplete JSON. With
 `--full-output`, truncated `data` is text in a valid envelope. Diagnostics stay on
 stderr. `scan --schema --format json` describes arguments and completed, dry-run,
 and failure result shapes.
+
+Saved-scan setup failures use the same output shape with
+`SCAN_REPLAY_UNAVAILABLE` for `scans rerun` (including when no completed scan is
+available) or `SCAN_RESUME_UNAVAILABLE` for `scans resume`. Rerunning an imported
+scan uses `SCAN_IMPORT_FAILED` if the import fails. Other output formats retain
+stderr-only failures, including when `--full-output` is selected.
 See [Exports and CI](#exports-and-ci) for exit codes and CI examples.
 
 ### Project files

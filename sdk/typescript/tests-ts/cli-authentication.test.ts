@@ -43,10 +43,21 @@ import { temporaryDirectory } from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
 
 import {
+  selectionPrompt,
   createCliTest,
   captureCli,
   runCapturedCli,
 } from "./support/cli-run.js";
+
+const GATEWAY_CONFIGURATION = [
+  'model_provider="gateway"',
+  "[model_providers.gateway]",
+  'name="Synthetic gateway"',
+  'base_url="https://gateway.example.test/v1"',
+  'wire_api="responses"',
+  'env_key="GATEWAY_API_KEY"',
+  "requires_openai_auth=true",
+].join("\n");
 
 let stateDirectory: string;
 
@@ -479,8 +490,8 @@ describe("CLI authentication", () => {
     const deps = dependencies({
       environment: { AWS_PROFILE: "synthetic-profile" },
     });
-    deps.createSecurity = () => ({
-      run: async (_repository, options) => {
+    deps.createSecurity = () =>
+      fakeSecurity(async (_repository, options) => {
         options?.onAuthentication?.({
           method: "aws_credentials",
           source: "AWS_PROFILE",
@@ -489,10 +500,7 @@ describe("CLI authentication", () => {
         throw new CodexSecurityError(
           "403 ExpiredTokenException: security token has expired",
         );
-      },
-      preflight: async () => fakePreflight(),
-      close: async () => {},
-    });
+      });
     expect(
       await stderr.run(
         [
@@ -546,14 +554,11 @@ describe("CLI authentication", () => {
       const { stdout, stderr, runCli } = createCliTest(main, { stderr: false });
 
       const deps = dependencies();
-      deps.createSecurity = () => ({
-        run: async (_repository, options) => {
+      deps.createSecurity = () =>
+        fakeSecurity(async (_repository, options) => {
           options?.onAuthentication?.({ method: "command", verified: false });
           throw new CodexSecurityError(detail);
-        },
-        preflight: async () => fakePreflight(),
-        close: async () => {},
-      });
+        });
       expect(
         await runCli(
           [
@@ -607,17 +612,13 @@ describe("CLI authentication", () => {
         onWorkbench: () => savedRecipe(),
       });
       deps.hasStoredChatGPTSignIn = async () => true;
-      deps.scanAuthenticationPrompt = {
-        isInteractive: () => true,
-        select: async <Value extends string>(
-          message: string,
-          options: readonly { label: string; value: Value }[],
-        ): Promise<Value> => {
+      deps.scanAuthenticationPrompt = selectionPrompt(
+        async (message, options) => {
           question = message;
           choices = options;
           return options.find((option) => option.value === selection)!.value;
         },
-      };
+      );
 
       expect(await stderr.run(argv, deps)).toBe(0);
       expect(onTurn.mock.results.at(-1)?.value).toBe(selection);
@@ -651,15 +652,9 @@ describe("CLI authentication", () => {
       deps.createSecurity = createSecurity;
       deps.hasStoredChatGPTSignIn = (signal) =>
         stage === "status" ? interrupt(signal) : Promise.resolve(true);
-      deps.scanAuthenticationPrompt = {
-        isInteractive: () => true,
-        select: <Value extends string>(
-          _message: string,
-          _options: readonly { label: string; value: Value }[],
-          _presentation?: { header?: string },
-          signal?: AbortSignal,
-        ) => interrupt(signal),
-      };
+      deps.scanAuthenticationPrompt = selectionPrompt(
+        (_message, _options, _presentation, signal) => interrupt(signal),
+      );
 
       expect(
         await main(["scan"], capture().stream, capture(true).stream, deps),
@@ -782,16 +777,13 @@ describe("CLI authentication", () => {
               },
       });
       deps.hasStoredChatGPTSignIn = hasStoredChatGPTSignIn;
-      deps.scanAuthenticationPrompt = {
-        isInteractive: () => scenario.inputInteractive !== false,
-        select: async <Value extends string>(
-          _message: string,
-          options: readonly { label: string; value: Value }[],
-        ): Promise<Value> => {
+      deps.scanAuthenticationPrompt = selectionPrompt(
+        async (_message, options) => {
           prompts += 1;
           return options[0]!.value;
         },
-      };
+        () => scenario.inputInteractive !== false,
+      );
 
       expect(await runCli(scenario.argv, deps)).toBe(0);
       expect(prompts).toBe(0);
@@ -1511,15 +1503,7 @@ describe("skill authentication", () => {
         command,
         auth,
         overrides: ['model_provider="gateway"'],
-        ambientConfig: [
-          'model_provider="gateway"',
-          "[model_providers.gateway]",
-          'name="Synthetic gateway"',
-          'base_url="https://gateway.example.test/v1"',
-          'wire_api="responses"',
-          'env_key="GATEWAY_API_KEY"',
-          "requires_openai_auth=true",
-        ].join("\n"),
+        ambientConfig: GATEWAY_CONFIGURATION,
         environment: { GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY" },
       });
       expect(result.status, result.stderr).toBe(0);
@@ -1588,15 +1572,7 @@ describe("skill authentication", () => {
       const result = await runProviderSkill(stateDirectory, {
         command,
         overrides: ['model_provider="gateway"'],
-        ambientConfig: [
-          'model_provider="gateway"',
-          "[model_providers.gateway]",
-          'name="Synthetic gateway"',
-          'base_url="https://gateway.example.test/v1"',
-          'wire_api="responses"',
-          'env_key="GATEWAY_API_KEY"',
-          "requires_openai_auth=true",
-        ].join("\n"),
+        ambientConfig: GATEWAY_CONFIGURATION,
         environment: { OPENAI_API_KEY: "SYNTHETIC_UNRELATED_OPENAI_KEY" },
       });
       expect(result.status).toBe(2);

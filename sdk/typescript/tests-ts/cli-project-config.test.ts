@@ -964,8 +964,16 @@ test.each(["openrouter", "fireworks", "amazon-bedrock"] as const)(
             args,
             stdout.stream,
             stderr.stream,
-            dependencies({ currentDirectory: input.repository, onConfig }),
+            dependencies({
+              currentDirectory: input.repository,
+              onConfig,
+              environment: {
+                OPENROUTER_API_KEY: "synthetic-openrouter-key",
+                FIREWORKS_API_KEY: "synthetic-fireworks-key",
+              },
+            }),
           ),
+          `${provider} / ${selection} / ${model}: ${stderr.text()}`,
         ).toBe(model === undefined ? 2 : 0);
         if (model === undefined) {
           expect(onConfig).not.toHaveBeenCalled();
