@@ -34,13 +34,16 @@ describe("patch change tracking", () => {
     "missing",
     "published-deinit",
     "missing-deinit",
+    "published-deinit-dangling",
+    "missing-deinit-dangling",
     "push-no",
     "submodule-false",
   ])(
     "publishes assessed nested updates with %s commits/settings",
     async (mode) => {
       const missing = mode.startsWith("missing");
-      const deinitialized = mode.endsWith("-deinit");
+      const deinitialized = mode.includes("deinit");
+      const dangling = mode.endsWith("-dangling");
       const { directory, git, remote } = await publicationRepository();
       const nested = join(directory, "nested");
       await mkdir(nested);
@@ -111,14 +114,19 @@ describe("patch change tracking", () => {
               output.stdout.write(patchRiskAssessment().report);
               return 0;
             }
+            if (dangling) nestedGit("checkout", "--detach");
             await writeFile(join(nested, "app.ts"), "fixed\n");
             nestedGit("commit", "-am", "Synthetic nested update");
-            if (mode.startsWith("published"))
-              nestedGit("push", "origin", "main");
             after = nestedGit("rev-parse", "HEAD");
+            if (mode.startsWith("published"))
+              nestedGit("push", "origin", `${after}:refs/heads/main`);
             nestedIndex = await readFile(nestedIndexPath);
             if (deinitialized) {
               git("add", "nested");
+              if (dangling) {
+                nestedGit("checkout", "--detach", before);
+                nestedIndex = await readFile(nestedIndexPath);
+              }
               git("submodule", "deinit", "--force", "--", "nested");
             }
             output?.stdout.write("Fixed and checked.");
@@ -153,7 +161,13 @@ describe("patch change tracking", () => {
           expect(git("ls-remote", "origin")).toBe("");
           expect(creations).toBe(0);
         }
-        nestedGit("--git-dir", nestedGitDirectory, "push", "origin", "main");
+        nestedGit(
+          "--git-dir",
+          nestedGitDirectory,
+          "push",
+          "origin",
+          `${after}:refs/heads/main`,
+        );
         const resumed = await runWorkflow(
           ["patch", "--resume-pr", git("branch", "--show-current"), "--json"],
           {

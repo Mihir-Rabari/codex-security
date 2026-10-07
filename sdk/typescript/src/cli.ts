@@ -7255,8 +7255,6 @@ async function checkDeinitializedPatchSubmodules(
         )) !== "commit"
       )
         continue;
-      if (await nested(["rev-list", commit, "--not", "--all", "-n", "1"]))
-        continue;
       if (
         !(await nested([
           "for-each-ref",
