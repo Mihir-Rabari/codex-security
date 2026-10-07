@@ -1,7 +1,10 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { createInterface } from "node:readline";
-import { executablePathForSpawn, resolveCodexCommand } from "../../src/runtime.js";
+import {
+  executablePathForSpawn,
+  resolveCodexCommand,
+} from "../../src/runtime.js";
 
 export async function nativeRequest(
   environment: Record<string, string>,
@@ -53,4 +56,3 @@ export async function nativeRequest(
     await closed;
   }
 }
-

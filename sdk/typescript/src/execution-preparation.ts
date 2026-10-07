@@ -323,9 +323,7 @@ export function createExecutionCodex(
       ? environment
       : withoutOpenAiApiKeys(environment),
   );
-  if (
-    checkPermissions || process.platform === "win32"
-  ) {
+  if (checkPermissions || process.platform === "win32") {
     codexPathOverride ??= environment["CODEX_CLI_PATH"]!;
     sdkEnvironment = bundledCodexSdkEnvironment(
       codexPathOverride,
