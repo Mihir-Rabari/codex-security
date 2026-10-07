@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
@@ -386,6 +386,7 @@ test.skipIf(process.platform === "win32")(
     const f = await fixture();
     const caller = join(f.root, "caller-checkout");
     await mkdir(caller);
+    await mkdir(join(caller, ".git"));
     const python = join(caller, "python3");
     const marker = join(f.root, "caller-probed");
     await writeFile(
@@ -409,5 +410,66 @@ test.skipIf(process.platform === "win32")(
       stdio: "pipe",
     });
     expect(existsSync(marker)).toBe(false);
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "default CLI protects saved targets before Python lookup",
+  async () => {
+    const f = await fixture();
+    const python = join(f.repository, "python3");
+    const marker = join(f.root, "cli-probed");
+    await writeFile(
+      python,
+      '#!/bin/sh\nprintf probed > "$TEST_PYTHON_PROBE"\nprintf "codex-security-python-ok\\n"\n',
+    );
+    await chmod(python, 0o700);
+    const source = new URL("../src/cli.ts", import.meta.url).href;
+    for (const args of [
+      ["dedupe", "--scan", f.first.scanId],
+      ["dedupe", "--scan", f.first.scanId.slice(0, 8)],
+      ["dedupe", "--workflow-id", "synthetic-workflow"],
+    ]) {
+      const result = spawnSync(
+        process.execPath,
+        [
+          "-e",
+          `const {main} = await import(${JSON.stringify(source)}); process.exitCode = await main(${JSON.stringify(args)});`,
+        ],
+        {
+          cwd: f.root,
+          env: { ...f.environment, PYTHON: python, TEST_PYTHON_PROBE: marker },
+          encoding: "utf8",
+        },
+      );
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain(
+        "PYTHON interpreter is unavailable or unusable",
+      );
+      expect(existsSync(marker)).toBe(false);
+    }
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "an unrelated working directory does not exclude trusted Python",
+  async () => {
+    const f = await fixture();
+    const source = new URL("../src/runtime.ts", import.meta.url).href;
+    for (const cwd of ["/", f.root]) {
+      const result = spawnSync(
+        process.execPath,
+        [
+          "-e",
+          `const {resolvePluginPython} = await import(${JSON.stringify(source)}); await resolvePluginPython({environment: process.env, protectedRoot: ${JSON.stringify(f.repository)}});`,
+        ],
+        {
+          cwd,
+          env: { ...f.environment, PYTHON: f.python },
+          encoding: "utf8",
+        },
+      );
+      expect(result.status).toBe(0);
+    }
   },
 );

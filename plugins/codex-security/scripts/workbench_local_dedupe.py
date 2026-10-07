@@ -57,7 +57,7 @@ def local_dedupe(
                     ):
                         raise ValueError("embedding_failed")
                     connection.execute(
-                        "INSERT INTO finding_embeddings (finding_id, model, vector_json, cache_key) "
+                        "INSERT INTO local_finding_embeddings (finding_id, model, vector_json, cache_key) "
                         "VALUES (?, ?, ?, ?) ON CONFLICT(finding_id) DO UPDATE SET "
                         "model = excluded.model, vector_json = excluded.vector_json, "
                         "cache_key = excluded.cache_key",
@@ -117,7 +117,7 @@ def prepare(
     repository_id = payload.get("repositoryId")
     rows = connection.execute(
         "SELECT findings.id, findings.details_json, embeddings.cache_key FROM findings "
-        "LEFT JOIN finding_embeddings AS embeddings ON findings.id = embeddings.finding_id "
+        "LEFT JOIN local_finding_embeddings AS embeddings ON findings.id = embeddings.finding_id "
         + (
             "WHERE EXISTS (SELECT 1 FROM finding_repositories WHERE finding_id = findings.id "
             "AND repository_id = ?) "

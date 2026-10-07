@@ -879,6 +879,22 @@ MIGRATIONS = (
         "version local finding embedding inputs",
         "ALTER TABLE finding_embeddings ADD COLUMN cache_key TEXT;",
     ),
+    (
+        44,
+        "separate local and service embedding caches",
+        """
+        CREATE TABLE local_finding_embeddings (
+            finding_id TEXT PRIMARY KEY REFERENCES findings(id) ON DELETE CASCADE,
+            model TEXT NOT NULL,
+            vector_json TEXT NOT NULL,
+            cache_key TEXT NOT NULL
+        );
+        INSERT INTO local_finding_embeddings
+            SELECT finding_id, model, vector_json, cache_key FROM finding_embeddings
+            WHERE cache_key IS NOT NULL;
+        DELETE FROM finding_embeddings WHERE cache_key IS NOT NULL;
+        """,
+    ),
 )
 
 

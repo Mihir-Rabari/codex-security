@@ -58,7 +58,7 @@ def entry(prepared, index=0, **values):
     }
 
 
-def test_cache_reuse_and_legacy_writes_clear_certification(workbench_api, workbench_db):
+def test_cache_reuse_survives_service_embedding_writes(workbench_api, workbench_db):
     first = prepare(workbench_api, workbench_db, [finding(1)])
     assert first["findingsToEmbed"] == [finding(1)]
     assert request(workbench_api, workbench_db, "embed", entries=[entry(first)]) == {}
@@ -74,7 +74,7 @@ def test_cache_reuse_and_legacy_writes_clear_certification(workbench_api, workbe
         [{"finding": finding(1), "embedding": {"model": "synthetic", "vector": [0, 1]}}],
         TIMESTAMP,
     )
-    assert prepare(workbench_api, workbench_db, [finding(1)])["findingsToEmbed"] == [finding(1)]
+    assert prepare(workbench_api, workbench_db, [finding(1)])["findingsToEmbed"] == []
 
 
 def test_preparation_returns_all_cache_keys_but_only_uncached_bodies(workbench_api, workbench_db):
@@ -101,10 +101,10 @@ def test_embedding_batch_rolls_back_on_invalid_or_stale_input(workbench_api, wor
         }[failure]
     result = request(workbench_api, workbench_db, "embed", entries=[entry(prepared), second])
     assert result == {"error": "finding_changed" if failure == "stale" else "embedding_failed"}
-    assert workbench_db.execute("SELECT COUNT(*) FROM finding_embeddings").fetchone()[0] == 0
+    assert workbench_db.execute("SELECT COUNT(*) FROM local_finding_embeddings").fetchone()[0] == 0
 
 
-@pytest.mark.parametrize("case", ["matching", "empty", "missing", "deleted", "null", "stale"])
+@pytest.mark.parametrize("case", ["matching", "empty", "missing", "deleted", "stale"])
 def test_neighbors_and_commits_check_the_complete_cache_map(workbench_api, workbench_db, case):
     second = finding(2)
     second["findingId"] = 'finding-2-"-\u2603'
@@ -118,13 +118,13 @@ def test_neighbors_and_commits_check_the_complete_cache_map(workbench_api, workb
     elif case == "deleted":
         with workbench_db:
             workbench_db.execute(
-                "DELETE FROM finding_embeddings WHERE finding_id = ?", (second["findingId"],)
+                "DELETE FROM local_finding_embeddings WHERE finding_id = ?", (second["findingId"],)
             )
-    elif case in {"null", "stale"}:
+    elif case == "stale":
         with workbench_db:
             workbench_db.execute(
-                "UPDATE finding_embeddings SET cache_key = ? WHERE finding_id = ?",
-                (None if case == "null" else "old-input", second["findingId"]),
+                "UPDATE local_finding_embeddings SET cache_key = ? WHERE finding_id = ?",
+                ("old-input", second["findingId"]),
             )
     neighbors = request(
         workbench_api, workbench_db, "neighbors", findingId="finding-1", cacheKeys=expected
@@ -173,3 +173,63 @@ def test_embedding_cache_migration_preserves_existing_vectors(workbench_api, tmp
             "vector_json": "[1, 0]",
             "cache_key": None,
         }
+
+
+def test_local_custom_vectors_do_not_change_service_search(workbench_api, workbench_db):
+    entries = [
+        {"finding": finding(i), "embedding": {"model": "synthetic", "vector": [1, 0]}}
+        for i in (1, 2)
+    ]
+    workbench_api["store_findings"](workbench_db, entries, TIMESTAMP)
+    prepared = prepare(workbench_api, workbench_db, [finding(1)])
+    request(
+        workbench_api,
+        workbench_db,
+        "embed",
+        entries=[entry(prepared, embedding={"model": "synthetic", "vector": [0, 1]})],
+    )
+    result = workbench_api["find_potential_duplicates"](workbench_db, "finding-1", None)
+    assert [f["findingId"] for f in result["potentialDuplicates"]] == ["finding-2"]
+    assert (
+        workbench_db.execute(
+            "SELECT vector_json FROM finding_embeddings WHERE finding_id = 'finding-1'"
+        ).fetchone()[0]
+        == "[1, 0]"
+    )
+    assert (
+        workbench_db.execute(
+            "SELECT vector_json FROM local_finding_embeddings WHERE finding_id = 'finding-1'"
+        ).fetchone()[0]
+        == "[0, 1]"
+    )
+
+
+def test_local_cache_migration_keeps_service_and_local_rows_separate(workbench_api, tmp_path):
+    with closing(sqlite3.connect(tmp_path / "cached.sqlite3")) as connection:
+        connection.row_factory = sqlite3.Row
+        workbench_api["apply_schema_migrations"](
+            connection,
+            tuple(m for m in workbench_api["MIGRATIONS"] if m[0] < 44),
+            lambda: TIMESTAMP,
+            workbench_api["backfill_security_targets"],
+        )
+        with connection:
+            for identity, key in [("service", None), ("local", "cached-input")]:
+                connection.execute(
+                    "INSERT INTO findings (id, fingerprint, rule_id, identity_anchor, created_at, updated_at) VALUES (?, ?, 'rule', 'anchor', ?, ?)",
+                    (identity, identity, TIMESTAMP, TIMESTAMP),
+                )
+                connection.execute(
+                    "INSERT INTO finding_embeddings VALUES (?, 'synthetic', '[1, 0]', ?)",
+                    (identity, key),
+                )
+        workbench_api["apply_migrations"](connection)
+        assert [
+            row[0] for row in connection.execute("SELECT finding_id FROM finding_embeddings")
+        ] == ["service"]
+        assert [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT finding_id, cache_key FROM local_finding_embeddings"
+            )
+        ] == [("local", "cached-input")]

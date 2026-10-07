@@ -1,3 +1,4 @@
+import { gitMarkerRoot } from "./targets.js";
 import { isNonEmptyString } from "./value.js";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -2875,12 +2876,20 @@ export async function resolvePluginPython(
   options: PluginPythonOptions = {},
 ): Promise<string> {
   const environment = options.environment ?? process.env;
-  const protectedRoot = [
-    process.cwd(),
-    ...(typeof options.protectedRoot === "string"
-      ? [options.protectedRoot]
-      : (options.protectedRoot ?? [])),
-  ];
+  const requestedRoots = options.protectedRoot ?? process.cwd();
+  const callerRoot =
+    options.protectedRoot === undefined
+      ? null
+      : await gitMarkerRoot(process.cwd(), options.signal, "outermost");
+  const protectedRoot =
+    callerRoot === null
+      ? requestedRoots
+      : [
+          callerRoot,
+          ...(typeof requestedRoots === "string"
+            ? [requestedRoots]
+            : requestedRoots),
+        ];
   if (options.configuredPath !== undefined) {
     return await requirePython(
       options.configuredPath,

@@ -283,7 +283,9 @@ codex-security dedupe --scan SCAN_ID --json
 
 The CLI prepares missing or stale embeddings for the local repository's stored
 findings, searches them, and saves reviewed duplicate groups in the workbench
-database. Repeated runs reuse compatible vectors. Ordinary scans do not generate
+database. Local vectors are stored separately from findings-service vectors,
+even when both use the same database. Repeated runs reuse compatible vectors.
+Ordinary scans do not generate
 embeddings automatically. New embeddings still send complete finding JSON to
 the configured embeddings endpoint and require `OPENAI_API_KEY` or `CODEX_API_KEY`
 on the CLI host; ChatGPT login alone is insufficient. Cached vectors avoid those
@@ -357,7 +359,7 @@ async function dedupeWithEmbeddings(scanId: string, embedder: FindingEmbedder) {
 Choose a stable namespace identifying the actual vector space and preprocessing
 version, including any provider or model revision that changes the vectors.
 Changing the namespace, model, or dimensions refreshes cached vectors. Do not
-put credentials in the namespace. The database keeps one vector per finding;
+put credentials in the namespace. The local cache keeps one vector per finding;
 switching spaces replaces it, and concurrent runs with different spaces may
 need a retry. `embedding` cannot be combined with `findingsUrl`, whose service
 owns embedding preparation. Without a binding, the existing OpenAI adapter and

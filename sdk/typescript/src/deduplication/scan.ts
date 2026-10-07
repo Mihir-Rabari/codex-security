@@ -113,25 +113,29 @@ export async function deduplicateScanInternal(
   deduplicationConcurrency(options.concurrency);
   const environment = dependencies.environment ?? process.env;
   const pluginRoot = await bundledPluginRoot();
-  const scan = await resolveCompletedScan(scanId, {
-    currentDirectory: dependencies.currentDirectory ?? (() => process.cwd()),
-    runWorkbench:
-      (dependencies.runWorkbench &&
-        ((args, input) =>
-          dependencies.runWorkbench!(args, input, options.signal))) ??
-      (await savedScanWorkbench(scanId, {
+  const bootstrap = dependencies.runWorkbench
+    ? undefined
+    : await savedScanWorkbench(scanId, {
         environment,
         pluginRoot,
         currentDirectory: dependencies.currentDirectory?.() ?? process.cwd(),
         signal: options.signal,
-      })),
+      });
+  const scan = await resolveCompletedScan(scanId, {
+    currentDirectory: dependencies.currentDirectory ?? (() => process.cwd()),
+    runWorkbench:
+      bootstrap ??
+      ((args, input) =>
+        dependencies.runWorkbench!(args, input, options.signal)),
   });
   return await deduplicateResolvedScan(
     scan.scanDir,
     scan["targetPath"] as string,
     scan.scanId,
     options,
-    dependencies,
+    bootstrap
+      ? { ...dependencies, environment: bootstrap.environment }
+      : dependencies,
     pluginRoot,
     false,
   );

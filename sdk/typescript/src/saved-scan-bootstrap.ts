@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import { isAbsolute, join, resolve } from "node:path";
+import { gitMarkerRoot } from "./targets.js";
 import { CodexSecurityError } from "./errors.js";
 import type { SavedScanDependencies } from "./saved-scan.js";
 import {
@@ -24,18 +25,22 @@ interface BootstrapDatabase {
 
 /** Read only enough history to protect Python discovery; the workbench still validates the scan. */
 export async function savedScanWorkbench(
-  requestedId: string,
+  requestedId: string | { workflowId: string },
   options: {
     environment: ProcessEnvironment;
     pluginRoot: string;
     currentDirectory: string;
     signal?: AbortSignal;
   },
-): Promise<SavedScanDependencies["runWorkbench"]> {
+): Promise<
+  SavedScanDependencies["runWorkbench"] & { environment: ProcessEnvironment }
+> {
   options.signal?.throwIfAborted();
-  const environment = workbenchEnvironment(options.environment);
+  const environment: ProcessEnvironment = workbenchEnvironment(
+    options.environment,
+  );
   const targets = readTargets(requestedId, environment);
-  const latest = requestedId === "latest";
+  const latest = requestedId === "latest" || typeof requestedId !== "string";
   if (targets.length === 0)
     throw new CodexSecurityError(
       latest
@@ -57,7 +62,17 @@ export async function savedScanWorkbench(
       "Saved scan history has no absolute repository target.",
     );
 
-  return async (args, input, signal = options.signal) => {
+  const callerRoot = await gitMarkerRoot(
+    options.currentDirectory,
+    options.signal,
+    "outermost",
+  );
+  let python: string | undefined;
+  const workbench: SavedScanDependencies["runWorkbench"] = async (
+    args,
+    input,
+    signal = options.signal,
+  ) => {
     signal?.throwIfAborted();
     const target =
       args[0] === "get-scan"
@@ -69,20 +84,21 @@ export async function savedScanWorkbench(
       throw new CodexSecurityError(
         "Saved scan history changed during lookup. Retry the command.",
       );
-    // For `latest`, Python keeps its repository/worktree matching. Protect every
-    // candidate until it selects the exact scan, then narrow to that target.
-    const roots = target
-      ? [target.target_path]
-      : targets.map((row) => row.target_path);
+    // Pin the interpreter selected with every candidate and the caller checkout protected.
+    python ??= await resolvePluginPython({
+      environment,
+      protectedRoot: [
+        ...(callerRoot === null ? [] : [callerRoot]),
+        ...targets.map((row) => row.target_path),
+      ],
+      signal,
+    });
+    environment["PYTHON"] = python;
     const result = await runWorkbench(
       {
         environment,
         pluginRoot: options.pluginRoot,
-        python: await resolvePluginPython({
-          environment,
-          protectedRoot: [options.currentDirectory, ...roots],
-          signal,
-        }),
+        python,
         signal,
         failureMessage: "Could not read Codex Security scan history",
       },
@@ -105,10 +121,11 @@ export async function savedScanWorkbench(
     }
     return result;
   };
+  return Object.assign(workbench, { environment });
 }
 
 function readTargets(
-  requestedId: string,
+  requestedId: string | { workflowId: string },
   environment: ProcessEnvironment,
 ): ScanTarget[] {
   const require = createRequire(import.meta.url);
@@ -125,6 +142,8 @@ function readTargets(
       join(codexSecurityStateDirectory(environment), "workbench.sqlite3"),
       bun ? { readonly: true } : { readOnly: true },
     );
+    if (typeof requestedId !== "string")
+      return database.prepare("SELECT id, target_path FROM scans").all();
     if (requestedId === "latest")
       return database
         .prepare("SELECT id, target_path FROM scans WHERE status = 'complete'")

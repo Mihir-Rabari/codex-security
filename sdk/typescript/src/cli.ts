@@ -91,6 +91,7 @@ import { suggestOwnersInternal } from "./suggest-owners.js";
 import { parseImportedFindings } from "./findings-import.js";
 import { publishScanToCustom } from "./custom-publish.js";
 import { DEFAULT_DEDUPE_CONCURRENCY } from "./deduplication/deduplication.js";
+import { savedScanWorkbench } from "./saved-scan-bootstrap.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
 import { runRecordsProtocol } from "./deduplication/records-protocol.js";
 import {
@@ -3998,12 +3999,33 @@ export async function main(
         const controller = new AbortController();
         const removeSignals = listenForAbort(dependencies, controller);
         try {
+          const defaultWorkbench =
+            dependencies.runWorkbench === DEFAULT_DEPENDENCIES.runWorkbench;
+          const workflowWorkbench =
+            defaultWorkbench &&
+            options.scan === undefined &&
+            options.workflowId !== undefined
+              ? await savedScanWorkbench(
+                  { workflowId: options.workflowId },
+                  {
+                    environment: dependencies.environment,
+                    pluginRoot: await bundledPluginRoot(),
+                    currentDirectory: dependencies.currentDirectory(),
+                    signal: controller.signal,
+                  },
+                )
+              : undefined;
           const scanId =
             options.scan ??
             (options.workflowId === undefined
               ? undefined
-              : (await resolveWorkflowScan(options.workflowId, dependencies))
-                  .scanId);
+              : (
+                  await resolveWorkflowScan(options.workflowId, {
+                    ...dependencies,
+                    runWorkbench:
+                      workflowWorkbench ?? dependencies.runWorkbench,
+                  })
+                ).scanId);
           if (scanId === undefined)
             throw new CodexSecurityError(
               "Deduplication requires --scan or --workflow-id.",
@@ -4024,7 +4046,9 @@ export async function main(
             {
               environment: dependencies.environment,
               currentDirectory: dependencies.currentDirectory,
-              runWorkbench: dependencies.runWorkbench,
+              ...(defaultWorkbench
+                ? {}
+                : { runWorkbench: dependencies.runWorkbench }),
             },
           );
           for (const refusal of result.refusals ?? []) {

@@ -98,13 +98,14 @@ def find_potential_duplicates(
             connection, expected_cache_keys
         ):
             return {"error": "finding_changed"}
+        table = "finding_embeddings" if expected_cache_keys is None else "local_finding_embeddings"
         if repository_id is None:
-            source = "finding_embeddings AS embeddings"
+            source = f"{table} AS embeddings"
             predicate = ""
             scope_parameters: tuple[str, ...] = ()
         else:
             source = (
-                "finding_repositories AS repositories JOIN finding_embeddings AS embeddings "
+                f"finding_repositories AS repositories JOIN {table} AS embeddings "
                 "ON embeddings.finding_id = repositories.finding_id"
             )
             predicate = "repositories.repository_id = ? AND "
@@ -238,7 +239,7 @@ def embeddings_match(connection: sqlite3.Connection, expected: dict[str, str]) -
     return (
         connection.execute(
             """SELECT 1 FROM json_each(?) AS expected
-        LEFT JOIN finding_embeddings AS embeddings ON embeddings.finding_id = expected.key
+        LEFT JOIN local_finding_embeddings AS embeddings ON embeddings.finding_id = expected.key
         WHERE embeddings.finding_id IS NULL OR embeddings.cache_key IS NOT expected.value
         LIMIT 1""",
             (json.dumps(expected),),
