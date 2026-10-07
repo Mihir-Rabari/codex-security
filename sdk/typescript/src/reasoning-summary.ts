@@ -23,6 +23,7 @@ export async function captureOriginalReasoningSummary(options: {
 }): Promise<string | undefined> {
   // Keep explicit selections and invalid values with their existing native validator.
   if (
+    options.config["model_reasoning_summary"] !== undefined ||
     scanPreflightCodexConfig(options.config)["model_reasoning_summary"] !==
       undefined ||
     resolveCodexProfile(options.config)["model_reasoning_summary"] !== undefined

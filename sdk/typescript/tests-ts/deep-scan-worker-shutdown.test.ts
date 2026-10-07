@@ -1,3 +1,5 @@
+import * as nodeOs from "node:os";
+import * as nodePath from "node:path";
 import { expect, test } from "bun:test";
 import { loadBundledRuntime } from "./plugin-root.js";
 import { profileConfigOverrides } from "../../../plugins/codex-security/scripts/codex_profile.mjs";
@@ -48,6 +50,12 @@ async function bundledWorkerExecutor(
     source,
   )?.[1];
   expect(fileSystemImport).toBeDefined();
+  const pathImport = /\b(import_node_path\d*)\.(?:join|resolve)\b/u.exec(
+    source,
+  )?.[1];
+  expect(pathImport).toBeDefined();
+  const osImport = /\b(import_node_os\d*)\.homedir\b/u.exec(source)?.[1];
+  expect(osImport).toBeDefined();
 
   class FakeCodex {
     startThread(options: { threadSource: string }) {
@@ -64,6 +72,8 @@ async function bundledWorkerExecutor(
   return new Function(
     "Codex",
     fileSystemImport!,
+    pathImport!,
+    osImport!,
     "workerPermissionProfile",
     "profileConfigOverrides",
     "DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID",
@@ -83,6 +93,8 @@ async function bundledWorkerExecutor(
   )(
     FakeCodex,
     { promises: { readFile: async () => "fixture worker prompt" } },
+    nodePath,
+    nodeOs,
     () => ({}),
     profileConfigOverrides,
     "codex_security_deep_scan_worker",
