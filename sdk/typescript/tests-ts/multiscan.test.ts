@@ -4551,7 +4551,12 @@ testPosix(
   },
 );
 
-for (const modified of [false, true, "deleted"] as const) {
+for (const modified of [
+  false,
+  true,
+  "deleted",
+  "deleted-missing-index",
+] as const) {
   test(`preserved recovery data retains unrelated tracked modifications=${modified}`, async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "preserved-tracked-source");
@@ -4602,8 +4607,11 @@ for (const modified of [false, true, "deleted"] as const) {
     const notes = modified
       ? "Preserve interrupted tracked notes.\n"
       : "Original tracked notes.\n";
-    if (modified === "deleted") await rm(join(checkout, "README.md"));
+    if (modified === "deleted" || modified === "deleted-missing-index")
+      await rm(join(checkout, "README.md"));
     else if (modified) await writeFile(join(checkout, "README.md"), notes);
+    if (modified === "deleted-missing-index")
+      await rm(join(checkout, ".git", "index"));
     await writeFile(
       join(checkout, "retained.txt"),
       "Preserve untracked recovery data.\n",
@@ -4612,7 +4620,7 @@ for (const modified of [false, true, "deleted"] as const) {
       completed: 1,
       skipped: 1,
     });
-    if (modified === "deleted")
+    if (modified === "deleted" || modified === "deleted-missing-index")
       expect(
         await lstat(join(checkout, "README.md")).then(
           () => true,
@@ -5110,6 +5118,8 @@ for (const selection of [
   "parent",
   "chain",
   "external",
+  "external-parent",
+  "path",
 ] as const) {
   const inherited = selection === "inherited";
   testPosix(
@@ -5149,11 +5159,17 @@ for (const selection of [
         "repo",
         "python-alias",
       );
+      const externalDirectory = join(paths.root, "external-python-directory");
+      const tools = join(paths.root, "trusted-python-tools");
       const alias =
         selection === "external"
           ? join(paths.root, "external-python")
-          : checkoutAlias;
-      if (selection === "external") {
+          : selection === "external-parent"
+            ? join(externalDirectory, "python-alias")
+            : selection === "path"
+              ? join(tools, "scan-python")
+              : checkoutAlias;
+      if (["external", "external-parent", "path"].includes(selection)) {
         git(
           paths.root,
           "clone",
@@ -5161,29 +5177,38 @@ for (const selection of [
           source.path,
           dirname(checkoutAlias),
         );
-        await symlink(checkoutAlias, alias);
+        if (selection === "external-parent")
+          await symlink(dirname(checkoutAlias), externalDirectory);
+        else {
+          if (selection === "path") await mkdir(tools);
+          await symlink(checkoutAlias, alias);
+        }
       }
+      const requestedPython = selection === "path" ? "scan-python" : alias;
       const runs = mock(
         async (
           checkout: string,
           settings: Parameters<SecurityClient["run"]>[1] = {},
         ) => {
           const selected = await runtime.resolvePluginPythonCommand({
-            configuredPath: inherited ? undefined : alias,
+            configuredPath: inherited ? undefined : requestedPython,
             protectedRoot: checkout,
             environment: runtime.pluginHelperEnvironment(process.env),
           });
           expect(selected.executable).toBe(
-            selection === "external" ? alias : python,
+            ["external", "path"].includes(selection) ? alias : python,
           );
           return completedScan(settings.outputDir!, "complete", checkout);
         },
       );
       const campaign = options(paths, client(runs), {
-        config: inherited ? {} : { pythonPath: alias },
+        config: inherited ? {} : { pythonPath: requestedPython },
       });
       const previousPython = process.env["PYTHON"];
+      const previousPath = process.env["PATH"];
       if (inherited) process.env["PYTHON"] = alias;
+      if (selection === "path")
+        process.env["PATH"] = `${tools}${delimiter}${previousPath ?? ""}`;
       try {
         const initialSummary = await runMultiscan(campaign);
         expect(initialSummary).toMatchObject({
@@ -5207,6 +5232,8 @@ for (const selection of [
       } finally {
         if (previousPython === undefined) delete process.env["PYTHON"];
         else process.env["PYTHON"] = previousPython;
+        if (previousPath === undefined) delete process.env["PATH"];
+        else process.env["PATH"] = previousPath;
       }
     },
   );
@@ -6180,15 +6207,17 @@ for (const tracked of [false, true]) {
     }
     expect(await readFile(join(checkout, "notes.log"), "utf8")).toBe(retained);
     expect(runs).toHaveBeenCalledTimes(1);
+    expect(failure).toBeUndefined();
+    expect(summary).toMatchObject({ completed: 1, skipped: 1 });
+    expect(await readFile(initial.resultsPath)).toEqual(ledger);
+    expect(await readFile(join(checkout, "src", "app.ts"))).toEqual(
+      expectedApp,
+    );
     if (tracked) {
-      expect(failure).toBeInstanceOf(Error);
-    } else {
-      expect(failure).toBeUndefined();
-      expect(summary).toMatchObject({ completed: 1, skipped: 1 });
-      expect(await readFile(initial.resultsPath)).toEqual(ledger);
-      expect(await readFile(join(checkout, "src", "app.ts"))).toEqual(
-        expectedApp,
+      expect(git(checkout, "show", ":notes.log")).toBe(
+        "Pinned synthetic note.",
       );
+      expect(git(checkout, "diff", "--name-only")).toContain("notes.log");
     }
   });
 }

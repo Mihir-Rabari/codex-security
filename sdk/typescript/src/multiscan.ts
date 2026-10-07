@@ -21,6 +21,7 @@ import { hostname } from "node:os";
 import {
   basename,
   dirname,
+  delimiter,
   extname,
   isAbsolute,
   join,
@@ -70,7 +71,10 @@ import {
 } from "./scan-settings.js";
 import { workflowDigest } from "./finding-workflow.js";
 import type { ScanResult } from "./result.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
+import {
+  inspectTrustedExecutable,
+  resolveTrustedExecutable,
+} from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
 const REQUIRED_ARTIFACTS = [
@@ -808,15 +812,18 @@ async function canonicalPythonPath(path: string): Promise<string> {
     await realpath(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    try {
-      if ((await lstat(path)).isSymbolicLink()) {
+    for (let ancestor = path; ; ancestor = dirname(ancestor)) {
+      const metadata = await lstat(ancestor).catch(undefinedIfMissingFile);
+      if (metadata?.isSymbolicLink()) {
+        const target = await readlink(ancestor);
         return canonicalPythonPath(
-          resolve(dirname(path), await readlink(path)),
+          (isAbsolute(target)
+            ? target
+            : `${dirname(ancestor)}${sep}${target}`) +
+            path.slice(ancestor.length),
         );
       }
-    } catch (linkError) {
-      if ((linkError as NodeJS.ErrnoException).code !== "ENOENT")
-        throw linkError;
+      if (metadata !== undefined || dirname(ancestor) === ancestor) break;
     }
   }
   return canonicalCreationPath(path);
@@ -1267,23 +1274,52 @@ async function loadResumableScan(
           receipt.error === "Multiscan repository coverage is incomplete.");
   if (!matchesOutcome) return undefined;
   const reportSealed = await hasSealedReport(path, manifest, signal);
-  const pythonPath =
-    reportSealed ||
-    configuredPythonPath === undefined ||
-    !isPythonPathCandidate(configuredPythonPath)
-      ? undefined
-      : relative(
-          matchedRoot,
-          await canonicalPythonPath(
-            resolve(
-              expandHome(configuredPythonPath) +
-                (process.platform === "win32" &&
-                extname(configuredPythonPath) === ""
-                  ? ".exe"
-                  : ""),
-            ),
-          ),
-        );
+  let pythonPath: string | undefined;
+  if (!reportSealed && configuredPythonPath !== undefined) {
+    let candidates: string[];
+    if (isPythonPathCandidate(configuredPythonPath)) {
+      candidates = [
+        resolve(
+          expandHome(configuredPythonPath) +
+            (process.platform === "win32" &&
+            extname(configuredPythonPath) === ""
+              ? ".exe"
+              : ""),
+        ),
+      ];
+    } else {
+      const inspected = await inspectTrustedExecutable(
+        configuredPythonPath,
+        pluginHelperEnvironment(process.env),
+        matchedRoot,
+      );
+      const suffixes =
+        process.platform !== "win32" ||
+        /\.(?:exe|com)$/iu.test(configuredPythonPath)
+          ? [""]
+          : [".exe", ".com"];
+      candidates =
+        inspected.executable !== null
+          ? []
+          : (inspected.environment["PATH"]?.split(delimiter) ?? []).flatMap(
+              (entry) =>
+                suffixes.map((suffix) =>
+                  join(entry, configuredPythonPath + suffix),
+                ),
+            );
+    }
+    for (const candidate of candidates) {
+      const selected = relative(
+        matchedRoot,
+        await canonicalPythonPath(candidate),
+      );
+      if (!relativePathIsOutside(selected)) {
+        pythonPath = selected;
+        break;
+      }
+    }
+  }
+
   const checkoutPython =
     !reportSealed &&
     pythonPath !== undefined &&
@@ -1754,6 +1790,13 @@ async function checkoutRevision(
       task.repository,
       task.revision,
     );
+  }
+  if (
+    retainedGit &&
+    !(await lstat(join(path, ".git", "index")).catch(undefinedIfMissingFile))
+  ) {
+    // Rebuild the lost index without restoring unrelated deleted worktree files.
+    await git("read-tree", task.revision);
   }
   await git(
     "checkout",
