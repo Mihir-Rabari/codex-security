@@ -1054,9 +1054,12 @@ async function testOpenAiCredentialsReachWorker() {
       restoreEnv("CODEX_API_KEY", entry.codex);
       process.env.CODEX_CLI_PATH = process.execPath;
       process.env.CODEX_HOME = fixture.root;
-      const configPath = path.join(fixture.root, "scan-settings.toml");
-      await writeFile(configPath, entry.projectConfiguration ?? "");
-      process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
+      delete process.env.CODEX_SECURITY_CONFIG_PATH;
+      if (entry.projectConfiguration !== undefined) {
+        const configPath = path.join(fixture.root, "scan-settings.toml");
+        await writeFile(configPath, entry.projectConfiguration);
+        process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
+      }
       let configuration = entry.configuration ?? 'model_provider = "openai"\n';
       Object.assign(process.env, runtimeEnvironment);
       if (entry.nativeProvider !== undefined) {
@@ -1153,7 +1156,7 @@ env_key = "CODEX_API_KEY"
           }
           assert.equal(
             invocation.openaiAuthentication.configuration,
-            configuration,
+            entry.projectConfiguration ?? configuration,
           );
           assert.equal(
             invocation.argv.some((arg: string) =>
