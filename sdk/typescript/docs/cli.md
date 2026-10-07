@@ -97,32 +97,25 @@ can apply Daybreak Blue to compatible mainline models when the API organization
 and project have access. An omitted `access_programs.cyber` field does not by
 itself mean that Daybreak treatment is disabled.
 
-A currently documented model-selection workaround is to use
-`gpt-daybreak-blue-latest` with a key from a project that has Daybreak Blue and
-model access enabled:
+Choose a compatible model available to your project and select Daybreak Blue
+explicitly:
 
 ```bash
 codex-security scan /path/to/repository \
-  --auth api-key --model gpt-daybreak-blue-latest
+  --auth api-key --model <model> --cyber-access-program daybreak_blue
 ```
 
-Add `--mode deep` for Deep Scan. The selected model is passed to discovery and
-reducer workers, including resumed workers. The SDK equivalent is
-`new CodexSecurity({ codexOverrides: { model: "gpt-daybreak-blue-latest" } })`
-with `auth: "api-key"` in the scan options.
-
-For this alias, the API selects `daybreak_blue` when `access_programs.cyber` is
-omitted and rejects requests without the required access. The alias follows
-updates to its underlying model.
-
-To retain a specific mainline model, use `--cyber-access-program daybreak_blue`
-alongside `--auth api-key --model <model>`. In the SDK, set
-`cyberAccessProgram: "daybreak_blue"` in the scan options alongside your selected
-model. This selection also reaches Deep Scan discovery and reducer workers,
-including resumed workers. See [Select a Cyber access program](#select-a-cyber-access-program)
+In the SDK, select your model through `codexOverrides.model` and pass
+`auth: "api-key"` and `cyberAccessProgram: "daybreak_blue"` in the scan options.
+Add `--mode deep` for Deep Scan. The selection reaches discovery and reducer
+workers, including resumed workers. See [Select a Cyber access program](#select-a-cyber-access-program)
 for configuration precedence and the API-key feature setting.
-`access_programs.cyber` is a Responses API field; use the supported selector
-instead of passing it as a `--codex` configuration key.
+
+The previously documented `gpt-daybreak-blue-latest` alias is
+[deprecated](https://developers.openai.com/api/docs/models/gpt-daybreak-blue-latest).
+Use a current model available to your project. `access_programs.cyber` is a
+Responses API field; use the supported selector instead of passing it as a
+`--codex` configuration key.
 
 ### Select a Cyber access program
 
