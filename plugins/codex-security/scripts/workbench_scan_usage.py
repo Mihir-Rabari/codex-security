@@ -453,7 +453,7 @@ def _read_rollout_usage(
                 elif event.get("type") == "event_msg" and payload.get("type") == "token_count":
                     inherited_usage = _token_snapshot(payload)
                     if inherited_usage is not None:
-                        previous = _retain_cache_write_baseline(
+                        previous = _retain_cache_baseline(
                             previous, inherited_usage, _cache_writes_reported(payload)
                         )
                 continue
@@ -466,32 +466,39 @@ def _read_rollout_usage(
                 continue
             reset = snapshot["totalTokens"] < previous["totalTokens"]
             cache_writes_reported = _cache_writes_reported(payload)
-            fills_cache_writes = (
-                not previous_cache_writes_reported
-                and cache_writes_reported
-                and not reset
-                and snapshot["inputTokens"] >= previous["inputTokens"]
-                and snapshot["outputTokens"] >= previous["outputTokens"]
+            baseline = _retain_cache_baseline(previous, snapshot, cache_writes_reported)
+            if baseline is previous:
+                cache_writes_reported = previous_cache_writes_reported and cache_writes_reported
+            refines_classification = (
+                baseline["inputTokens"] >= previous["inputTokens"]
+                and baseline["outputTokens"] >= previous["outputTokens"]
+                and baseline["cachedInputTokens"] >= previous["cachedInputTokens"]
+                and baseline["cacheWriteInputTokens"] >= previous["cacheWriteInputTokens"]
+                and (
+                    (not previous_cache_writes_reported and cache_writes_reported)
+                    or baseline["cachedInputTokens"] > previous["cachedInputTokens"]
+                    or baseline["cacheWriteInputTokens"] > previous["cacheWriteInputTokens"]
+                )
             )
             previous_cache_writes_reported = cache_writes_reported
             delta = {
                 key: value if reset or value < previous[key] else value - previous[key]
                 for key, value in snapshot.items()
             }
-            previous = _retain_cache_write_baseline(previous, snapshot, cache_writes_reported)
+            previous = baseline
             if timestamp < started_at:
                 continue
             if completed_at is not None and timestamp > completed_at:
                 continue
             delta["totalTokens"] = delta["inputTokens"] + delta["outputTokens"]
-            if delta["totalTokens"] <= 0 and not fills_cache_writes:
+            if delta["totalTokens"] <= 0 and not refines_classification:
                 continue
             cache_write_capacity = (
                 total["inputTokens"]
                 + delta["inputTokens"]
                 - total["cachedInputTokens"]
                 - total["cacheWriteInputTokens"]
-                if fills_cache_writes
+                if refines_classification
                 else delta["inputTokens"]
             )
             delta["cacheWriteInputTokens"] = min(
@@ -516,16 +523,26 @@ def _cache_writes_reported(payload: Mapping[str, Any]) -> bool:
     return "cache_write_input_tokens" in raw_usage or "cache_write_tokens" in raw_usage
 
 
-def _retain_cache_write_baseline(
+def _retain_cache_baseline(
     previous: dict[str, int], snapshot: dict[str, int], reported: bool
 ) -> dict[str, int]:
+    baseline = snapshot
     if (
         not reported
         and snapshot["inputTokens"] >= previous["inputTokens"]
         and snapshot["outputTokens"] >= previous["outputTokens"]
     ):
-        return {**snapshot, "cacheWriteInputTokens": previous["cacheWriteInputTokens"]}
-    return snapshot
+        baseline = {**snapshot, "cacheWriteInputTokens": previous["cacheWriteInputTokens"]}
+    if (
+        baseline["inputTokens"] == previous["inputTokens"]
+        and baseline["outputTokens"] == previous["outputTokens"]
+        and (
+            baseline["cachedInputTokens"] < previous["cachedInputTokens"]
+            or baseline["cacheWriteInputTokens"] < previous["cacheWriteInputTokens"]
+        )
+    ):
+        return previous
+    return baseline
 
 
 def _session_parent_thread_id(payload: Mapping[str, Any]) -> str | None:

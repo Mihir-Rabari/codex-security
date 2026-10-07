@@ -709,6 +709,7 @@ export class ScanCostTracker {
           !refinesCacheClassification(
             usage,
             tokenUsage(this.#snapshot.usage),
+            true,
           ) &&
           cost.estimatedUsd >= this.#snapshot.cost.estimatedUsd)
       ) {
@@ -1041,7 +1042,7 @@ function readSessionEvent(
     if (payload["type"] === "token_count" && isRecord(payload["info"])) {
       const usage = tokenUsage(payload["info"]["total_token_usage"]);
       if (usage !== null) {
-        session.previousRawUsage = retainCacheWriteBaseline(
+        session.previousRawUsage = retainCacheBaseline(
           session.previousRawUsage,
           usage,
         );
@@ -1235,10 +1236,12 @@ function readSessionEvent(
     );
   }
   if (usage === null) return;
-  session.previousRawUsage = retainCacheWriteBaseline(
+  const baseline = retainCacheBaseline(session.previousRawUsage, usage);
+  const refinesRaw = refinesCacheClassification(
     session.previousRawUsage,
-    usage,
+    baseline,
   );
+  session.previousRawUsage = baseline;
   if (accumulated !== null) session.accumulatedOwnUsage = accumulated;
   for (const candidate of [
     ownUsage === null ? null : { usage: ownUsage, cost },
@@ -1250,8 +1253,12 @@ function readSessionEvent(
     const previous = session.accounting;
     if (
       previous === null ||
-      refinesCacheClassification(previous.usage, candidate.usage) ||
-      (!refinesCacheClassification(candidate.usage, previous.usage) &&
+      refinesCacheClassification(
+        previous.usage,
+        candidate.usage,
+        !refinesRaw,
+      ) ||
+      (!refinesCacheClassification(candidate.usage, previous.usage, true) &&
         (candidate.cost !== null
           ? previous.cost === null ||
             candidate.cost.estimatedUsd >= previous.cost.estimatedUsd
@@ -1392,15 +1399,18 @@ function sessionContentText(
 function refinesCacheClassification(
   previous: ScanTokenUsage | null,
   next: ScanTokenUsage | null,
+  incompleteOnly = false,
 ): boolean {
   return (
-    previous?.cache_write_input_tokens_reported === false &&
+    previous !== null &&
+    (!incompleteOnly || previous.cache_write_input_tokens_reported === false) &&
     next !== null &&
     previous.input_tokens <= next.input_tokens &&
     previous.output_tokens <= next.output_tokens &&
     next.cached_input_tokens >= previous.cached_input_tokens &&
     next.cache_write_input_tokens >= previous.cache_write_input_tokens &&
-    (next.cache_write_input_tokens_reported !== false ||
+    ((previous.cache_write_input_tokens_reported === false &&
+      next.cache_write_input_tokens_reported !== false) ||
       next.cached_input_tokens > previous.cached_input_tokens ||
       next.cache_write_input_tokens > previous.cache_write_input_tokens)
   );
@@ -1437,7 +1447,7 @@ function higherCostUsage(
     refinesCacheClassification(previous, next)
   )
     return next;
-  if (refinesCacheClassification(next, previous)) return previous;
+  if (refinesCacheClassification(next, previous, true)) return previous;
   return previousCost !== null &&
     nextCost !== null &&
     previousCost.estimatedUsd > nextCost.estimatedUsd
@@ -1445,17 +1455,32 @@ function higherCostUsage(
     : next;
 }
 
-function retainCacheWriteBaseline(
+function retainCacheBaseline(
   previous: ScanTokenUsage | null,
   next: ScanTokenUsage,
 ): ScanTokenUsage {
   // An omitted field does not reset a known cumulative count in this epoch.
-  return next.cache_write_input_tokens_reported === false &&
+  const baseline =
+    next.cache_write_input_tokens_reported === false &&
     previous !== null &&
     next.input_tokens >= previous.input_tokens &&
     next.output_tokens >= previous.output_tokens
-    ? { ...next, cache_write_input_tokens: previous.cache_write_input_tokens }
-    : next;
+      ? { ...next, cache_write_input_tokens: previous.cache_write_input_tokens }
+      : next;
+  // A cache-only decrease is not counted as a new epoch. Retain its whole
+  // baseline so a later recovery cannot count the same classified input twice.
+  return previous !== null &&
+    baseline.input_tokens === previous.input_tokens &&
+    baseline.output_tokens === previous.output_tokens &&
+    (baseline.cached_input_tokens < previous.cached_input_tokens ||
+      baseline.cache_write_input_tokens < previous.cache_write_input_tokens)
+    ? {
+        ...previous,
+        ...(baseline.cache_write_input_tokens_reported === false
+          ? { cache_write_input_tokens_reported: false }
+          : {}),
+      }
+    : baseline;
 }
 
 function accumulateTokenUsage(
@@ -1479,14 +1504,12 @@ function accumulateTokenUsage(
         accumulated.total_tokens !== previousRaw?.total_tokens)) ||
     (accumulated === null &&
       previousRaw?.cache_write_input_tokens_reported === false);
-  const fillsCacheWrites =
-    previousRaw?.cache_write_input_tokens_reported === false &&
-    next.cache_write_input_tokens_reported !== false &&
-    !reset &&
-    next.input_tokens >= previousRaw.input_tokens &&
-    next.output_tokens >= previousRaw.output_tokens;
+  const refinesClassification = refinesCacheClassification(
+    previousRaw,
+    retainCacheBaseline(previousRaw, next),
+  );
   if (
-    !fillsCacheWrites &&
+    !refinesClassification &&
     next.input_tokens === (previousRaw?.input_tokens ?? 0) &&
     next.output_tokens === (previousRaw?.output_tokens ?? 0)
   ) {
@@ -1494,7 +1517,8 @@ function accumulateTokenUsage(
       accumulated ?? tokenUsage({ input_tokens: 0, output_tokens: 0 })!;
     return tokenUsage({
       ...usage,
-      ...(cacheWritesUnreported
+      ...(cacheWritesUnreported ||
+      accumulated?.cache_write_input_tokens_reported === false
         ? { cache_write_input_tokens_reported: false }
         : {}),
     });
@@ -1511,9 +1535,9 @@ function accumulateTokenUsage(
   const inputDelta = fieldDelta("input_tokens");
   const outputDelta = fieldDelta("output_tokens");
   const cacheWriteRaw = fieldDelta("cache_write_input_tokens");
-  // A late reported cache-write count can classify input already counted in
-  // this epoch. Keep the existing bounds across independent field resets.
-  const cacheWriteCapacity = fillsCacheWrites
+  // Late cache details can classify input already counted in this epoch.
+  // Keep the existing bounds across independent field resets.
+  const cacheWriteCapacity = refinesClassification
     ? BigInt(accumulated?.input_tokens ?? 0) +
       inputDelta -
       BigInt(accumulated?.cached_input_tokens ?? 0) -

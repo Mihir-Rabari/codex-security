@@ -6776,6 +6776,217 @@ test.each(
 
 test.each(
   [
+    {
+      name: "reads before zero writes",
+      samples: [[1_000_000], [1_000_000, 800_000], [1_000_000, 800_000, 0]],
+      input: 1_000_000,
+      reads: 800_000,
+      writes: 0,
+      usd: 1.12,
+    },
+    {
+      name: "reads before positive writes",
+      samples: [
+        [1_000_000],
+        [1_000_000, 800_000],
+        [1_000_000, 800_000, 100_000],
+      ],
+      input: 1_000_000,
+      reads: 800_000,
+      writes: 100_000,
+      usd: 1.22,
+    },
+    {
+      name: "growing reads before writes",
+      samples: [
+        [1_000_000],
+        [1_100_000, 800_000],
+        [1_100_000, 800_000, 100_000],
+      ],
+      input: 1_100_000,
+      reads: 800_000,
+      writes: 100_000,
+      usd: 1.62,
+    },
+    {
+      name: "zero writes before reads",
+      samples: [
+        [1_000_000, 0, 0],
+        [1_000_000, 800_000, 0],
+      ],
+      input: 1_000_000,
+      reads: 800_000,
+      writes: 0,
+      usd: 1.12,
+    },
+    {
+      name: "positive writes before reads",
+      samples: [
+        [1_000_000, 0, 100_000],
+        [1_000_000, 800_000, 100_000],
+      ],
+      input: 1_000_000,
+      reads: 800_000,
+      writes: 100_000,
+      usd: 1.22,
+    },
+    {
+      name: "unknown read decrease and recovery",
+      samples: [
+        [1_000_000, 800_000],
+        [1_000_000, 400_000],
+        [1_000_000, 600_000],
+      ],
+      input: 1_000_000,
+      reads: 800_000,
+      writes: 0,
+      usd: 1.12,
+      unknown: true,
+    },
+    {
+      name: "known read decrease and recovery",
+      samples: [
+        [1_000_000, 800_000, 0],
+        [1_000_000, 400_000, 0],
+        [1_000_000, 600_000, 0],
+      ],
+      input: 1_000_000,
+      reads: 400_000,
+      writes: 0,
+      usd: 2.56,
+      pythonReads: 800_000,
+    },
+    {
+      name: "unknown read decrease becomes reported",
+      samples: [
+        [1_000_000, 800_000],
+        [1_000_000, 400_000, 0],
+        [1_000_000, 600_000, 0],
+      ],
+      input: 1_000_000,
+      reads: 400_000,
+      writes: 0,
+      usd: 2.56,
+      pythonReads: 800_000,
+    },
+    {
+      name: "known epoch reset",
+      samples: [
+        [1_000_000, 800_000, 100_000],
+        [100_000, 20_000, 10_000],
+      ],
+      input: 1_100_000,
+      reads: 820_000,
+      writes: 110_000,
+      usd: 1.558,
+    },
+  ].flatMap((scenario) =>
+    ["cache_write_input_tokens", "cache_write_tokens"].flatMap((field) =>
+      ["batched", "incremental"].map((mode) => ({ ...scenario, field, mode })),
+    ),
+  ),
+)(
+  "accounts for separately reported cache categories: $name / $field / $mode",
+  async ({
+    samples,
+    input,
+    reads,
+    writes,
+    usd,
+    unknown,
+    pythonReads,
+    field,
+    mode,
+  }) => {
+    const home = await codexHome();
+    const timestamp = "2026-07-26T12:02:00.250Z";
+    const token = ([input, reads, writes]: number[]) => ({
+      ...accountingEvent({
+        input_tokens: input!,
+        output_tokens: 0,
+        total_tokens: input!,
+        ...(reads === undefined ? {} : { cached_input_tokens: reads }),
+        ...(writes === undefined ? {} : { [field]: writes }),
+      }),
+      timestamp,
+    });
+    const complete = { type: "event_msg", payload: { type: "task_complete" } };
+    const rootUsage = {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_write_input_tokens: 0,
+    };
+    const parent = await writeUsageSession(home, scanThreadId, rootUsage);
+    await appendFile(parent, jsonLines([complete]) + "\n");
+    const child = join(home, "sessions", "separate-cache-categories.jsonl");
+    await writeFile(
+      child,
+      jsonLines([
+        {
+          type: "session_meta",
+          payload: { id: childUuid7Thread, parent_thread_id: scanThreadId },
+        },
+        {
+          type: "event_msg",
+          timestamp,
+          payload: { type: "task_started", turn_id: higherUuid7Turn },
+        },
+        ...(mode === "batched" ? samples : samples.slice(0, 1)).map(token),
+        ...(mode === "batched" ? [complete] : []),
+      ]) + "\n",
+    );
+    const costs: number[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      maxCostUsd: 2,
+      onCost: (cost) => costs.push(cost.estimatedUsd),
+      resolveOwnedSessionPaths: async () =>
+        new Map([
+          [parent, scanThreadId],
+          [child, childUuid7Thread],
+        ]),
+    });
+    try {
+      tracker.start(scanThreadId);
+      if (mode === "incremental") {
+        await tracker.refresh();
+        for (const sample of samples.slice(1)) {
+          await appendFile(child, jsonLines([token(sample)]) + "\n");
+          await tracker.refresh();
+        }
+        await appendFile(child, jsonLines([complete]) + "\n");
+      }
+      const snapshot = await tracker.stop(rootUsage);
+      expect(snapshot.usage).toMatchObject({
+        input_tokens: input,
+        cached_input_tokens: reads,
+        cache_write_input_tokens: writes,
+        output_tokens: 0,
+      });
+      expect(snapshot.cost?.estimatedUsd).toBeCloseTo(usd, 12);
+      expect(snapshot.cost?.cacheWriteInputTokensReported).toBe(
+        unknown ? false : undefined,
+      );
+      expect(readPythonRolloutUsage(BUNDLED_PLUGIN_ROOT, child)).toMatchObject({
+        usage: {
+          inputTokens: input,
+          cachedInputTokens: pythonReads ?? reads,
+          cacheWriteInputTokens: writes,
+          outputTokens: 0,
+        },
+        warnings: [],
+      });
+      if (mode === "batched") expect(costs).toEqual([usd]);
+      else expect(costs.at(-1)).toBeCloseTo(usd, 12);
+    } finally {
+      await tracker.stop().catch(() => {});
+    }
+  },
+);
+
+test.each(
+  [
     { name: "cache reads", reads: 100, writes: 0, usd: 0.00044 },
     { name: "cache reads and writes", reads: 20, writes: 50, usd: 0.000778 },
   ].flatMap((variant) =>
