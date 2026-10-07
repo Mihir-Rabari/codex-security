@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, writeFile, mkdir, chmod } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, expect, mock, test } from "bun:test";
+import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import { LocalDeduplication } from "../src/deduplication/local.js";
 import {
   deduplicateScanDirectoryInternal,
@@ -91,6 +91,48 @@ function duplicateReviewer() {
     })),
   };
 }
+
+test.each([undefined, "", " \t", "synthetic-primary"])(
+  "local embeddings select the first nonblank API key (primary: %j)",
+  async (primary) => {
+    const f = await fixture();
+    const finding = f.document.findings[0]!;
+    const request = spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        model: EMBEDDING_MODEL,
+        data: [{ index: 0, embedding: vector }],
+      }),
+    );
+    try {
+      const local = new LocalDeduplication(
+        {
+          ...f.environment,
+          OPENAI_API_KEY: primary,
+          CODEX_API_KEY: "synthetic-secondary",
+        },
+        { repositoryId: f.targetId },
+        f.repository,
+        undefined,
+        async (_options, _args, input) =>
+          JSON.parse(input!).action === "prepare"
+            ? JSON.parse(
+                JSON.stringify({
+                  cacheKeys: { [finding.findingId]: "synthetic-cache-key" },
+                  findingsToEmbed: [finding],
+                }),
+              )
+            : {},
+      );
+      await local.prepare([finding], f.targetId);
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(request.mock.calls[0]![1]?.headers).toMatchObject({
+        Authorization: `Bearer ${primary?.trim() ? primary : "synthetic-secondary"}`,
+      });
+    } finally {
+      request.mockRestore();
+    }
+  },
+);
 
 async function fixture() {
   const value = await workflowFixture();

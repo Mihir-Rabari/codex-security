@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { environmentEntry } from "../auth.js";
 import type { Finding } from "../models.js";
 import type {
   FindingNeighborhood,
@@ -51,7 +52,10 @@ export class LocalDeduplication {
     this.embedder =
       embedder ??
       new OpenAiFindingEmbedder(
-        environment["OPENAI_API_KEY"] ?? environment["CODEX_API_KEY"],
+        [
+          environmentEntry(environment, "OPENAI_API_KEY"),
+          environmentEntry(environment, "CODEX_API_KEY"),
+        ].find((value) => value?.trim()),
         embeddingRequest,
         endpoint,
         signal,
