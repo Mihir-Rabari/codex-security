@@ -1860,6 +1860,22 @@ export async function main(
     }
     return incurError({ code, message: outcome.error, exitCode });
   };
+  const finishSavedScan: typeof finishScan = (
+    outcome,
+    format,
+    incurError,
+    code,
+  ) => {
+    if (
+      outcome.error === undefined &&
+      format === "toon" &&
+      !argv.some((argument) => OUTPUT_OPTION.test(argument))
+    ) {
+      exitCode = outcome.exitCode;
+      return;
+    }
+    return finishScan(outcome, format, incurError, code);
+  };
   const runImport = (options: ImportScanOptions) =>
     runScanImport(options, errorOutput, dependencies);
   const history = async (
@@ -2248,6 +2264,13 @@ export async function main(
       }),
       output: scanOutputSchema("SCAN_FAILED", "SCAN_RESUME_UNAVAILABLE"),
       async run({ args, error: incurError, format, options }) {
+        if (format === "md") {
+          errorOutput.write(
+            "codex-security: Markdown output is not supported for scan results.\n",
+          );
+          exitCode = 2;
+          return;
+        }
         let scanArguments: ScanArguments;
         try {
           const saved = await dependencies.runWorkbench([
@@ -2287,15 +2310,20 @@ export async function main(
         } catch (error) {
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${message}\n`);
-          return finishScan(
+          return finishSavedScan(
             { exitCode: 2, error: message },
             format,
             incurError,
             "SCAN_RESUME_UNAVAILABLE",
           );
         }
-        const outcome = await runScan(scanArguments, errorOutput, dependencies);
-        return finishScan(outcome, format, incurError);
+        const outcome = await runScan(
+          scanArguments,
+          errorOutput,
+          dependencies,
+          format !== "json" && format !== "jsonl",
+        );
+        return finishSavedScan(outcome, format, incurError);
       },
     })
     .command("rerun", {
@@ -2345,7 +2373,7 @@ export async function main(
         } catch (error) {
           const message = errorMessage(error);
           if (exitCode === 0) errorOutput.write(`codex-security: ${message}\n`);
-          return finishScan(
+          return finishSavedScan(
             { exitCode: 2, error: message },
             format,
             incurError,
@@ -2395,7 +2423,7 @@ export async function main(
               format: importFormat,
               parentScanId,
             });
-            return finishScan(
+            return finishSavedScan(
               outcome,
               format,
               incurError,
@@ -2428,7 +2456,7 @@ export async function main(
         } catch (error) {
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${message}\n`);
-          return finishScan(
+          return finishSavedScan(
             { exitCode: 2, error: message },
             format,
             incurError,
@@ -2441,7 +2469,7 @@ export async function main(
           dependencies,
           format !== "json" && format !== "jsonl",
         );
-        return finishScan(outcome, format, incurError);
+        return finishSavedScan(outcome, format, incurError);
       },
     })
     .command("match", {
