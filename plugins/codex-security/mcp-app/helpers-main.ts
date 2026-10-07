@@ -1,5 +1,8 @@
 import { closeSync, readFileSync, existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
+import { escapeControls } from "./src/helpers/json";
+import { decodeUtf8 } from "./src/helpers/utf8";
 export { parseCanonicalScanDraft } from "./src/artifact-scan-draft.js";
 export { resumeSelectedDeepScan } from "./src/deep-scan/finalization.js";
 import { resolveSecurityMdCommand } from "./src/helpers/resolve-security-md";
@@ -74,9 +77,41 @@ function runHelper(): void {
     process.exitCode = rankPoolCommand(command, args, posixHome);
   } else if (command === "bind-repo-scopes") {
     process.exitCode = bindRepoScopesCommand(args, posixHome);
+  } else if (command === "database-info") {
+    void (async () => {
+      const { values } = parseArgs({
+        args,
+        options: { help: { type: "boolean", short: "h" } },
+      });
+      if (values.help) {
+        console.log(
+          "Usage: database-info (reads a JSON absolute state-directory string from stdin)",
+        );
+        return;
+      }
+      const { databaseInfo } = await import("./src/workbench/database");
+      console.log(
+        JSON.stringify(
+          await databaseInfo(JSON.parse(decodeUtf8(readFileSync(0)))),
+        ).replace(/[\p{Cc}\p{Cf}]/gu, (character) =>
+          character
+            .split("")
+            .map(
+              (unit) =>
+                `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`,
+            )
+            .join(""),
+        ),
+      );
+    })().catch((error: unknown) => {
+      console.error(
+        escapeControls(error instanceof Error ? error.message : String(error)),
+      );
+      process.exitCode = 1;
+    });
   } else {
     console.error(
-      "Usage: launch_codex_security_mcp[.cmd] --helper <resolve-security-md | normalize-candidates | validate-patch-risk-assessment | copy-deep-review-input | select-deep-review-input | make-rank-shards | validate-rank-shard | merge-rank-outputs | make-rank-pool-plan | validate-rank-worker | validate-rank-pool | bind-repo-scopes> [options]",
+      "Usage: launch_codex_security_mcp[.cmd] --helper <resolve-security-md | normalize-candidates | validate-patch-risk-assessment | copy-deep-review-input | select-deep-review-input | make-rank-shards | validate-rank-shard | merge-rank-outputs | make-rank-pool-plan | validate-rank-worker | validate-rank-pool | bind-repo-scopes | database-info> [options]",
     );
     process.exitCode = 2;
   }
