@@ -1593,7 +1593,7 @@ describe("multiscan", () => {
   });
 
   test("rejects another supervisor and recovers a crashed owner's checkout", async () => {
-    const { paths } = await repositoryFixture("exclusive");
+    const { paths, source } = await repositoryFixture("exclusive");
     const running = Promise.withResolvers<void>();
     const finish = Promise.withResolvers<void>();
     const security = client(async (_repository, scanOptions = {}) => {
@@ -1633,13 +1633,23 @@ describe("multiscan", () => {
       JSON.stringify({ pid: 999_999_999 }),
     );
     const checkout = join(paths.output, "checkouts", "exclusive");
-    await mkdir(checkout);
+    git(paths.root, "clone", "--quiet", source.path, checkout);
+    const marker = join(checkout, "retained.txt");
+    await writeFile(marker, "Preserved crashed-owner checkout data.\n");
+    const identity = await lstat(checkout);
 
     const recovered = await runMultiscan(options(paths, security));
     expect(recovered).toMatchObject({ completed: 1, failed: 0, skipped: 1 });
     expect(await results(recovered.resultsPath)).toEqual([receipt!]);
     await access(join(receipt!["outputDir"] as string, "report.md"));
-    expect(await readdir(join(paths.output, "checkouts"))).toEqual([]);
+    expect(await readdir(join(paths.output, "checkouts"))).toEqual([
+      "exclusive",
+    ]);
+    const retained = await lstat(checkout);
+    expect([retained.dev, retained.ino]).toEqual([identity.dev, identity.ino]);
+    expect(await readFile(marker, "utf8")).toBe(
+      "Preserved crashed-owner checkout data.\n",
+    );
     await expect(access(lock)).rejects.toThrow();
   });
 
