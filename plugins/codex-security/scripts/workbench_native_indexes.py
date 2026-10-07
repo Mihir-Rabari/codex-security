@@ -91,11 +91,29 @@ def list_global_findings(
     }
 
 
+def _legacy_generations(
+    connection: sqlite3.Connection, identities: RepositoryIdentityCache
+) -> dict[str, str]:
+    return (
+        {
+            row["target_id"]: row["generation"]
+            for row in connection.execute(
+                "SELECT target_id, MIN(repository_generation) AS generation FROM scans "
+                "WHERE repository_generation IS NOT NULL GROUP BY target_id "
+                "HAVING COUNT(DISTINCT repository_generation) = 1"
+            )
+        }
+        if identities.supports_generation
+        else {}
+    )
+
+
 def _indexed_findings(
     connection: sqlite3.Connection,
     *,
     identities: RepositoryIdentityCache | None = None,
     scan_scope: RepositoryScanScope | None = None,
+    legacy_generations: dict[str, str] | None = None,
 ) -> Iterator[dict[str, Any]]:
     identities = identities or RepositoryIdentityCache(connection)
 
@@ -109,18 +127,8 @@ def _indexed_findings(
     def generation_sql(alias: str) -> str:
         return f"{alias}.repository_generation" if identities.supports_generation else "NULL"
 
-    legacy_generations = (
-        {
-            row["target_id"]: row["generation"]
-            for row in connection.execute(
-                "SELECT target_id, MIN(repository_generation) AS generation FROM scans "
-                "WHERE repository_generation IS NOT NULL GROUP BY target_id "
-                "HAVING COUNT(DISTINCT repository_generation) = 1"
-            )
-        }
-        if identities.supports_generation
-        else {}
-    )
+    if legacy_generations is None:
+        legacy_generations = _legacy_generations(connection, identities)
 
     def repository_group(scan: sqlite3.Row | dict) -> tuple[str, str]:
         identity = scan_repository_group(scan)
@@ -160,6 +168,10 @@ def _indexed_findings(
         """,
         (*before_values, *after_values),
     ):
+        if match["before_target_id"] != match["after_target_id"] and (
+            match["before_generation"] is None or match["after_generation"] is None
+        ):
+            continue
         before_repository = repository_group(
             {
                 "target_id": match["before_target_id"],
@@ -358,13 +370,19 @@ def list_repositories(
         )
     ]
     scopes = {target_id: identities.scope(target_id) for target_id, _, _ in selected_targets}
+    legacy_generations = _legacy_generations(connection, identities)
 
     def open_findings_count(scope: RepositoryScanScope) -> int:
         if not scope.available:
             return 0
         return sum(
             row["status"] == "open"
-            for row in _indexed_findings(connection, identities=identities, scan_scope=scope)
+            for row in _indexed_findings(
+                connection,
+                identities=identities,
+                scan_scope=scope,
+                legacy_generations=legacy_generations,
+            )
         )
 
     repositories = [

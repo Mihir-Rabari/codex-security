@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
 from workbench_test_support import (
     create_saved_workspace,
+    initialize_git_repository,
     run_workbench,
     stable_target_id,
     start_delivered_scan,
@@ -355,3 +357,64 @@ def test_native_completion_keeps_same_target_legacy_triage_without_matching(
     assert current["occurrenceCount"] == (2 if same_target else 1)
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM scan_comparison_matches").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("saved_comparison", [False, True])
+def test_legacy_linked_comparison_keeps_unbound_triage_target_local(
+    tmp_path: Path, saved_comparison: bool
+) -> None:
+    from test_workbench_scan_history import confirmed_match, create_cli_scan, save_scan_matches
+
+    state = tmp_path / "state"
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    linked = tmp_path / "linked"
+    subprocess.run(
+        ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(linked)],
+        check=True,
+    )
+    first = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
+    later = create_cli_scan(state, tmp_path / "results", linked, target_revision=revision)
+    first_finding = run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"][
+        "findings"
+    ][0]
+    later_finding = run_workbench(state, "get-scan", "--scan-id", later["scanId"])["scan"][
+        "findings"
+    ][0]
+    assert first_finding["findingId"] != later_finding["findingId"]
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET repository_generation=NULL WHERE id IN (?,?)",
+            (first["scanId"], later["scanId"]),
+        )
+    run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        first_finding["occurrenceId"],
+        "--status",
+        "closed",
+        "--close-reason",
+        "false_positive",
+        "--note",
+        "Synthetic checked guard.",
+    )
+    if saved_comparison:
+        match = save_scan_matches(
+            state,
+            first,
+            later,
+            confirmed_match(first_finding["occurrenceId"], later_finding["occurrenceId"]),
+        )
+        assert match["comparable"] is True
+    create_cli_scan(
+        state, tmp_path / "results", repository, target_revision=revision, finding=False
+    )
+    create_cli_scan(state, tmp_path / "results", linked, target_revision=revision, finding=False)
+    global_findings = run_workbench(state, "list-global-findings")["findings"]
+    scoped_findings = run_workbench(state, "list-global-findings", "--repository", str(linked))[
+        "findings"
+    ]
+    for findings in (global_findings, scoped_findings):
+        finding = next(row for row in findings if row["findingId"] == later_finding["findingId"])
+        assert finding["status"] == "open"
