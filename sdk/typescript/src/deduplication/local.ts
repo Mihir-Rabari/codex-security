@@ -21,11 +21,8 @@ import {
 } from "../server/embeddings.js";
 import { retryDelay, waitForRetry } from "./retry.js";
 
-interface Entry {
-  finding: Finding;
-  cacheKey: string;
-  needsEmbedding: boolean;
-}
+// Checkpoint bounded batches so a retry keeps completed work without one process per finding.
+const EMBEDDING_BATCH_SIZE = 64;
 
 /** Direct workbench adapter. Importing it starts no HTTP or MCP server. */
 export class LocalDeduplication {
@@ -75,29 +72,31 @@ export class LocalDeduplication {
       anchorRepositoryId: repositoryId,
       repositoryPath: this.repositoryPath,
     });
-    const entries = result["entries"] as unknown as Entry[];
-    this.cacheKeys = Object.fromEntries(
-      entries.map(({ finding, cacheKey }) => [finding.findingId, cacheKey]),
-    );
-    // Commit each completed finding so interrupted preparation can reuse its vectors.
-    for (const entry of entries) {
+    this.cacheKeys = result["cacheKeys"] as Record<string, string>;
+    const findingsToEmbed = result["findingsToEmbed"] as unknown as Finding[];
+    for (
+      let offset = 0;
+      offset < findingsToEmbed.length;
+      offset += EMBEDDING_BATCH_SIZE
+    ) {
       this.signal?.throwIfAborted();
-      if (!entry.needsEmbedding) continue;
-      const embeddings = await this.embedder.embed([entry.finding]);
+      const batch = findingsToEmbed.slice(
+        offset,
+        offset + EMBEDDING_BATCH_SIZE,
+      );
+      const embeddings = await this.embedder.embed(batch);
       this.signal?.throwIfAborted();
-      if (embeddings.length !== 1)
+      if (embeddings.length !== batch.length)
         throw new CodexSecurityError(
           "Embedding provider returned an invalid number of vectors.",
         );
       await this.command({
         action: "embed",
-        entries: [
-          {
-            findingId: entry.finding.findingId,
-            cacheKey: entry.cacheKey,
-            embedding: embeddings[0],
-          },
-        ],
+        entries: batch.map((finding, index) => ({
+          findingId: finding.findingId,
+          cacheKey: this.cacheKeys[finding.findingId],
+          embedding: embeddings[index],
+        })),
       });
     }
   }

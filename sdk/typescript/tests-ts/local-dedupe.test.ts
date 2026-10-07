@@ -27,6 +27,27 @@ const temporaryDirectories = createTemporaryDirectories();
 afterEach(temporaryDirectories.cleanup);
 const vector = [1, ...Array<number>(EMBEDDING_DIMENSIONS - 1).fill(0)];
 
+function duplicateReviewer() {
+  return {
+    screen: mock(async (findings: readonly Finding[]) => ({
+      decisions: Object.fromEntries(
+        findings
+          .slice(1)
+          .map((_, index) => [
+            screeningPairSlot(index),
+            { decision: "SAME" as const, rationale: "Same control" },
+          ]),
+      ),
+    })),
+    reviewPair: mock(async (findings: readonly Finding[]) => ({
+      decision: "SAME" as const,
+      rationale: "Same control",
+      canonicalFindingId: findings[0]!.findingId,
+      mergedFinding: findings[0]!,
+    })),
+  };
+}
+
 async function fixture() {
   const value = await workflowFixture();
   temporaryDirectories.track(value.root);
@@ -59,12 +80,13 @@ async function fixture() {
   const local = (
     embedder: FindingEmbedder = { embed },
     allRepositories = false,
+    signal?: AbortSignal,
   ) =>
     new LocalDeduplication(
       value.environment,
       allRepositories ? { allRepositories: true } : { repositoryId: targetId },
       value.repository,
-      undefined,
+      signal,
       undefined,
       embedder,
     );
@@ -137,28 +159,7 @@ test("saved-scan local review persists a group with an existing repository findi
       environment: f.environment,
       embedder: { embed: f.embed },
       fetch: rejecting("Unexpected HTTP call"),
-      reviewer: {
-        async screen(findings) {
-          return {
-            decisions: Object.fromEntries(
-              findings
-                .slice(1)
-                .map((_, index) => [
-                  screeningPairSlot(index),
-                  { decision: "SAME", rationale: "Same control" },
-                ]),
-            ),
-          };
-        },
-        async reviewPair(findings) {
-          return {
-            decision: "SAME",
-            rationale: "Same control",
-            canonicalFindingId: findings[0]!.findingId,
-            mergedFinding: findings[0]!,
-          };
-        },
-      },
+      reviewer: duplicateReviewer(),
     },
   );
   expect(result.duplicateGroups).toHaveLength(1);
@@ -166,7 +167,8 @@ test("saved-scan local review persists a group with an existing repository findi
     new Set([anchor.findingId, neighbor.findingId]),
   );
   expect(await f.store.listDedupeGroups(anchor.findingId)).toHaveLength(1);
-  expect(f.embed).toHaveBeenCalledTimes(2);
+  expect(f.embed).toHaveBeenCalledTimes(1);
+  expect(f.embed.mock.calls[0]![0]).toHaveLength(2);
 });
 
 test("scope preparation refreshes legacy embeddings, preserves current bodies, and protects concurrent writes", async () => {
@@ -218,7 +220,7 @@ test("scope preparation refreshes legacy embeddings, preserves current bodies, a
   await expect(local.storeDedupeGroups([])).rejects.toThrow("Findings changed");
 });
 
-test("embedding writes reject stale content and resume completed preparation after failure", async () => {
+test("embedding writes reject stale content and reuse certified vectors", async () => {
   const f = await fixture();
   const finding = f.document.findings[0]!;
   const racing = f.local({
@@ -260,8 +262,78 @@ test("embedding writes reject stale content and resume completed preparation aft
   ).rejects.toThrow("Missing embedding credentials");
 });
 
+test.each(["failure", "cancellation"] as const)(
+  "preparation checkpoints batches and reuses them after a later %s",
+  async (failure) => {
+    const f = await fixture();
+    const findings = Array.from({ length: 65 }, (_, index) => ({
+      ...f.document.findings[0]!,
+      findingId: `csf_batch_${index}`,
+      fingerprints: {
+        ...f.document.findings[0]!.fingerprints,
+        primary: `batch-${index}`,
+      },
+      identity: { anchor: `batch-${index}` },
+    }));
+    const controller = new AbortController();
+    const reason = new Error(`Later batch ${failure}`);
+    const batches: Finding[][] = [];
+    const interrupted = f.local(
+      {
+        async embed(batch) {
+          batches.push([...batch]);
+          if (batches.length === 2) {
+            if (failure === "failure") throw reason;
+            controller.abort(reason);
+          }
+          return await f.embed(batch);
+        },
+      },
+      false,
+      controller.signal,
+    );
+    await expect(interrupted.prepare(findings, f.targetId)).rejects.toBe(
+      reason,
+    );
+    expect(batches).toHaveLength(2);
+    expect(batches[0]!.length).toBeGreaterThan(1);
+    const completed = new Set(batches[0]!.map((finding) => finding.findingId));
+    const resumedEmbed = mock(async (batch: readonly Finding[]) =>
+      f.embed(batch),
+    );
+    await f.local({ embed: resumedEmbed }).prepare(findings, f.targetId);
+    expect(
+      new Set(
+        resumedEmbed.mock.calls.flatMap(([batch]) =>
+          batch.map((finding) => finding.findingId),
+        ),
+      ),
+    ).toEqual(
+      new Set(
+        findings
+          .filter((finding) => !completed.has(finding.findingId))
+          .map((finding) => finding.findingId),
+      ),
+    );
+    await f
+      .local({ embed: rejecting("Completed preparation must be cached") })
+      .prepare(findings, f.targetId);
+  },
+);
+
 test("local workflow replays a lost group acknowledgement without publication or more embeddings", async () => {
   const f = await fixture();
+  const anchor = f.document.findings[0]!;
+  const neighbor = {
+    ...anchor,
+    findingId: "csf_neighbor",
+    fingerprints: { ...anchor.fingerprints, primary: "neighbor" },
+  };
+  await f.store.insert(
+    [{ finding: neighbor, embedding: { model: EMBEDDING_MODEL, vector } }],
+    f.targetId,
+  );
+  const reviewer = duplicateReviewer();
   let loseAcknowledgement = true;
   const workbench = async (args: readonly string[], input?: string) => {
     const result = await runWorkbench(f.options, args, input);
@@ -280,18 +352,33 @@ test("local workflow replays a lost group acknowledgement without publication or
     environment: f.environment,
     runWorkbench: workbench,
     embedder: { embed: f.embed },
-    reviewer: emptyNeighborhoodReviewer(),
+    reviewer,
     fetch: rejecting("Unexpected publication"),
   };
   await expect(
     deduplicateScanDirectoryInternal(f.scanDir, options, dependencies),
   ).rejects.toThrow("Lost group acknowledgement");
+  const stored = await f.store.listDedupeGroups(anchor.findingId);
+  expect(stored).toHaveLength(1);
+  expect(new Set(stored[0]!.findingIds)).toEqual(
+    new Set([anchor.findingId, neighbor.findingId]),
+  );
+  expect(reviewer.screen).toHaveBeenCalledTimes(1);
+  expect(reviewer.reviewPair).toHaveBeenCalledTimes(1);
   const result = await deduplicateScanDirectoryInternal(
     f.scanDir,
     options,
     dependencies,
   );
   expect(result.deduplicationStatus).toBe("completed");
+  expect(result.duplicateGroups).toHaveLength(1);
+  expect(new Set(result.duplicateGroups[0])).toEqual(
+    new Set([anchor.findingId, neighbor.findingId]),
+  );
+  expect(await f.store.listDedupeGroups(anchor.findingId)).toEqual(stored);
+  expect(await f.store.listDedupeGroups(neighbor.findingId)).toEqual(stored);
+  expect(reviewer.screen).toHaveBeenCalledTimes(1);
+  expect(reviewer.reviewPair).toHaveBeenCalledTimes(1);
   expect(f.embed).toHaveBeenCalledTimes(1);
   const workflow = await new FindingWorkflow(
     options.workflowId,

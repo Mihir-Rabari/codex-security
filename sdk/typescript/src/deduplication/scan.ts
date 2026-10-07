@@ -169,19 +169,11 @@ async function deduplicateResolvedScan(
     options.allRepositories === true
       ? { allRepositories: true }
       : { repositoryId: contract.manifest.scan.target.targetId };
-  const workbench =
-    dependencies.runWorkbench === undefined
-      ? undefined
-      : (
-          workbenchOptions: Parameters<typeof runWorkbench>[0],
-          args: readonly string[],
-          input?: string,
-        ) =>
-          dependencies.runWorkbench!(
-            args,
-            input,
-            workbenchOptions.signal ?? options.signal,
-          );
+  const injectedWorkbench = dependencies.runWorkbench;
+  const workbench: typeof runWorkbench | undefined =
+    injectedWorkbench &&
+    (({ signal }, args, input) =>
+      injectedWorkbench(args, input, signal ?? options.signal));
   const local =
     options.findingsUrl === undefined
       ? new LocalDeduplication(
@@ -281,9 +273,7 @@ async function deduplicateResolvedScan(
     const deduplicator = new FindingDeduplicator(
       {
         potentialDuplicates: (findingId) =>
-          local
-            ? local.potentialDuplicates(findingId)
-            : (client as FindingsClient).potentialDuplicates(findingId, scope),
+          client.potentialDuplicates(findingId, scope),
       },
       dependencies.reviewer ??
         new CodexDeduplicationReviewer(checkpoints ?? runner),

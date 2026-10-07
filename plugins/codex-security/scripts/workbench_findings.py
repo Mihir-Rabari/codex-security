@@ -235,15 +235,15 @@ def normalized_vector(vector: list[float]) -> list[float]:
 
 
 def embeddings_match(connection: sqlite3.Connection, expected: dict[str, str]) -> bool:
-    return all(
-        (
-            row := connection.execute(
-                "SELECT cache_key FROM finding_embeddings WHERE finding_id = ?", (finding_id,)
-            ).fetchone()
-        )
-        is not None
-        and row["cache_key"] == cache_key
-        for finding_id, cache_key in expected.items()
+    return (
+        connection.execute(
+            """SELECT 1 FROM json_each(?) AS expected
+        LEFT JOIN finding_embeddings AS embeddings ON embeddings.finding_id = expected.key
+        WHERE embeddings.finding_id IS NULL OR embeddings.cache_key IS NOT expected.value
+        LIMIT 1""",
+            (json.dumps(expected),),
+        ).fetchone()
+        is None
     )
 
 
