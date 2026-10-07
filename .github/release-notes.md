@@ -61,6 +61,10 @@
 - preserve per-scan runtime and worker settings ([#1281](https://github.com/openai/codex-security/pull/1281))
 - unify structured scan failure responses ([#1080](https://github.com/openai/codex-security/pull/1080))
 - support custom scan names ([#1180](https://github.com/openai/codex-security/pull/1180))
+- simplify artifact schemas and saved-finding handling ([#1356](https://github.com/openai/codex-security/pull/1356))
+- share finding formatting and finalization helpers ([#1355](https://github.com/openai/codex-security/pull/1355))
+- simplify scan event callback dispatch ([#1354](https://github.com/openai/codex-security/pull/1354))
+- reuse validated inputs and simplify preview sizing ([#1369](https://github.com/openai/codex-security/pull/1369))
 
 <!-- release-section: highlights:end -->
 
