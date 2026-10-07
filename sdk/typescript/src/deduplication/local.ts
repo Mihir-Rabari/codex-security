@@ -119,6 +119,7 @@ export class LocalDeduplication {
       const environment = workbenchEnvironment(this.environment);
       const [python, pluginRoot] = await resolveWorkbenchRuntime({
         environment,
+        protectedRoot: this.repositoryPath,
       });
       return {
         python,
