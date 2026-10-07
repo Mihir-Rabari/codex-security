@@ -129,7 +129,7 @@ describe("live scan dashboard", () => {
       (cluster) => [true, false].map((code) => [cluster, code] as const),
     ),
   )(
-    "keeps %s intact at ASCII wrapping boundaries with code=%s",
+    "keeps %s intact at ASCII wrapping boundaries with code=%p",
     (cluster, code) => {
       for (let padding = 0; padding < 40; padding++) {
         const stderr = capture(true);
