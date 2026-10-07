@@ -294,7 +294,7 @@ export class ScanCostTracker {
     }
     const snapshot =
       this.#snapshot.usage !== null &&
-      !completesCacheClassification(
+      !refinesCacheClassification(
         tokenUsage(this.#snapshot.usage),
         tokenUsage(completedUsage),
       ) &&
@@ -704,9 +704,9 @@ export class ScanCostTracker {
       const cost = estimateScanCost(this.#options.model, usage);
       if (
         this.#snapshot.cost === null ||
-        completesCacheClassification(tokenUsage(this.#snapshot.usage), usage) ||
+        refinesCacheClassification(tokenUsage(this.#snapshot.usage), usage) ||
         (cost !== null &&
-          !completesCacheClassification(
+          !refinesCacheClassification(
             usage,
             tokenUsage(this.#snapshot.usage),
           ) &&
@@ -1250,8 +1250,8 @@ function readSessionEvent(
     const previous = session.accounting;
     if (
       previous === null ||
-      completesCacheClassification(previous.usage, candidate.usage) ||
-      (!completesCacheClassification(candidate.usage, previous.usage) &&
+      refinesCacheClassification(previous.usage, candidate.usage) ||
+      (!refinesCacheClassification(candidate.usage, previous.usage) &&
         (candidate.cost !== null
           ? previous.cost === null ||
             candidate.cost.estimatedUsd >= previous.cost.estimatedUsd
@@ -1389,18 +1389,20 @@ function sessionContentText(
     .join("\n");
 }
 
-function completesCacheClassification(
+function refinesCacheClassification(
   previous: ScanTokenUsage | null,
   next: ScanTokenUsage | null,
 ): boolean {
   return (
     previous?.cache_write_input_tokens_reported === false &&
     next !== null &&
-    next.cache_write_input_tokens_reported !== false &&
     previous.input_tokens <= next.input_tokens &&
     previous.output_tokens <= next.output_tokens &&
     next.cached_input_tokens >= previous.cached_input_tokens &&
-    next.cache_write_input_tokens >= previous.cache_write_input_tokens
+    next.cache_write_input_tokens >= previous.cache_write_input_tokens &&
+    (next.cache_write_input_tokens_reported !== false ||
+      next.cached_input_tokens > previous.cached_input_tokens ||
+      next.cache_write_input_tokens > previous.cache_write_input_tokens)
   );
 }
 
@@ -1432,10 +1434,10 @@ function higherCostUsage(
   // A receipt's synthesized zero does not establish complete cache writes.
   if (
     (!nextIsSdkReceipt || next.cache_write_input_tokens > 0) &&
-    completesCacheClassification(previous, next)
+    refinesCacheClassification(previous, next)
   )
     return next;
-  if (completesCacheClassification(next, previous)) return previous;
+  if (refinesCacheClassification(next, previous)) return previous;
   return previousCost !== null &&
     nextCost !== null &&
     previousCost.estimatedUsd > nextCost.estimatedUsd

@@ -6774,6 +6774,90 @@ test.each(
   },
 );
 
+test.each(
+  [
+    { name: "cache reads", reads: 100, writes: 0, usd: 0.00044 },
+    { name: "cache reads and writes", reads: 20, writes: 50, usd: 0.000778 },
+  ].flatMap((variant) =>
+    ["root-first", "worker-first"].flatMap((order) =>
+      ["batched", "incremental"].map((mode) => ({ ...variant, order, mode })),
+    ),
+  ),
+)(
+  "retains worker cache corrections while root writes remain unknown: $name / $order / $mode",
+  async ({ reads, writes, usd, order, mode }) => {
+    const home = await codexHome();
+    const rootId = order === "root-first" ? "a-root" : "z-root";
+    const workerId = order === "root-first" ? "z-worker" : "a-worker";
+    const unknown = { input_tokens: 100, output_tokens: 0, total_tokens: 100 };
+    const root = await writeSession(
+      home,
+      rootId,
+      unknown,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    const worker = await writeSession(home, workerId, unknown, rootId);
+    const classified = {
+      ...unknown,
+      cached_input_tokens: reads,
+      cache_write_input_tokens: writes,
+    };
+    const suffix =
+      jsonLines([
+        accountingEvent(classified),
+        { type: "event_msg", payload: { type: "task_complete" } },
+      ]) + "\n";
+    const costs: number[] = [];
+    const limit = 0.00079;
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      maxCostUsd: limit,
+      onCost: (cost) => costs.push(cost.estimatedUsd),
+      resolveOwnedSessionPaths: async () =>
+        new Map([
+          [root, rootId],
+          [worker, workerId],
+        ]),
+    });
+    try {
+      if (mode === "batched") await appendFile(worker, suffix);
+      tracker.start(rootId);
+      if (mode === "incremental") {
+        expect((await tracker.refresh()).cost?.estimatedUsd).toBeCloseTo(
+          0.0008,
+          12,
+        );
+        await appendFile(worker, suffix);
+      }
+      const live = await tracker.refresh();
+      const final = await tracker.stop(unknown);
+      for (const snapshot of [live, final]) {
+        expect(snapshot.usage).toMatchObject({
+          input_tokens: 200,
+          output_tokens: 0,
+          cached_input_tokens: reads,
+          cache_write_input_tokens: writes,
+          cache_write_input_tokens_reported: false,
+        });
+        expect(snapshot.cost?.estimatedUsd).toBeCloseTo(usd, 12);
+      }
+      expect(costs.at(-1)).toBeCloseTo(usd, 12);
+      if (mode === "incremental") {
+        expect(costs[0]).toBeCloseTo(0.0008, 12);
+        expect(costs.some((cost) => cost > limit)).toBe(true);
+      } else {
+        expect(costs.every((cost) => cost <= limit)).toBe(true);
+      }
+    } finally {
+      await tracker.stop().catch(() => {});
+    }
+  },
+);
+
 test.each([
   ["complete-first", 0, 0],
   ["complete-last", 0, 0],
