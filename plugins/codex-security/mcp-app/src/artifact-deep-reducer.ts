@@ -145,6 +145,11 @@ export async function readDeepReductionSources(
                       attempt: Number(number),
                       coverage: {
                         ...input.coverage,
+                        deferred: [
+                          ...(input.coverage.deferred as JsonObject[]),
+                          ...(originalArchivedCoverage[index]
+                            .deferred as JsonObject[]),
+                        ],
                         surfaces: [
                           ...(input.coverage.surfaces as JsonObject[]),
                           ...(originalArchivedCoverage[index]

@@ -2048,6 +2048,8 @@ def merge_saved_results(
                 removed_parent = [row for row in previous if id(row) in replaced]
                 coverage[field] = [row for row in coverage[field] if row not in removed_parent]
 
+    unreviewed_surfaces: dict[str, list[dict[str, Any]]] = {}
+
     def append_coverage_record(
         field: str,
         item: Any,
@@ -2070,6 +2072,10 @@ def merge_saved_results(
         ):
             item = project_missing_record(field, item, index, worker, source, relative)
         elif field == "surfaces" and worker is not None and isinstance(item, dict):
+            saved = unreviewed_surfaces.setdefault(worker["id"], [])
+            if item in saved:
+                return
+            saved.append(item)
             item = copy.deepcopy(item)
             item["receiptRefs"] = coverage_receipts(item, worker, relative)
         if isinstance(item, dict) and "id" not in item:

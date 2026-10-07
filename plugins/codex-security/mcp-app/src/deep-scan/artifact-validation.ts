@@ -333,7 +333,10 @@ export function projectDiscoveryCoverage(
     const original = history.find((historical) =>
       ((historical.coverage[field] as unknown[] | undefined) ?? []).some(
         (saved) =>
-          (field === "surfaces" ? [item, source] : [item]).some((current) => {
+          (["surfaces", "deferred"].includes(field)
+            ? [item, source]
+            : [item]
+          ).some((current) => {
             const original =
               typeof saved === "string"
                 ? { question: saved }
@@ -342,11 +345,14 @@ export function projectDiscoveryCoverage(
             if (field === "surfaces" && isRecord(original)) {
               original.receiptRefs ??= [];
               normalized.receiptRefs ??= [];
-              const prefix = `${archivePrefix}attempt-${String(historical.attempt).padStart(2, "0")}/`;
               for (const row of [original, normalized])
-                row.receiptRefs = (row.receiptRefs as string[]).map((ref) =>
-                  ref.startsWith(prefix) ? ref.slice(prefix.length) : ref,
-                );
+                row.receiptRefs = (row.receiptRefs as string[]).map((ref) => {
+                  if (!ref.startsWith(archivePrefix)) return ref;
+                  const saved = ref.slice(archivePrefix.length);
+                  return /^attempt-[0-9]+\//u.test(saved)
+                    ? saved.slice(saved.indexOf("/") + 1)
+                    : ref;
+                });
             }
             return isDeepStrictEqual(original, normalized);
           }),

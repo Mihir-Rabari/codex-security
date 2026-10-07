@@ -1373,3 +1373,80 @@ def test_retained_source_finding_owner_does_not_close_another_worker_gap(
     assert any(row.get("reason") == pending["reason"] for row in coverage["deferred"])
     assert recovered["findingCount"] == 1
     assert all(path.read_bytes() == data for path, data in originals.items())
+
+
+@pytest.mark.parametrize("independent_worker", [False, True])
+@pytest.mark.parametrize("changed", [False, True])
+def test_stopped_retry_copies_keep_one_observation_per_worker(
+    workbench_api, workbench_db, publication_scan, independent_worker, changed
+):
+    import shutil
+
+    scan = publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    output = scan.scan_dir / "artifacts" / "deep_discovery" / "workers" / worker_id / "output"
+    output.mkdir(parents=True)
+    result = output / "result.json"
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET status = 'running', attempt = 2, artifact_dir = ?, result_manifest_path = ? WHERE id = ?",
+            (str(output), str(result), worker_id),
+        )
+    receipt = output / "artifacts" / "review.txt"
+    receipt.parent.mkdir()
+    receipt.write_text("Synthetic retained receipt.\n")
+    surface = {
+        "id": "original-review",
+        "label": "Original review",
+        "disposition": "needs_follow_up",
+        "receiptRefs": ["artifacts/review.txt"],
+    }
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": False,
+        "findings": [],
+        "coverage": {
+            "completeness": "partial",
+            "surfaces": [surface],
+            "explicitExclusions": [],
+            "deferred": [],
+        },
+    }
+    saved = write_checkpoint(output / "checkpoints", draft)
+    (output / "checkpoint-head.json").write_text(json.dumps({"checkpoint": saved.name}))
+    archive = output.parent / "attempts" / "attempt-01"
+    shutil.copytree(output, archive)
+    if changed:
+        newer = copy.deepcopy(draft)
+        newer["coverage"]["surfaces"][0]["notes"] = "New independent review notes."
+        selected = write_checkpoint(output / "checkpoints", newer)
+        (output / "checkpoint-head.json").write_text(json.dumps({"checkpoint": selected.name}))
+    if independent_worker:
+        second = add_worker(workbench_db, scan)
+        second.write_text(json.dumps(draft))
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET status = 'running' WHERE result_manifest_path = ?",
+                (str(second),),
+            )
+        other_receipt = second.parent / "artifacts" / "review.txt"
+        other_receipt.parent.mkdir()
+        other_receipt.write_text("Synthetic retained receipt.\n")
+    source_bytes = {
+        p: p.read_bytes() for p in (scan.scan_dir / "artifacts").rglob("*") if p.is_file()
+    }
+    workbench_api["fail_scan"](
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit interrupted."
+        ),
+    )
+    for replay in (False, True):
+        if replay:
+            workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+        rows = [row for row in coverage["surfaces"] if row["label"] == "Original review"]
+        assert len(rows) == 1 + int(changed) + int(independent_worker)
+        assert all(path.read_bytes() == data for path, data in source_bytes.items())

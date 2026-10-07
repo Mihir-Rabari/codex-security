@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -430,3 +430,83 @@ test("generic Deep progress preserves parent review and provenance extensions", 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+for (const nestedKeyOrder of [false, true]) {
+  test(`copied incomplete retries retain their first receipt and raw deferred origin, nested order=${nestedKeyOrder}`, async () => {
+    const f = await fixture();
+    try {
+      const input = workerDraft([], {
+        complete: false,
+        coverage: {
+          completeness: "partial",
+          surfaces: [
+            {
+              id: "original-review",
+              label: "Original review",
+              disposition: "needs_follow_up",
+              receiptRefs: ["artifacts/review.txt"],
+            },
+          ],
+          explicitExclusions: [],
+          deferred: [
+            {
+              reason: "Original pending proof.",
+              provenance: { details: { a: 1, b: 2 } },
+            },
+          ],
+        },
+      });
+      await mkdir(path.join(f.output, "artifacts"));
+      await writeFile(
+        path.join(f.output, "artifacts/review.txt"),
+        "Synthetic original review.\n",
+      );
+      await writeFile(f.resultPath, JSON.stringify(input));
+      const first = path.join(f.workerRoot, "attempts", "attempt-01");
+      await cp(f.output, first, { recursive: true, preserveTimestamps: true });
+      const second = path.join(f.workerRoot, "attempts", "attempt-02");
+      await archiveDirectory(f.output, second);
+      await mkdir(f.output, { recursive: true });
+      if (nestedKeyOrder) {
+        const final = {
+          ...structuredClone(input),
+          complete: true,
+          coverage: {
+            ...input.coverage,
+            deferred: [
+              {
+                reason: "Original pending proof.",
+                provenance: { details: { b: 2, a: 1 } },
+              },
+            ],
+          },
+        };
+        await mkdir(path.join(f.output, "artifacts"));
+        await writeFile(
+          path.join(f.output, "artifacts/review.txt"),
+          "Synthetic original review.\n",
+        );
+        await writeFile(f.resultPath, JSON.stringify(final));
+        await validateDiscoveryArtifacts(
+          { workersRoot: path.dirname(f.workerRoot) },
+          f.resultPath,
+          scanId,
+        );
+      } else {
+        await recordCodexSecurityWorkerScanDraft(
+          { root: f.output, repoRoot: f.root, scanId, layout: "worker" },
+          workerDraft([], { complete: true }),
+        );
+      }
+      const source = (await readDeepReductionSources(f.context)).discoveries[0]
+        .coverage;
+      for (const field of ["surfaces", "deferred"])
+        assert.equal(source[field][0].provenance.attempt, 1);
+      assert.ok(
+        source.reviews.some((row: { attempt: number }) => row.attempt === 1),
+      );
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+}
