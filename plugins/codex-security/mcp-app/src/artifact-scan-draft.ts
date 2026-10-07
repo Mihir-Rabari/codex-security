@@ -38,6 +38,7 @@ import {
   type SchemaDocument,
 } from "./artifact-schema-loader.js";
 import { saveThreatModelDocument } from "./threat-model-document.js";
+import { recoverWorkerCandidateReceipts } from "./artifact-worker-receipts.js";
 
 export interface ScanDraftInput {
   scanId: string;
@@ -428,6 +429,16 @@ async function preserveScanDraft(
     context.layout === "worker"
       ? await readArchivedWorkerCheckpoints(context)
       : [];
+  for (const source of archived) {
+    await recoverWorkerCandidateReceipts(
+      source.input.coverage,
+      {
+        ...context,
+        root: join(dirname(context.root), "attempts", source.attempt!),
+      },
+      context,
+    );
+  }
   if (previous) {
     current.unshift({ input: previous, modifiedMs: previousState.modifiedMs });
   }

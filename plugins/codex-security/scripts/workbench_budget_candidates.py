@@ -113,13 +113,18 @@ def recover_candidate_receipts(
             if invalid:
                 row["disposition"] = "needs_follow_up"
                 coverage["completeness"] = "partial"
-                if isinstance(row.get("candidateId"), str) and not any(
-                    coverage_candidate_key(item) == coverage_candidate_key(row)
-                    for item in coverage.get("deferred", [])
-                    if isinstance(item, dict)
-                ):
-                    coverage.setdefault("deferred", []).append(
-                        {
+                if isinstance(row.get("candidateId"), str):
+                    pending = next(
+                        (
+                            item
+                            for item in coverage["deferred"]
+                            if isinstance(item, dict)
+                            and coverage_candidate_key(item) == coverage_candidate_key(row)
+                        ),
+                        None,
+                    )
+                    if pending is None:
+                        pending = {
                             "candidateId": row["candidateId"],
                             "reason": "\n".join(warnings[warning_start:]),
                             **({"surfaceIds": [row["id"]]} if "id" in row else {}),
@@ -129,7 +134,8 @@ def recover_candidate_receipts(
                                 if field in row
                             },
                         }
-                    )
+                        coverage["deferred"].append(pending)
+                    archive_candidate_payloads(pending, [row])
         if closures:
             # Reopened candidate work must not invalidate unrelated valid closures.
             active = {

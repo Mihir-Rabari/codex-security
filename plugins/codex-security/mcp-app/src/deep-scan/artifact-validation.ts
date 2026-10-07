@@ -399,27 +399,49 @@ function retainSourceFindings(
       finding: structuredClone(sources.get(id)!),
     }));
     const candidateId = findingCandidateId(finding);
-    if (candidateId !== undefined) {
-      const owners = new Set(
-        refs.flatMap((id) => {
-          const owner = id.slice(0, id.lastIndexOf(":"));
-          return findingCandidateId(sources.get(id)!) === candidateId
-            ? [owner]
-            : [];
-        }),
-      );
-      if (owners.size === 1 && workers.has([...owners][0]!)) {
-        const owner = [...owners][0]!;
-        const previous = structuredClone(finding);
-        const previousOwner = findingCandidateOwner(finding);
-        const previousSource = provenance.sourceWorkerId;
-        provenance.sourceWorkerId = owner;
+    const owner = findingCandidateOwner(finding);
+    const associations = refs.flatMap((id) => {
+      const original = sources.get(id)!;
+      const candidateId = findingCandidateId(original);
+      if (candidateId === undefined) return [];
+      const worker = id.slice(0, id.lastIndexOf(":"));
+      return [
+        {
+          candidateId,
+          owner: workers.has(worker) ? worker : findingCandidateOwner(original),
+        },
+      ];
+    });
+    const association =
+      associations.find(
+        (source) =>
+          source.candidateId === candidateId && source.owner === owner,
+      ) ??
+      associations.find((source) => source.candidateId === candidateId) ??
+      associations[0];
+    if (association !== undefined) {
+      const previous = structuredClone(finding);
+      provenance.candidateId = association.candidateId;
+      if (association.owner !== undefined)
+        provenance.sourceWorkerId = association.owner;
+      else if (owner !== undefined) {
+        for (const field of ["sourceWorkerId", "workerId"])
+          if (typeof provenance[field] === "string") delete provenance[field];
         if (
-          (previousOwner !== undefined && previousOwner !== owner) ||
-          (previousSource !== undefined && previousSource !== owner)
+          typeof (finding.extensions as Finding | undefined)?.sourceWorkerId ===
+          "string"
         )
-          preserveFindingDetails(finding, previous);
+          delete (finding.extensions as Finding).sourceWorkerId;
       }
+      if (
+        candidateId !== association.candidateId ||
+        owner !== association.owner
+      )
+        preserveFindingDetails(finding, previous);
+    } else if (candidateId !== undefined) {
+      throw new Error(
+        "Deep reduction associates a candidate with no assigned source candidate.",
+      );
     }
   }
   const missing = [...sources.keys()].filter((id) => !claimed.has(id));

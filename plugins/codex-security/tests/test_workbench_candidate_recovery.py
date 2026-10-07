@@ -1029,3 +1029,69 @@ def test_worker_receipt_recovery_keeps_unrelated_generic_closures(
             [] if receipt_present else ["review"]
         )
     assert all(path.read_bytes() == value for path, value in originals.items())
+
+
+@pytest.mark.parametrize("saved_gap", [False, True])
+@pytest.mark.parametrize("result_present", [False, True])
+def test_worker_receipt_recovery_retains_complete_evidence_archives(
+    tmp_path: Path, generic_review_recovery, saved_gap: bool, result_present: bool
+) -> None:
+    module, pending, terminal, binding = generic_review_recovery
+    old_candidate = {"evidence": "Earlier candidate evidence"}
+    old_finding = {"summary": "Earlier finding evidence"}
+    current_candidate = {"evidence": "Terminal candidate evidence"}
+    terminal["coverage"] = {
+        "completeness": "partial" if saved_gap else "complete",
+        "surfaces": [
+            {
+                "id": "decision",
+                "candidateId": "candidate",
+                "label": "Reviewed candidate",
+                "disposition": "rejected",
+                "receiptRefs": ["artifacts/missing.txt"],
+                "candidate": current_candidate,
+                "originalCandidates": [old_candidate],
+                "previousFindings": [old_finding],
+            }
+        ],
+        "explicitExclusions": [],
+        "deferred": [
+            {
+                "candidateId": "candidate",
+                "reason": "Authored gap",
+                "candidate": {"evidence": "Saved pending evidence"},
+            }
+        ]
+        if saved_gap
+        else [],
+    }
+    output = tmp_path / "worker"
+    output.mkdir()
+    if result_present:
+        result = output / "result.json"
+        result.write_text(json.dumps(terminal))
+    else:
+        checkpoint = write_checkpoint(output / "checkpoints", terminal)
+        (output / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
+    originals = {path: path.read_bytes() for path in output.rglob("*") if path.is_file()}
+    workers = [saved_discovery_worker(output, "worker", 1)]
+    first = module.merge_saved_results(
+        tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
+    )
+    assert first is not None
+    for documents in [
+        first,
+        replay_saved_results(
+            module, first, tmp_path, pending["scanId"], binding, workers, stopped=True
+        ),
+    ]:
+        assert documents is not None
+        unresolved = module.unresolved_candidates(documents[2], documents[1])
+        assert len(unresolved) == 1
+        retained = unresolved[0]
+        assert old_candidate in retained["originalCandidates"]
+        assert old_finding in retained["previousFindings"]
+        if saved_gap:
+            assert retained["reason"] == "Authored gap"
+            assert current_candidate in retained["originalCandidates"]
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
