@@ -29,12 +29,11 @@ Supported runtimes:
 
 ### Install the CLI
 
-Install the CLI globally and sign in:
+Install the CLI globally:
 
 ```bash
 npm install --global @openai/codex-security
 cs --version
-cs login
 ```
 
 `cs` is a short alias for `codex-security`; both commands run the same CLI.
@@ -43,30 +42,8 @@ which must be on your `PATH`. If `cs` already resolves to another tool, use
 `codex-security` instead. If npm stops with an `EEXIST` error for `cs`, use
 `npx @openai/codex-security` without a global installation.
 
-From your repository directory, optionally draft security guidance before scanning:
-
-```bash
-cs policy .
-```
-
-The command saves a draft outside the checkout. Review the proposed diff and
-notes, edit the draft as needed, then copy it to the displayed `Policy target`
-so future scans use it. Generating the draft alone does not install it.
-Skip this step to keep an existing policy or scan without one. See
-[Generate a security policy](#generate-a-security-policy) for details.
-
-Then run a scan:
-
-```bash
-cs scan .
-```
-
-To run without a global installation, replace `cs` in these examples with
-`npx @openai/codex-security`, for example:
-
-```bash
-npx @openai/codex-security scan .
-```
+Continue with the [CLI walkthrough](#cli). To run without a global installation,
+replace `cs` in the CLI examples with `npx @openai/codex-security`.
 
 ### Install the TypeScript SDK
 
@@ -399,10 +376,33 @@ To validate GitHub code scanning alerts, first import them with
 
 ## CLI
 
-After [installing the CLI](#install-the-cli), choose your scan scope:
+After [installing the CLI](#install-the-cli), sign in if needed:
+
+```bash
+cs login
+```
+
+From your repository directory, optionally draft security guidance before scanning:
+
+```bash
+cs policy .
+```
+
+The command saves a draft outside the checkout. Review the proposed diff and
+notes, edit the draft as needed, then copy it to the displayed `Policy target`
+so future scans use it. Generating the draft alone does not install it.
+Skip this step to keep an existing policy or scan without one. See
+[Generate a security policy](#generate-a-security-policy) for details.
+
+Then scan the repository:
 
 ```bash
 cs scan .
+```
+
+To narrow the scan scope or check the configuration before scanning:
+
+```bash
 cs scan . --path src --path tests
 cs scan . --diff origin/main --json
 cs scan . --dry-run
@@ -417,13 +417,13 @@ scans, custom validation, imports, patching, and integrations.
 
 ### Generate a security policy
 
+To draft guidance for a selected path:
+
 ```bash
-cs policy .
 cs policy . --path services/api
 ```
 
-`policy` drafts `SECURITY.md` outside the checkout. Review the draft before
-installing it; it guides future scans. The SDK provides `generatePolicy()`,
+The SDK provides `generatePolicy()`,
 `preflightPolicy()`, and `previewPolicy()`. See
 [policy generation](docs/cli.md#generate-a-security-policy) for SDK examples,
 headless use, artifacts, and review requirements.

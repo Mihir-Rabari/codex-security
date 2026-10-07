@@ -81,7 +81,7 @@ cs scan . --diff origin/main
 cs scan . --mode deep
 ```
 
-Use `cs --help` to browse commands, or `scan --help`
+Use `cs --help` to browse commands, or `cs scan --help`
 for scan options, cost limits, and patching after a scan.
 
 ## TypeScript SDK
