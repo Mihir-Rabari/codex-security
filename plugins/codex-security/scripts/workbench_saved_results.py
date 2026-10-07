@@ -1368,6 +1368,7 @@ def merge_saved_results(
                             projected["receiptRefs"] = coverage_receipts(
                                 projected, worker, origin[1]
                             )
+                        projected_id = projected["id"]
                         previous = retained_coverage_record("surfaces", projected)
                         if previous is not None and isinstance(previous.get("id"), str):
                             projected_id = previous["id"]

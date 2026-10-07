@@ -119,9 +119,10 @@ def test_parent_candidate_outcome_compares_headless_worker_chronology(
 @pytest.mark.parametrize(
     "parent_surfaces", ["missing", "projected", "renamed", "second-only", "no-parent", "edited"]
 )
+@pytest.mark.parametrize("tagged_surface", [False, True])
 @pytest.mark.parametrize("merge_state", ["buffered", "merging", "merged"])
 def test_missing_deferred_projection_links_first_duplicate_surface(
-    workbench_api, workbench_db, publication_scan, parent_surfaces, merge_state
+    workbench_api, workbench_db, publication_scan, parent_surfaces, merge_state, tagged_surface
 ):
     scan = publication_scan()
     result = add_worker(workbench_db, scan)
@@ -143,6 +144,8 @@ def test_missing_deferred_projection_links_first_duplicate_surface(
             ("Archive settings", "no_issue_found"),
         )
     ]
+    if tagged_surface:
+        surfaces[0]["candidateId"] = "source-candidate"
     deferred = {
         "id": "pending",
         "reason": "Verify entry boundaries.",
@@ -172,6 +175,12 @@ def test_missing_deferred_projection_links_first_duplicate_surface(
         }
         for index, surface in enumerate(surfaces, 1)
     ]
+    if tagged_surface:
+        projected[0]["provenance"]["candidateId"] = surfaces[0]["candidateId"]
+        projected[0]["candidateId"] = (
+            f"{worker_id}-attempt-1-candidate-"
+            + hashlib.sha256(surfaces[0]["candidateId"].encode()).hexdigest()
+        )
     if parent_surfaces == "renamed":
         projected[0]["id"] = "canonical-first-surface"
     if parent_surfaces == "edited":
@@ -202,6 +211,18 @@ def test_missing_deferred_projection_links_first_duplicate_surface(
     if parent_surfaces == "no-parent":
         for name in ("scan-manifest.json", "findings.json", "coverage.json"):
             (scan.scan_dir / name).unlink()
+    if tagged_surface:
+        earlier = copy.deepcopy(json.loads(result.read_text()))
+        earlier["coverage"]["surfaces"][0]["disposition"] = "no_issue_found"
+        earlier["coverage"]["deferred"] = []
+        earlier["coverage"]["resolvedDeferred"] = [
+            {"id": deferred["id"], "reason": "Earlier source follow-up completed."}
+        ]
+        checkpoint = write_checkpoint(result.parent / "checkpoints", earlier)
+        os.utime(checkpoint, ns=(100, 100))
+        os.utime(result, ns=(300, 300))
+        if parent_surfaces != "no-parent":
+            os.utime(scan.scan_dir / "coverage.json", ns=(200, 200))
     workbench_api["fail_scan"](
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
