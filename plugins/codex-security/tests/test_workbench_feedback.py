@@ -10,8 +10,8 @@ from typing import Any
 import pytest
 from workbench_test_support import (
     create_saved_workspace,
-    initialize_git_repository,
     get_scan,
+    initialize_git_repository,
     run_workbench,
     scan_command,
     set_triage,
