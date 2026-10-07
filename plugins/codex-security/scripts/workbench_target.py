@@ -23,6 +23,8 @@ from rank_preview import DEFAULT_PREVIEW_READ_BYTES, is_binary_sample
 from windows_scan_local_files import copy_directory_junction
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
+_WINDOWS = os.name == "nt"
+
 
 def committed_diff_snapshot_digest(kind: str, base_revision: str, head_revision: str) -> str:
     digest = hashlib.sha256(
@@ -624,64 +626,64 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
                 continue
         paths.extend(source_directory_snapshot_paths(path))
 
-    # Git omits empty untracked directories from its file listing. Inventory
-    # junction identities independently of whether their targets contain files.
-    git_directory = git_output(target, "rev-parse", "--absolute-git-dir")
-    if git_directory is None:
-        raise SystemExit("Could not inspect the selected Git working tree.")
-    pending = [target]
-    while pending:
-        directory = pending.pop()
-        directories = git_bytes(
-            directory,
-            "--no-literal-pathspecs",
-            "ls-files",
-            "--others",
-            "--directory",
-            "--exclude-standard",
-            "-z",
-            "--",
-            # Match directory descendants, never the selected directory itself.
-            ":(glob)**/*/",
-            # Changing cwd must not select a nested repository's Git context.
-            git_dir=Path(git_directory),
-            work_tree=repository,
-        )
-        if directories is None:
-            raise SystemExit("Could not inspect directories in the selected Git working tree.")
-        for raw_path in (item for item in directories.split(b"\0") if item):
-            try:
-                path = _directory_link_boundary(
-                    target, directory / os.fsdecode(raw_path), linked_prefixes
-                )
-                metadata = path.lstat()
-            except (FileNotFoundError, NotADirectoryError):
-                continue
-            if (
-                stat.S_ISLNK(metadata.st_mode)
-                or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
-            ):
-                paths.append(path)
-            elif stat.S_ISDIR(metadata.st_mode):
-                pending.append(path)
+    if _WINDOWS:
+        # Git omits empty untracked directories from its file listing. Inventory
+        # junction identities independently of whether their targets contain files.
+        git_directory = git_output(target, "rev-parse", "--absolute-git-dir")
+        if git_directory is None:
+            raise SystemExit("Could not inspect the selected Git working tree.")
+        pending = [target]
+        while pending:
+            directory = pending.pop()
+            directories = git_bytes(
+                directory,
+                "--no-literal-pathspecs",
+                "ls-files",
+                "--others",
+                "--directory",
+                "--exclude-standard",
+                "-z",
+                "--",
+                # Match directory descendants, never the selected directory itself.
+                ":(glob)**/*/",
+                # Changing cwd must not select a nested repository's Git context.
+                git_dir=Path(git_directory),
+                work_tree=repository,
+            )
+            if directories is None:
+                raise SystemExit("Could not inspect directories in the selected Git working tree.")
+            for raw_path in (item for item in directories.split(b"\0") if item):
+                try:
+                    path = _directory_link_boundary(
+                        target, directory / os.fsdecode(raw_path), linked_prefixes
+                    )
+                    metadata = path.lstat()
+                except (FileNotFoundError, NotADirectoryError):
+                    continue
+                if (
+                    stat.S_ISLNK(metadata.st_mode)
+                    or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
+                ):
+                    paths.append(path)
+                elif stat.S_ISDIR(metadata.st_mode):
+                    pending.append(path)
     return sorted({str(path): path for path in paths}.values(), key=str)
 
 
 def source_directory_snapshot_paths(target: Path) -> list[Path]:
     paths: list[Path] = []
-    pending = [target]
-    while pending:
-        for path in pending.pop().iterdir():
-            if path.name == ".git":
+    for directory, directories, files in os.walk(target, topdown=True, followlinks=False):
+        parent = Path(directory)
+        for name in directories[:]:
+            if name == ".git":
+                directories.remove(name)
                 continue
+            path = parent / name
             paths.append(path)
-            metadata = path.lstat()
             # Name-surrogate reparse points include Windows directory junctions.
-            if (
-                stat.S_ISDIR(metadata.st_mode)
-                and not getattr(metadata, "st_reparse_tag", 0) & 0x20000000
-            ):
-                pending.append(path)
+            if getattr(path.lstat(), "st_reparse_tag", 0) & 0x20000000:
+                directories.remove(name)
+        paths.extend(parent / name for name in files if name != ".git")
     return sorted(paths)
 
 

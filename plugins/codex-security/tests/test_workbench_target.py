@@ -41,6 +41,7 @@ def junction_factory(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyP
     targets: dict[Path, Path] = {}
     modes: dict[Path, int] = {}
     if not native:
+        monkeypatch.setattr(workbench_target, "_WINDOWS", True)
         real_lstat = Path.lstat
         real_readlink = os.readlink
 
@@ -829,6 +830,33 @@ def test_content_digest_expands_nested_git_repositories(
     (nested / ".git" / "runtime-cache").write_text("runtime metadata\n")
     ignored_output.write_text("changed ignored runtime data\n")
     assert content_digest(selected) == original_digest
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX directory permissions")
+@pytest.mark.parametrize("git_repository", [False, True], ids=["plain", "git"])
+def test_directory_inventory_skips_inaccessible_descendants(
+    tmp_path: Path, git_repository: bool
+) -> None:
+    target = tmp_path / "target"
+    if git_repository:
+        initialize_unborn_git_repository(target)
+    else:
+        target.mkdir()
+    source = target / "app.py"
+    source.write_text("before\n")
+    inaccessible = target / "unreadable"
+    inaccessible.mkdir()
+    (inaccessible / "private.txt").write_text("inaccessible fixture\n")
+    inaccessible.chmod(0)
+    try:
+        if os.access(inaccessible, os.R_OK | os.X_OK):
+            pytest.skip("directory permissions are not enforced for the current user")
+        assert WORKBENCH_TARGET["directory_snapshot_regular_file_count"](target) == 1
+        before = directory_content_digest(target)
+        source.write_text("after\n")
+        assert directory_content_digest(target) != before
+    finally:
+        inaccessible.chmod(0o700)
 
 
 def test_directory_content_digest_skips_missing_cached_paths(tmp_path: Path) -> None:

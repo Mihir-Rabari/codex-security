@@ -62,7 +62,9 @@ def test_plain_directory_inventory_ignores_nested_git_metadata(tmp_path: Path) -
     assert api.directory_content_digest(target) != before
 
 
-def test_git_directory_inventory_keeps_nested_bare_repository_contents(tmp_path: Path) -> None:
+def test_git_directory_inventory_keeps_nested_bare_repository_contents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     target = tmp_path / "target"
     initialize_git_repository(target)
     nested = target / "nested.git"
@@ -72,6 +74,7 @@ def test_git_directory_inventory_keeps_nested_bare_repository_contents(tmp_path:
     ignored.mkdir()
     (ignored / "output.txt").write_text("ignored fixture\n")
     api = load_script("workbench_target")
+    monkeypatch.setattr(api, "_WINDOWS", True)
 
     paths = api.git_directory_snapshot_paths(target)
 
