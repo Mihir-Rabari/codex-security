@@ -772,12 +772,7 @@ describe("live scan cost tracking", () => {
           },
         ],
       });
-      await writeSession(
-        home,
-        "unrelated-worker",
-        {},
-        "other-scan",
-      );
+      await writeSession(home, "unrelated-worker", {}, "other-scan");
       const workers: ScanWorkerEvent[] = [];
       const tracker = new ScanCostTracker({
         codexHome: home,
