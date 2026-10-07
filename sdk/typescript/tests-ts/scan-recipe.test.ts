@@ -1,7 +1,7 @@
 import { createCliTest } from "./support/cli-run.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-import { mkdir, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { join, relative, resolve } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { runWorkbench } from "../src/runtime.js";
@@ -13,6 +13,7 @@ import { throwing } from "./support/errors.js";
 import {
   EXTERNAL_CODEX_PROVIDERS,
   mergedCodexConfig,
+  resolveCodexProfile,
   type JsonObject,
 } from "../src/config.js";
 
@@ -186,5 +187,109 @@ test.each(["standard", "deep"])(
     expect(saved["recipe"]).toMatchObject({ mode, postScanPrompt });
     expect(JSON.stringify(saved)).not.toContain(promptFile);
     expect(JSON.stringify(saved)).not.toContain("synthetic-launch-key");
+  },
+);
+
+const modelFileRecipeKeys = [
+  "model_instructions_file",
+  "model_catalog_json",
+  "experimental_compact_prompt_file",
+] as const;
+test.each(
+  modelFileRecipeKeys.flatMap((key) =>
+    ["root-relative", "inline-relative", "root-absolute"].map((kind) => ({
+      key,
+      kind,
+    })),
+  ),
+)(
+  "saved launch retains its original model file bytes: %j",
+  async ({ key, kind }) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const home = join(root, "codex-home");
+    const originalOutput = join(root, "original-output");
+    const rerunOutput = join(root, "reruns", "next-output");
+    const modelFiles = join(root, "model-files");
+    await Promise.all(
+      [repository, home, modelFiles, rerunOutput].map((path) =>
+        mkdir(path, { recursive: true }),
+      ),
+    );
+    await writeFile(join(repository, "fixture.py"), "value = 1\n");
+    const modelFile = join(modelFiles, key + ".txt");
+    const contents =
+      key === "model_catalog_json"
+        ? '{"models":[]}\n'
+        : `Synthetic saved model file ${key}\n`;
+    await writeFile(modelFile, contents);
+    const value =
+      kind === "root-absolute"
+        ? modelFile
+        : relative(originalOutput, modelFile);
+    const overrides: JsonObject =
+      kind === "inline-relative"
+        ? {
+            profile: "active",
+            profiles: {
+              active: { [key]: value },
+              unused: { [key]: "keep-unused-relative.txt" },
+            },
+          }
+        : { [key]: value };
+    const python = Bun.which("python3") ?? Bun.which("python");
+    if (python === null) throw new Error("Python is required for this test.");
+    const environment = {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      CODEX_HOME: home,
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      OPENAI_API_KEY: "synthetic-launch-key",
+    };
+    const command = (args: readonly string[], input?: string) =>
+      runWorkbench(
+        { python, pluginRoot: PLUGIN_ROOT, environment },
+        args,
+        input,
+      );
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT, codexOverrides: overrides },
+      {
+        environment,
+        prepareRuntime: async () => preparedRuntime(home),
+        resolvePluginPython: async () => python,
+        runWorkbench: async (_options, args, input) => command(args, input),
+        createCodex: () => {
+          throw new Error("Synthetic stop after registration");
+        },
+      },
+    );
+    try {
+      await expect(
+        client.run(repository, { mode: "standard", outputDir: originalOutput }),
+      ).rejects.toThrow("Synthetic stop after registration");
+      const scans = (await command(["list-scans", "--repository", repository]))[
+        "scans"
+      ] as Array<{ scanId: string }>;
+      expect(scans).toHaveLength(1);
+      const recipe = (
+        await command(["get-scan-recipe", "--scan-id", scans[0]!.scanId])
+      )["recipe"] as { config: JsonObject };
+      const replay = resolveCodexProfile(
+        await mergedCodexConfig({ codexOverrides: recipe.config }, home),
+      );
+      expect(replay[key]).toBe(modelFile);
+      expect(
+        await readFile(resolve(rerunOutput, replay[key] as string), "utf8"),
+      ).toBe(contents);
+      if (kind === "inline-relative") {
+        expect(recipe.config["profile"]).toBe("active");
+        expect(recipe.config["profiles"]).toMatchObject({
+          unused: { [key]: "keep-unused-relative.txt" },
+        });
+      }
+    } finally {
+      await client.close();
+    }
   },
 );

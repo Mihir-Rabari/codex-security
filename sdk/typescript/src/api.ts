@@ -1604,6 +1604,28 @@ export class CodexSecurity {
         ...preflightConfig,
         approval_policy: approvalPolicy,
       };
+      // Reruns allocate a new output directory; retain the original file origins.
+      for (const key of [
+        "model_instructions_file",
+        "model_catalog_json",
+        "experimental_compact_prompt_file",
+      ]) {
+        const value = workerRuntimeConfig[key];
+        if (typeof value !== "string") continue;
+        recipeConfig[key] = value;
+        const profiles = recipeConfig["profiles"];
+        if (
+          typeof profileName === "string" &&
+          isRecord(profiles) &&
+          isRecord(profiles[profileName]) &&
+          typeof profiles[profileName][key] === "string"
+        ) {
+          recipeConfig["profiles"] = {
+            ...profiles,
+            [profileName]: { ...profiles[profileName], [key]: value },
+          };
+        }
+      }
       if (
         typeof profileName === "string" &&
         !(isRecord(inlineProfiles) && isRecord(inlineProfiles[profileName]))
