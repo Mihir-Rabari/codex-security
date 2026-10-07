@@ -64,7 +64,7 @@ _RESERVED_ARTIFACT_PATHS = json.loads(
 
 
 class _CheckpointSnapshotError(ContractError):
-    """A verified head could not be persisted for publication replay."""
+    """A captured source observation could not be persisted for publication replay."""
 
     def __init__(self, message: str, captured: dict[str, tuple[str, int]]) -> None:
         super().__init__(message)
@@ -404,14 +404,26 @@ def _retained_source_state(value: Any) -> tuple[dict[str, str], str | None]:
             value["sources"], "Saved stopped-scan source digests are malformed."
         )
         model_source = value.get("threatModelSource")
-        if not isinstance(model_source, str) or model_source not in sources:
+        if "threatModelSource" in value and (
+            not isinstance(model_source, str) or model_source not in sources
+        ):
             raise ContractError("Saved stopped-scan model source is outside its checkpoint set.")
         return sources, model_source
     return _source_digests(value, "Saved stopped-scan source digests are malformed."), None
 
 
-def _encode_retained_sources(sources: dict[str, str], model_source: list[str]) -> str:
-    state = {"sources": sources, "threatModelSource": model_source[0]} if model_source else sources
+def _encode_retained_sources(
+    sources: dict[str, str],
+    model_source: list[str],
+    source_times: dict[str, int] | None = None,
+) -> str:
+    state: dict[str, Any] = sources
+    if model_source or source_times is not None:
+        state = {"sources": sources}
+        if model_source:
+            state["threatModelSource"] = model_source[0]
+        if source_times is not None:
+            state["sourceTimes"] = source_times
     return json.dumps(state, sort_keys=True)
 
 
@@ -1392,7 +1404,19 @@ def merge_saved_results(
         or any(_is_source_order_snapshot(path) for path in source_digests)
         or allow_frozen_legacy_parent
     ):
-        _freeze_source_times(scan_dir, scan_id, source_digests, source_times)
+        try:
+            _freeze_source_times(scan_dir, scan_id, source_digests, source_times)
+        except (ContractError, OSError) as exc:
+            failure = _CheckpointSnapshotError(
+                str(exc),
+                {
+                    path: (digest, source_times[path])
+                    for path, digest in source_digests.items()
+                    if not _is_source_order_snapshot(path)
+                },
+            )
+            failure.heads = checkpoint_heads
+            raise failure from exc
 
     target_kind = binding["allowedTargetKinds"][0]
     if (
@@ -2324,16 +2348,19 @@ def preserve_scan_results_locked(
     model_source: list[str] = []
     saved_model_source: str | None = None
     raw_frozen_sources = scan["retained_source_digests_json"]
+    frozen_source_times = None
     if raw_frozen_sources is not None:
-        frozen_source_digests, saved_model_source = _retained_source_state(
-            json.loads(raw_frozen_sources)
-        )
+        retained = json.loads(raw_frozen_sources)
+        frozen_source_digests, saved_model_source = _retained_source_state(retained)
+        frozen_source_times = retained.get("sourceTimes")
         if saved_model_source is not None:
             model_source.append(saved_model_source)
     if recovery_source_digests is not None:
         frozen_source_digests = recovery_source_digests
         checkpoint_heads = recovery_checkpoint_heads
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+    if frozen_source_times is not None:
+        _freeze_source_times(scan_dir, scan_id, frozen_source_digests, frozen_source_times)
     deep_run = connection.execute(
         "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
     ).fetchone()
@@ -2485,9 +2512,9 @@ def preserve_scan_results_locked(
         )
     except _CheckpointSnapshotError as exc:
         if scan["canceled_at"] is not None and frozen_source_digests is None:
-            # Cancellation has already committed. Pin the observed source set even
-            # when its immutable head copy cannot be written; changed raw heads
-            # remain rejected on retry rather than admitting later worker output.
+            # Cancellation has already committed. Keep the source set and times in
+            # the database even when auxiliary snapshot files cannot be written.
+            # Changed raw heads remain rejected on retry.
             captured = dict(exc.captured)
             for relative, kind in exc.paths.items():
                 if relative in captured:
@@ -2504,13 +2531,16 @@ def preserve_scan_results_locked(
                     continue
             retained_sources = {path: value[0] for path, value in captured.items()}
             source_times = {path: value[1] for path, value in captured.items()}
-            _freeze_source_times(scan_dir, scan_id, retained_sources, source_times)
             with connection:
                 connection.execute(
                     "UPDATE scans SET retained_source_digests_json = ?, "
                     "retained_checkpoint_heads_json = ? "
                     "WHERE id = ? AND retained_source_digests_json IS NULL",
-                    (json.dumps(retained_sources, sort_keys=True), json.dumps(exc.heads), scan_id),
+                    (
+                        _encode_retained_sources(retained_sources, [], source_times),
+                        json.dumps(exc.heads),
+                        scan_id,
+                    ),
                 )
         raise
     if documents is None:
