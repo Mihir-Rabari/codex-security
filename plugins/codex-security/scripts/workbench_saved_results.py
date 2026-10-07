@@ -1228,7 +1228,13 @@ def merge_saved_results(
             if not isinstance(ref, str):
                 return ref
             ref = Path(ref).as_posix()
-            if ref.startswith(worker_prefix):
+            provenance = item.get("provenance")
+            inherited_scan_refs = (
+                provenance.get("scanReceiptRefs", []) if isinstance(provenance, dict) else []
+            )
+            if ref.startswith(worker_prefix) or (
+                isinstance(inherited_scan_refs, list) and ref in inherited_scan_refs
+            ):
                 return ref
             local_ref = Path(f"{directory}/{ref}").as_posix()
             return local_ref if scan_receipt(local_ref) or not scan_receipt(ref) else ref
@@ -1242,10 +1248,15 @@ def merge_saved_results(
         origin = projection_origins.get(id(item))
         if origin is not None and (worker := workers_by_id.get(origin[0])) is not None:
             refs = coverage_receipts(item, worker, origin[1])
-        return {
+        result = {
             **item,
             "receiptRefs": [Path(ref).as_posix() if isinstance(ref, str) else ref for ref in refs],
         }
+        if isinstance(provenance := result.get("provenance"), dict):
+            result["provenance"] = {
+                key: value for key, value in provenance.items() if key != "scanReceiptRefs"
+            }
+        return result
 
     def retained_coverage_record(field: str, item: dict[str, Any]) -> dict[str, Any] | None:
         item = canonical_coverage_record(field, item)
@@ -2657,6 +2668,9 @@ def merge_saved_results(
         item = {"id": "scan-stopped", "reason": reason}
         if item not in coverage["deferred"]:
             coverage["deferred"].append(item)
+    for surface in coverage.get("surfaces", []):
+        if isinstance(surface, dict) and isinstance(surface.get("provenance"), dict):
+            surface["provenance"].pop("scanReceiptRefs", None)
     return manifest, {"findings": findings}, coverage
 
 

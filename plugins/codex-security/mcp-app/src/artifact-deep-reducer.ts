@@ -110,6 +110,21 @@ export async function readDeepReductionSources(
           for (const ref of (surface.receiptRefs as string[] | undefined) ??
             []) {
             const normalized = posix.normalize(ref);
+            const inheritedScanRefs = (
+              surface.provenance as Record<string, unknown> | undefined
+            )?.scanReceiptRefs;
+            if (
+              Array.isArray(inheritedScanRefs) &&
+              inheritedScanRefs.includes(normalized)
+            ) {
+              await requireRegularFile(
+                join(bound.artifacts.scanDir, normalized),
+                bound.artifacts.scanDir,
+                true,
+              );
+              scanReceiptRefs.add(normalized);
+              continue;
+            }
             try {
               await requireRegularFile(
                 join(dirname(worker.resultPath), normalized),

@@ -373,6 +373,21 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         "Synthetic unrelated parent review.\n",
       );
     }
+    if (
+      receiptRetry &&
+      receiptCollision &&
+      (receiptSpelling === "shared scan" ||
+        receiptSpelling === "equivalent shared scan")
+    ) {
+      const collision = path.join(
+        artifactDir,
+        "artifacts",
+        "01_context",
+        "false_positive_feedback.json",
+      );
+      await mkdir(path.dirname(collision), { recursive: true });
+      await writeFile(collision, "Synthetic unrelated retry receipt.\n");
+    }
     const activeQualifiedRef = `${path.relative(run.scanDir, artifactDir).split(path.sep).join("/")}/artifacts/review.md`;
     const sharedRef = "artifacts/01_context/false_positive_feedback.json";
     if (sharedReceipt) {
@@ -412,6 +427,9 @@ runpy.run_path(sys.argv[0], run_name="__main__")
                 label: "Current review",
                 disposition: "no_issue_found",
                 receiptRefs: [activeReceiptRef],
+                ...(receiptCollision
+                  ? { provenance: { scanReceiptRefs: [activeReceiptRef] } }
+                  : {}),
               },
             ],
             explicitExclusions: [],
@@ -683,6 +701,13 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     assert.equal(await readFile(file, "utf8"), bytes);
   if (receiptRetry) {
     const coverage = await readFixtureCoverage(run.scanDir);
+    for (const surface of coverage.surfaces) {
+      assert.equal(
+        Object.hasOwn(surface.provenance ?? {}, "scanReceiptRefs"),
+        false,
+        "host receipt ownership is not exposed as model-authored provenance",
+      );
+    }
     const current = coverage.surfaces.filter(
       (surface) => surface.label === "Current review",
     );

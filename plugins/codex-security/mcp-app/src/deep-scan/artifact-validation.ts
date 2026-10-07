@@ -318,7 +318,13 @@ export function projectDiscoveryCoverage(
       !Array.isArray(descriptions)
         ? (descriptions as Record<string, unknown>)
         : {};
-    for (const key of ["workerId", "attempt", "sourceId", "candidateId"])
+    for (const key of [
+      "workerId",
+      "attempt",
+      "sourceId",
+      "candidateId",
+      "scanReceiptRefs",
+    ])
       delete projected[key];
     result.provenance = {
       ...projected,

@@ -288,6 +288,10 @@ export async function recordCodexSecurityWorkerScanDraft(
     );
   }
 
+  // Receipt ownership is resolved by the host when archived evidence is retained.
+  for (const surface of parsed.coverage.surfaces as JsonObject[]) {
+    if (isObject(surface.provenance)) delete surface.provenance.scanReceiptRefs;
+  }
   const scope = context.scope;
   let scoped =
     scope && scope !== "."
@@ -1456,6 +1460,19 @@ async function readArchivedWorkerCheckpoints(
               }
               try {
                 await requireRegularFile(join(scanRoot, ref), scanRoot, true);
+                const provenance = isObject(surface.provenance)
+                  ? surface.provenance
+                  : {};
+                surface.provenance = {
+                  ...provenance,
+                  scanReceiptRefs: [
+                    ...new Set([
+                      ...((provenance.scanReceiptRefs as
+                        string[] | undefined) ?? []),
+                      ref,
+                    ]),
+                  ],
+                };
                 return ref;
               } catch {
                 // Worker-output receipts moved with this archived attempt.

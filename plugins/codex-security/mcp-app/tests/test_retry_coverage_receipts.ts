@@ -208,3 +208,25 @@ for (const resume of [false, true]) {
     });
   }
 }
+
+for (const resume of [false, true]) {
+  for (const outcome of ["completion", "recovery", "no parent"]) {
+    test(`inherited shared receipts retain their owner across retry collisions during ${resume ? "reconstruction" : "live retry"} and ${outcome}`, async () => {
+      const root = await mkdtemp(
+        path.join(tmpdir(), "shared-receipt-collision-"),
+      );
+      try {
+        await publishCoverageFixture(root, "complete", {
+          receiptRetry: true,
+          receiptSpelling: "shared scan",
+          receiptCollision: true,
+          stopAfterDraft: outcome === "recovery",
+          stopBeforeDraft: outcome === "no parent",
+          resume,
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
