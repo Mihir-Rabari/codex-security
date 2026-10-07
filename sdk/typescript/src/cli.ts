@@ -2072,6 +2072,19 @@ export async function main(
             let target = repositories.find(
               (entry) => entry["targetPath"] === requestedRepository,
             );
+            const canonicalTarget = repositories.find(
+              (entry) => entry["targetPath"] === repository,
+            );
+            if (
+              target === undefined &&
+              canonicalTarget !== undefined &&
+              (await sameFile(
+                canonicalTarget["targetPath"] as string,
+                requestedRepository,
+              ))
+            ) {
+              target = canonicalTarget;
+            }
             if (target === undefined) {
               for (const entry of repositories) {
                 const storedPath = entry["targetPath"] as string;
