@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
 from workbench_test_support import (
     create_saved_workspace,
+    initialize_git_repository,
     run_workbench,
     stable_target_id,
     start_delivered_scan,
@@ -343,3 +345,60 @@ def test_feedback_returns_only_the_50_latest_decisions(tmp_path: Path) -> None:
     assert [finding["identity"]["anchor"] for finding in feedback["falsePositives"]] == [
         f"false-positive-{index:03d}" for index in range(54, 4, -1)
     ]
+
+
+@pytest.mark.parametrize("legacy_first", [False, True])
+@pytest.mark.parametrize("rediscovered", [False, True])
+def test_sealed_same_target_feedback_keeps_latest_decision_across_upgrade(
+    tmp_path: Path, monkeypatch, legacy_first: bool, rediscovered: bool
+) -> None:
+    import test_workbench_scan_history as producer
+
+    state = tmp_path / "state"
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    original_write = producer.write_completed_contract
+
+    def write_current_completion(scan_dir, scan_id, target, **values):
+        original_write(scan_dir, scan_id, target, **values)
+        manifest_path = scan_dir / "scan-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            started_at = connection.execute(
+                "SELECT started_at FROM scans WHERE id=?", (scan_id,)
+            ).fetchone()[0]
+        manifest["scan"]["startedAt"] = started_at
+        manifest["scan"]["completedAt"] = (
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        )
+        manifest_path.write_text(json.dumps(manifest))
+
+    monkeypatch.setattr(producer, "write_completed_contract", write_current_completion)
+    first = producer.create_cli_scan(
+        state, tmp_path / "results", repository, target_revision=revision
+    )
+    finding = run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"]["findings"][0]
+    if legacy_first:
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE scans SET repository_generation=NULL WHERE id=?", (first["scanId"],)
+            )
+    _close_finding(state, finding["occurrenceId"], "false_positive", "Synthetic checked guard.")
+    later = producer.create_cli_scan(
+        state, tmp_path / "results", repository, target_revision=revision, finding=rediscovered
+    )
+    if rediscovered:
+        later_finding = run_workbench(state, "get-scan", "--scan-id", later["scanId"])["scan"][
+            "findings"
+        ][0]
+        assert later_finding["findingId"] == finding["findingId"]
+        assert later_finding["triage"]["status"] == "open"
+    current = producer.create_cli_scan(
+        state, tmp_path / "results", repository, target_revision=revision, complete=False
+    )
+    feedback = _feedback(state, current["scanId"])["falsePositives"]
+    if rediscovered:
+        assert feedback == []
+    else:
+        assert len(feedback) == 1
+        assert feedback[0]["sourceScanId"] == first["scanId"]

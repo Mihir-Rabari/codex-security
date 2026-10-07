@@ -16,7 +16,7 @@ from workbench_constants import (
     FINDING_SUMMARY_BYTES,
     FINDING_TITLE_BYTES,
 )
-from workbench_native_indexes import _indexed_findings
+from workbench_native_indexes import _indexed_findings, _legacy_generations
 from workbench_target_state import RepositoryIdentityCache
 from workbench_validation import bounded_output_text
 
@@ -27,9 +27,15 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
     if not scope.available:
         return {"scanId": scan["id"], "targetId": scan["target_id"], "falsePositives": []}
 
+    legacy_generations = _legacy_generations(connection, identities)
     indexed_findings = {
         occurrence_id: finding
-        for finding in _indexed_findings(connection, identities=identities, scan_scope=scope)
+        for finding in _indexed_findings(
+            connection,
+            identities=identities,
+            scan_scope=scope,
+            legacy_generations=legacy_generations,
+        )
         for occurrence_id in finding["matched_occurrence_ids"]
     }
     source_filter, source_values = scope.sql(
@@ -37,6 +43,13 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
     )
     source_generation = (
         "source_scans.repository_generation" if identities.supports_generation else "NULL"
+    )
+    legacy_generation = legacy_generations.get(scope.target_id)
+    decision_generation = (
+        f"COALESCE({source_generation}, ?)" if legacy_generation is not None else source_generation
+    )
+    decision_values = (
+        (legacy_generation, legacy_generation) if legacy_generation is not None else ()
     )
     rows = connection.execute(
         f"""
@@ -52,8 +65,8 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
                 source_scans.completed_at AS source_completed_at,
                 locations.relative_path, locations.start_line, locations.end_line, locations.role,
                 ROW_NUMBER() OVER (
-                    PARTITION BY findings.id, {source_generation},
-                        CASE WHEN {source_generation} IS NULL THEN source_scans.target_id END
+                    PARTITION BY findings.id, {decision_generation},
+                        CASE WHEN {decision_generation} IS NULL THEN source_scans.target_id END
                     ORDER BY COALESCE(triage.updated_at, source_scans.completed_at) DESC,
                         source_scans.completed_at DESC,
                         source_scans.id DESC, occurrences.id DESC
@@ -83,7 +96,7 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
             AND trim(note) != ''
         ORDER BY updated_at DESC, source_completed_at DESC, source_scan_id DESC, finding_id DESC
         """,
-        (*source_values, scan["id"]),
+        (*decision_values, *source_values, scan["id"]),
     )
     false_positives = []
     reviewed_components: set[str] = set()
