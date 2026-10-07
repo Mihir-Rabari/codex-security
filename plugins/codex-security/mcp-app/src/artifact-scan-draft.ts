@@ -726,18 +726,19 @@ async function preserveScanDraft(
       const revisions = matches.filter((current) =>
         sameSavedRevision(current, finding),
       );
-      const replay =
-        containing.length === 1 &&
-        containing[0]!.identity === undefined &&
-        containsSavedFinding(finding, containing[0]!)
-          ? containing[0]
-          : undefined;
       if (
         matches.length === 1 &&
         source.findings.filter(
           (current) =>
-            (current === finding || unmatchedFindings.has(current)) &&
-            sameSavedFinding(current, matches[0]!),
+            (current === finding ||
+              unmatchedFindings.has(current) ||
+              (current.identity !== undefined &&
+                finding.identity !== undefined &&
+                sameSavedFinding(current, finding))) &&
+            sameSavedFinding(
+              current,
+              containing.length === 1 ? finding : matches[0]!,
+            ),
         ).length === 1
       ) {
         preserveFindingDetails(matches[0]!, finding);
@@ -778,17 +779,10 @@ async function preserveScanDraft(
             })
           );
         }) &&
-        (containing.length === 0 ||
-          (finding.identity !== undefined && replay !== undefined))
+        containing.length === 0
       ) {
         const retained = structuredClone(finding);
-        if (replay !== undefined) {
-          // A content-only replay must not replace established independent identities.
-          preserveFindingDetails(retained, replay);
-          result.findings.splice(result.findings.indexOf(replay), 1, retained);
-        } else {
-          result.findings.push(retained);
-        }
+        result.findings.push(retained);
         assignedFindings.add(retained);
       }
     }
