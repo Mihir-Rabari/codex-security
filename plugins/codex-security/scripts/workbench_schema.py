@@ -874,6 +874,36 @@ MIGRATIONS = (
         ALTER TABLE scans ADD COLUMN name TEXT;
         """,
     ),
+    (
+        44,
+        "retain deep scan worker session ownership",
+        """
+        CREATE TABLE deep_scan_worker_threads (
+            worker_id TEXT NOT NULL REFERENCES deep_scan_workers(id) ON DELETE CASCADE,
+            sdk_thread_id TEXT NOT NULL,
+            PRIMARY KEY (worker_id, sdk_thread_id)
+        );
+
+        INSERT INTO deep_scan_worker_threads (worker_id, sdk_thread_id)
+        SELECT id, sdk_thread_id FROM deep_scan_workers WHERE sdk_thread_id IS NOT NULL;
+
+        CREATE TRIGGER record_deep_scan_worker_thread_insert
+        AFTER INSERT ON deep_scan_workers
+        WHEN NEW.sdk_thread_id IS NOT NULL
+        BEGIN
+            INSERT OR IGNORE INTO deep_scan_worker_threads (worker_id, sdk_thread_id)
+            VALUES (NEW.id, NEW.sdk_thread_id);
+        END;
+
+        CREATE TRIGGER record_deep_scan_worker_thread_update
+        AFTER UPDATE OF sdk_thread_id ON deep_scan_workers
+        WHEN NEW.sdk_thread_id IS NOT NULL AND OLD.sdk_thread_id IS NOT NEW.sdk_thread_id
+        BEGIN
+            INSERT OR IGNORE INTO deep_scan_worker_threads (worker_id, sdk_thread_id)
+            VALUES (NEW.id, NEW.sdk_thread_id);
+        END;
+        """,
+    ),
 )
 
 

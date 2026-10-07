@@ -2846,6 +2846,12 @@ export class CodexSecurity {
       environment[SAFETY_IDENTIFIER_ENV] = session.safetyIdentifier;
     }
     const sdkCodexConfig = structuredCodexConfig(config ?? sessionConfig);
+    if (
+      typeof sdkCodexConfig["sqlite_home"] === "string" &&
+      runtimePaths["CODEX_SQLITE_HOME"] !== undefined
+    ) {
+      sdkCodexConfig["sqlite_home"] = runtimePaths["CODEX_SQLITE_HOME"];
+    }
     // This snapshot outlives a Deep Scan when the client reuses its runtime.
     if (runtime.deepScanConfigPath !== undefined) {
       configOverrides = [

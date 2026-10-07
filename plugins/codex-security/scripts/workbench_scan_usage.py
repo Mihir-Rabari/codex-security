@@ -188,10 +188,11 @@ def _scan_root_thread_ids(
             row["sdk_thread_id"]
             for row in connection.execute(
                 """
-                SELECT DISTINCT sdk_thread_id
-                FROM deep_scan_workers
-                WHERE scan_id = ? AND sdk_thread_id IS NOT NULL
-                ORDER BY sdk_thread_id
+                SELECT DISTINCT threads.sdk_thread_id
+                FROM deep_scan_worker_threads AS threads
+                JOIN deep_scan_workers AS workers ON workers.id = threads.worker_id
+                WHERE workers.scan_id = ?
+                ORDER BY threads.sdk_thread_id
                 """,
                 (scan["id"],),
             )

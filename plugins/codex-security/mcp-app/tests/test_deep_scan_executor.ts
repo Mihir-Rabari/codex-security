@@ -1452,6 +1452,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             features,
             configuration: {
               ...parsedConfiguration,
+              sqlite_home: "relative-parent-state",
               ...(index === 0
                 ? {}
                 : { service_tier: index === 2 ? "flex" : serviceTier }),
@@ -1462,6 +1463,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                       ...profiles,
                       selected: {
                         ...profiles.selected,
+                        sqlite_home: "relative-profile-state",
                         ...(index === 2 ? { service_tier: serviceTier } : {}),
                       },
                       unselected: { service_tier: "fast" },
@@ -1571,6 +1573,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
       // A running coordinator retains its settings if the source file changes.
       for (const kind of ["discovery", "dedup"] as const) {
         for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
+          const workerCwd = path.join(
+            fixture.root,
+            kind,
+            resumeThreadId ?? "fresh",
+          );
+          await mkdir(workerCwd, { recursive: true });
           launches.length = 0;
           await Promise.all(
             executors.map((executor, index) => {
@@ -1585,7 +1593,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH =
                 workerConfigurations[index].deepPath;
               return executor.run(
-                workerRequest(promptPath, fixture.root, {
+                workerRequest(promptPath, workerCwd, {
                   kind,
                   resumeThreadId,
                   artifactContext: {
@@ -1668,6 +1676,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               },
             );
             assert.equal(invocation.codexHome, await realpath(codexHome));
+            assert.equal(invocation.sqliteHome, sqliteHomes[index]);
+            assert.equal(invocation.cwd, workerCwd);
             assert.equal(invocation.providerKey, providerKeys[index]);
             assert.equal(invocation.providerHeader, providerHeaders[index]);
             assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
@@ -2859,7 +2869,7 @@ const runtimeEnvironment = Object.fromEntries(['PATH', 'HOME', 'PYTHON', 'PYTHON
 const pythonProbe = stdin.includes('CAPTURE_SYNTHETIC_PYTHON') ? spawnSync(process.env.PYTHON, ['-I', '-c', 'import json,os,sys; print(json.dumps([sys.prefix,os.environ.get("LD_LIBRARY_PATH")]))'], { encoding: 'utf8' }) : undefined;
 if (pythonProbe && pythonProbe.status !== 0) throw new Error(pythonProbe.stderr || String(pythonProbe.error));
 const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...((stdin.includes('COMPLETE_THEN_HANG') || stdin.includes('COMPLETE_THEN_FLUSH')) ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
+writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ argv: process.argv.slice(2), stdin, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, sqliteHome: process.env.CODEX_SQLITE_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...((stdin.includes('COMPLETE_THEN_HANG') || stdin.includes('COMPLETE_THEN_FLUSH')) ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
 if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => { writeFileSync(completionMarkerPath, 'aborted\\n'); if (!stdin.includes('IGNORE_TERMINATION')) setTimeout(() => process.exit(0), 100); });
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }
 if (stdin.includes('CONFIG_ERROR')) { console.error('failed to load configuration: invalid value'); process.exit(2); }

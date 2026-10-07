@@ -32,6 +32,7 @@ import { completedEvents, preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson as json, jsonLines } from "./support/json.js";
 import { rejecting } from "./support/errors.js";
+import { readNativeSessionSqliteHome } from "../src/provider-profile.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 const resultName = "artifacts/custom-validation/results.json";
@@ -466,21 +467,33 @@ describe("custom validation", () => {
     "incomplete",
     "dismissed",
     "budgeted",
+    "budgeted-relative-sqlite",
+    "budgeted-profile-sqlite",
     "unowned-validation-worker",
   ];
   test.each(workbenchScenarios)(
     "SDK owns real workbench completion: %s",
     async (scenario) => {
       const diff = scenario === "diff";
+      const relativeSqlite =
+        scenario === "budgeted-relative-sqlite" ||
+        scenario === "budgeted-profile-sqlite";
       const budgeted =
-        scenario === "budgeted" || scenario === "unowned-validation-worker";
+        scenario.startsWith("budgeted") ||
+        scenario === "unowned-validation-worker";
       const count = scenario === "empty" ? 0 : 1;
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const scanDir = join(root, "scan");
       const codexHome = join(root, "codex-home");
       const stateDir = join(root, "state");
-      const stateDatabase = join(codexHome, "state_5.sqlite");
+      const sqliteHome = relativeSqlite
+        ? join(scanDir, "selected-state")
+        : codexHome;
+      const stateDatabase = join(
+        sqliteHome,
+        relativeSqlite ? "state_7.sqlite" : "state_5.sqlite",
+      );
       const python = Bun.which("python3") ?? Bun.which("python");
       expect(python).not.toBeNull();
       await mkdir(join(repository, "src"), { recursive: true });
@@ -538,30 +551,46 @@ describe("custom validation", () => {
           input,
         );
       const client = new TestClient(
-        profileDisabledTools === undefined
-          ? {}
-          : {
-              codexOverrides: {
-                profile: "synthetic.validation",
-                profiles: {
-                  "synthetic.validation": {
-                    mcp_servers: {
-                      "codex-security": {
-                        disabled_tools: profileDisabledTools,
+        relativeSqlite
+          ? {
+              codexOverrides:
+                scenario === "budgeted-profile-sqlite"
+                  ? {
+                      profile: "synthetic",
+                      profiles: {
+                        synthetic: { sqlite_home: "selected-state" },
+                      },
+                    }
+                  : { sqlite_home: "selected-state" },
+            }
+          : profileDisabledTools === undefined
+            ? {}
+            : {
+                codexOverrides: {
+                  profile: "synthetic.validation",
+                  profiles: {
+                    "synthetic.validation": {
+                      mcp_servers: {
+                        "codex-security": {
+                          disabled_tools: profileDisabledTools,
+                        },
                       },
                     },
                   },
                 },
               },
-            },
         {
           environment: {
             CODEX_SECURITY_STATE_DIR: stateDir,
-            ...(budgeted ? { CODEX_STATE_DB: stateDatabase } : {}),
+            ...(budgeted && !relativeSqlite
+              ? { CODEX_STATE_DB: stateDatabase }
+              : {}),
           },
           prepareRuntime: async () => {
             const runtime = preparedRuntime(codexHome);
-            if (budgeted) runtime.environment["CODEX_STATE_DB"] = stateDatabase;
+            if (relativeSqlite) runtime.environment["CODEX_HOME"] = codexHome;
+            if (budgeted && !relativeSqlite)
+              runtime.environment["CODEX_STATE_DB"] = stateDatabase;
             runtime.plugin.version = (
               await json<{ version: string }>(
                 join(PLUGIN_ROOT, ".codex-plugin/plugin.json"),
@@ -600,6 +629,30 @@ describe("custom validation", () => {
                       "daybreak_blue",
                     );
                     turns += 1;
+                    if (relativeSqlite) {
+                      const command = resolveCodexCommand({});
+                      const selected = await readNativeSessionSqliteHome(
+                        {
+                          ...command,
+                          args: [
+                            ...(command.args ?? []),
+                            "-c",
+                            "features.plugins=false",
+                            "-c",
+                            "features.apps=false",
+                            "-c",
+                            'otel.exporter="none"',
+                            "-c",
+                            'otel.metrics_exporter="none"',
+                          ],
+                        },
+                        options.env!,
+                        threadOptions.workingDirectory!,
+                        turnOptions.signal,
+                        options.config,
+                      );
+                      expect(selected).toBe(sqliteHome);
+                    }
                     if (turns === 1) {
                       expect(prompt).not.toContain(workflow);
                       expect(prompt).toContain("SDK-owned discovery workflow");
