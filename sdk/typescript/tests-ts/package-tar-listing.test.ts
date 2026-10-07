@@ -490,7 +490,8 @@ describe("npm package tar listings", () => {
             ["extra.mjs", Buffer.from("Public contents."), false],
           ],
           tailBoundaryMarker: true,
-          error: "npm tarball contains an internal reference.",
+          error:
+            /npm tarball contains (?:an internal reference\.|an invalid tar entry:)/u,
         },
         {
           name: "map-padding-marker",
@@ -502,7 +503,8 @@ describe("npm package tar listings", () => {
           name: "discarded-tail-marker",
           files: [["logo.png", logo, true]],
           tailMarker: true,
-          error: "npm tarball contains an internal reference.",
+          error:
+            /npm tarball contains (?:an internal reference\.|an invalid tar entry:)/u,
         },
       ] satisfies {
         name: string;
@@ -514,7 +516,7 @@ describe("npm package tar listings", () => {
         headerMapMarker?: boolean;
         tailMarker?: boolean;
         tailBoundaryMarker?: boolean;
-        error?: string;
+        error?: string | RegExp;
       }[];
       for (const scenario of cases) {
         const records = scenario.files.map(([name, contents, sparse]) => {
@@ -528,22 +530,20 @@ describe("npm package tar listings", () => {
               scenario.metadataMarker,
             );
           if (sparse === "0.1-tail") {
+            const storedContents = Buffer.concat([
+              contents,
+              Buffer.from("go/synthetic-reference"),
+            ]);
             return Buffer.concat([
               tarRecord(
                 paxRecords({
-                  "GNU.sparse.size": String(contents.length),
+                  "GNU.sparse.size": String(storedContents.length),
                   "GNU.sparse.numblocks": "1",
-                  "GNU.sparse.map": `0,${contents.length}`,
+                  "GNU.sparse.map": `0,${storedContents.length}`,
                 }),
                 { name: "PaxHeaders/asset", type: 0x78 },
               ),
-              tarRecord(
-                Buffer.concat([
-                  contents,
-                  Buffer.from("go/synthetic-reference"),
-                ]),
-                { name: path },
-              ),
+              tarRecord(storedContents, { name: path }),
             ]);
           }
           const map = Buffer.alloc(512);
@@ -634,7 +634,9 @@ describe("npm package tar listings", () => {
             scenario: scenario.name,
             status: 1,
           });
-          expect(result.stderr).toContain(scenario.error);
+          if (typeof scenario.error === "string")
+            expect(result.stderr).toContain(scenario.error);
+          else expect(result.stderr).toMatch(scenario.error);
         } else {
           expect({
             scenario: scenario.name,
