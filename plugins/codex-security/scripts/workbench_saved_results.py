@@ -2006,6 +2006,12 @@ def merge_saved_results(
                     claimed.add(group["key"])
                     break
         for rank in (4, 3, 2, 1, 0):
+            identity_claims = {
+                group["key"]
+                for index, _, _, _, matches in pending
+                for group, score in matches
+                if score == 4 and assigned.get(index) is group
+            }
             options = {
                 index: [
                     group
@@ -2013,19 +2019,10 @@ def merge_saved_results(
                     if score >= rank
                     and (
                         group["key"] not in claimed
-                        or (
-                            rank == 0
-                            and not (
-                                _identity_candidate(value)
-                                and any(
-                                    _identity_candidate(previous) == _identity_candidate(value)
-                                    for previous in group["rows"]
-                                )
-                            )
-                        )
+                        or (rank == 0 and group["key"] not in identity_claims)
                     )
                 ]
-                for index, value, _, _, matches in pending
+                for index, _, _, _, matches in pending
                 if index not in assigned
             }
             counts = {}

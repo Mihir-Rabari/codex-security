@@ -1007,8 +1007,9 @@ def test_parent_represents_worker_versions_before_candidate_enrichment(
     assert documents[1] == replay[1]
 
 
+@pytest.mark.cross_platform
 @pytest.mark.parametrize("reversed_rows", [False, True])
-@pytest.mark.parametrize("revised_identity", ["explicit", "implicit"])
+@pytest.mark.parametrize("revised_identity", ["explicit", "implicit", "anonymous"])
 def test_worker_revision_keeps_assigned_sibling_on_frozen_recovery(
     tmp_path, saved_results, reversed_rows, revised_identity
 ):
@@ -1029,6 +1030,8 @@ def test_worker_revision_keeps_assigned_sibling_on_frozen_recovery(
         "title": "Independent review",
         "summary": "Independent evidence remains active.",
     }
+    if revised_identity == "anonymous":
+        first.pop("identity")
     original, unchanged = (first, sibling) if revised_identity == "explicit" else (sibling, first)
     revised = {**original, "title": "Revised review", "summary": "Revised evidence."}
     rows = [first, sibling]
@@ -1049,16 +1052,19 @@ def test_worker_revision_keeps_assigned_sibling_on_frozen_recovery(
     replay = recover(tmp_path, saved_results, [worker], documents[0]["scan"]["preservedSources"])
     for result in (documents, replay):
         findings = result[1]["findings"]
-        assert len(findings) == 2
+        assert len(findings) == (3 if revised_identity == "anonymous" else 2)
         retained = next(row for row in findings if row["title"] == revised["title"])
         assert retained["summary"] == revised["summary"]
         if revised_identity == "explicit":
             assert retained["identity"] == first["identity"]
         assert any(row["summary"] == unchanged["summary"] for row in findings)
-        assert any(
-            row["summary"] == original["summary"]
-            for row in retained["provenance"]["previousFindings"]
-        )
+        if revised_identity == "anonymous":
+            assert any(row["summary"] == original["summary"] for row in findings)
+        else:
+            assert any(
+                row["summary"] == original["summary"]
+                for row in retained["provenance"]["previousFindings"]
+            )
     assert documents[1] == replay[1]
 
 

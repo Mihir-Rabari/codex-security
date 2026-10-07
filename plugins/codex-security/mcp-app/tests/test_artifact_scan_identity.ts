@@ -1939,6 +1939,85 @@ test("finding precedence excludes archived attempts before comparing a parent re
   assert.deepEqual(result.warnings, []);
 });
 
+for (const reverse of [false, true]) {
+  test(`worker raw checkpoint retains ambiguous candidate siblings (reverse=${reverse})`, async (t) => {
+    const normal = await fixture(t, "deep"),
+      recovered = await fixture(t, "deep");
+    for (const f of [normal, recovered])
+      await mkdir(path.join(f.root, "reviewer"));
+    const writer = draftFixture(path.join(normal.root, "reviewer"), "worker"),
+      recoveryWriter = draftFixture(
+        path.join(recovered.root, "reviewer"),
+        "worker",
+      );
+    const first = finding("First independent review", {
+      provenance: { source: "local_plugin", candidateId: "shared-candidate" },
+    });
+    const second = { ...first, title: "Second independent review" };
+    const revised = {
+      ...first,
+      title: "New review",
+      summary: "New synthetic evidence.",
+    };
+    const ordered = (rows: FixtureFinding[]) =>
+      reverse ? [...rows].reverse() : rows;
+    for (const f of [writer, recoveryWriter])
+      await f.write({ ...f.draft(), findings: ordered([first, second]) });
+    await dateDraftFiles(recoveryWriter.root, 100);
+    await writer.write({
+      ...writer.draft(),
+      findings: ordered([revised, second]),
+    });
+    const published = JSON.parse(
+      await readFile(path.join(writer.root, "result.json"), "utf8"),
+    );
+    assert.equal(published.findings.length, 3);
+    await interruptDraftWrite(
+      path.join(recoveryWriter.root, "checkpoints", checkpointName(published)),
+      () =>
+        recoveryWriter.write({
+          ...recoveryWriter.draft(),
+          findings: ordered([revised, second]),
+        }),
+    );
+    const files = [
+      "result.json",
+      "checkpoint-head.json",
+      ...(await readdir(path.join(recoveryWriter.root, "checkpoints"))).map(
+        (name) => path.join("checkpoints", name),
+      ),
+    ];
+    const originals = await Promise.all(
+      files.map((name) => readFile(path.join(recoveryWriter.root, name))),
+    );
+    await normal.write({
+      ...normal.draft(),
+      findings: published.findings.map((row: FixtureFinding) => ({
+        ...row,
+        provenance: { ...row.provenance, workerId: "reviewer" },
+      })),
+    });
+    const result = await recoverAndFinalize(
+      normal,
+      recovered,
+      [savedWorker(recoveryWriter.root)],
+      true,
+      true,
+    );
+    assert.equal(result.normal.length, 3);
+    assert.equal(result.recovered.length, 3);
+    const byTitle = (rows: RecoveredFinding[]) =>
+      [...rows].sort((a, b) => a.title.localeCompare(b.title));
+    assert.deepEqual(byTitle(result.recovered), byTitle(result.normal));
+    assert.deepEqual(result.warnings, []);
+    for (const [index, name] of files.entries())
+      assert.deepEqual(
+        await readFile(path.join(recoveryWriter.root, name)),
+        originals[index],
+      );
+  });
+}
+
 for (const layout of ["standard", "diff", "deep"] as const) {
   for (const reverse of [false, true]) {
     for (const published of [false, true]) {
