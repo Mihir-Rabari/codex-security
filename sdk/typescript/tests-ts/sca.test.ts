@@ -34,6 +34,7 @@ import type { OsvScanResult } from "../src/sca-osv.js";
 import type { ScaResult, TriageFinding } from "../src/sca-types.js";
 import {
   codexSecurityCredentialHome,
+  executablePathForSpawn,
   resolveCodexCommand,
   resolvePluginPython,
   runCodexCommand,
@@ -770,8 +771,8 @@ if (args.includes("app-server")) {
       ...input: Parameters<typeof originalSpawn>
     ) => {
       const [command, args, options] = input;
-      return command === node
-        ? originalSpawn(node, [executable, ...(args ?? [])], options ?? {})
+      return command === node || command === executablePathForSpawn(node)
+        ? originalSpawn(command, [executable, ...(args ?? [])], options ?? {})
         : originalSpawn(...input);
     }) as typeof originalSpawn);
     try {
@@ -1845,9 +1846,11 @@ test.skipIf(process.platform !== "win32")(
       repositoryPath: f.repository,
       outputDir: f.outputDir,
     });
-    const permissions = parseToml(f.captured.codex!.configOverrides![1]!)[
-      "permissions"
-    ] as Record<string, JsonObject>;
+    const permissions = parseToml(
+      f.captured.codex!.configOverrides!.find((value) =>
+        value.startsWith("permissions.codex_security_dependencies="),
+      )!,
+    )["permissions"] as Record<string, JsonObject>;
     expect(
       (permissions["codex_security_dependencies"]!["filesystem"] as JsonObject)[
         join(f.environment.AppData!, "GitHub CLI")

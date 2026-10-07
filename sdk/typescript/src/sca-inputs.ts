@@ -654,7 +654,7 @@ function inspectComposer(content: string, sourcePath: string): InputInspection {
   }
   if (result.references.length > 0) {
     result.limitations.push(
-      "Composer local sources or development branches do not establish the contents of a published package release.",
+      "Composer local sources, source-only Git packages, or development branches do not establish the contents of a published package release.",
     );
   }
   return result;
