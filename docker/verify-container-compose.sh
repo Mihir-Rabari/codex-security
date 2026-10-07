@@ -15,7 +15,7 @@ for compose_file in compose.yaml compose.runner.yaml; do
     jq --exit-status \
       '.services["codex-security"].environment.CODEX_SECURITY_EMBEDDINGS_URL == null' > /dev/null
 
-  CODEX_SECURITY_EMBEDDINGS_URL= \
+  CODEX_SECURITY_EMBEDDINGS_URL="" \
     docker compose --env-file /dev/null -f "$compose_file" config --format json |
     jq --exit-status \
       '.services["codex-security"].environment.CODEX_SECURITY_EMBEDDINGS_URL == ""' > /dev/null
