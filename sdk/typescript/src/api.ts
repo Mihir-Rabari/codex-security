@@ -1004,7 +1004,11 @@ export class CodexSecurity {
       throwIfAborted(signal, outputDir);
       throw error;
     } finally {
-      await knowledgeBase?.cleanup();
+      try {
+        await knowledgeBase?.cleanup();
+      } catch {
+        // Temporary input cleanup must not replace the assessment or original failure.
+      }
     }
   }
 

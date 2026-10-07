@@ -1022,6 +1022,59 @@ describe("CodexSecurity finding validation", () => {
     },
   );
 
+  test.each([
+    { modelFails: false, cleanupFails: true },
+    { modelFails: true, cleanupFails: true },
+    { modelFails: false, cleanupFails: false },
+    { modelFails: true, cleanupFails: false },
+  ])(
+    "preserves the validation outcome when temporary knowledge cleanup fails: %p",
+    async ({ modelFails, cleanupFails }) => {
+      const modelError = new Error("Synthetic validation failure.");
+      const cleanupError = new Error(
+        "Synthetic temporary knowledge cleanup failure.",
+      );
+      async function* events() {
+        if (modelFails) throw modelError;
+        yield* validationEvents();
+      }
+      const fixture = await validationClient(events);
+      await using client = fixture.client;
+      const document = join(fixture.root, "knowledge.md");
+      await writeFile(document, "Synthetic primary project guidance.");
+      const actualRm = fsPromises.rm;
+      let cleanupPath: string | undefined;
+      const cleanupSpy = spyOn(fsPromises, "rm").mockImplementation(
+        async (path, options) => {
+          if (
+            path ===
+            fixture.captured.codex?.env?.["CODEX_SECURITY_KNOWLEDGE_BASE"]
+          ) {
+            cleanupPath = String(path);
+            if (cleanupFails) throw cleanupError;
+          }
+          return await actualRm(path, options);
+        },
+      );
+      try {
+        const result = client.validate({
+          ...fixture.options,
+          knowledgeBasePaths: [document],
+        });
+        if (modelFails) await expect(result).rejects.toBe(modelError);
+        else await expect(result).resolves.toMatchObject(assessment);
+        expect(cleanupPath).toBeDefined();
+        expect(await readFile(document, "utf8")).toBe(
+          "Synthetic primary project guidance.",
+        );
+      } finally {
+        cleanupSpy.mockRestore();
+        if (cleanupPath !== undefined)
+          await actualRm(cleanupPath, { recursive: true, force: true });
+      }
+    },
+  );
+
   test.each([false, true])(
     "retains supplied knowledge context for workflow validation; changed=%p",
     async (changed) => {
