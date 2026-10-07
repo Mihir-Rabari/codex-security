@@ -1,4 +1,4 @@
-import { gitMarkerRoot } from "./targets.js";
+import { gitProtectionRoots } from "./targets.js";
 import { isNonEmptyString } from "./value.js";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -2882,19 +2882,8 @@ export async function resolvePluginPython(
   // A saved target may be a subdirectory of an untrusted checkout. Protect its
   // enclosing checkout as well as the caller's, without excluding an arbitrary cwd.
   for (const directory of new Set([process.cwd(), ...protectedRoot])) {
-    try {
-      const checkout = await gitMarkerRoot(
-        directory,
-        options.signal,
-        "outermost",
-      );
-      if (checkout !== null && !protectedRoot.includes(checkout))
-        protectedRoot.push(checkout);
-    } catch (error) {
-      // Historical checkouts may have been removed; keep their lexical exclusion.
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
-    }
+    for (const checkout of await gitProtectionRoots(directory, options.signal))
+      if (!protectedRoot.includes(checkout)) protectedRoot.push(checkout);
   }
   if (options.configuredPath !== undefined) {
     return await requirePython(

@@ -3,7 +3,11 @@ import { inspectTrustedExecutable } from "./trusted-executable.js";
 import { realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { isAbsolute, join, resolve } from "node:path";
-import { gitHistoryIdentity, gitMarkerRoot } from "./targets.js";
+import {
+  gitHistoryIdentity,
+  gitMarkerRoot,
+  gitProtectionRoots,
+} from "./targets.js";
 import { CodexSecurityError } from "./errors.js";
 import type { SavedScanDependencies } from "./saved-scan.js";
 import {
@@ -75,10 +79,9 @@ export async function savedScanWorkbench(
       "Saved scan history has no absolute repository target.",
     );
 
-  const callerRoot = await gitMarkerRoot(
+  const callerRoots = await gitProtectionRoots(
     options.currentDirectory,
     options.signal,
-    "outermost",
   );
   let python: string | undefined;
   const workbench: SavedScanDependencies["runWorkbench"] = async (
@@ -103,10 +106,7 @@ export async function savedScanWorkbench(
     // Pin the interpreter selected with every candidate and the caller checkout protected.
     python ??= await resolvePluginPython({
       environment,
-      protectedRoot: [
-        ...(callerRoot === null ? [] : [callerRoot]),
-        ...targets.map((row) => row.target_path),
-      ],
+      protectedRoot: [...callerRoots, ...targets.map((row) => row.target_path)],
       signal,
     });
     environment["PYTHON"] = python;
@@ -290,19 +290,14 @@ async function latestTargets(
   if (caller !== null) {
     // Resolve metadata with a host Git, never a Git executable from any candidate checkout.
     const roots = await Promise.all(
-      registered.map(async (target) => {
-        try {
-          return await gitMarkerRoot(target.target_path, signal, "outermost");
-        } catch {
-          signal?.throwIfAborted();
-          return null;
-        }
-      }),
+      registered.map((target) =>
+        gitProtectionRoots(target.target_path, signal),
+      ),
     );
     const protectedRoots = [
-      caller,
+      ...(await gitProtectionRoots(directory, signal)),
       ...registered.map((target) => target.target_path),
-      ...roots.filter((root): root is string => root !== null),
+      ...roots.flat(),
     ];
     const configured = environmentEntry(environment, "CODEX_SECURITY_GIT");
     const inspected =

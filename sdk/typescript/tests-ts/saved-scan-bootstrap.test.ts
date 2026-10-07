@@ -815,56 +815,66 @@ test("latest follows progress timestamps and excludes canceled scans", async () 
   }
 });
 
-test.skipIf(process.platform === "win32")(
-  "latest never executes Git from a saved non-Git target",
-  async () => {
-    const f = await fixture(true);
-    const other = join(f.root, "non-git-target");
-    await mkdir(other);
-    const marker = join(f.root, "non-git-probed");
-    await writeFile(
-      join(other, "git"),
-      '#!/bin/sh\nprintf probed > "$TEST_GIT_PROBE"\nprintf "not-git\\n"\n',
-      { mode: 0o700 },
-    );
-    const db = new Database(
-      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
-    );
-    try {
-      db.query("INSERT INTO security_targets VALUES (?, ?, ?, ?, ?)").run(
-        "non-git-target",
-        other,
-        "Synthetic non-Git target",
-        "2026-01-01T00:00:00Z",
-        "2026-01-01T00:00:00Z",
+for (const kind of ["non-Git", "symlinked"] as const) {
+  test.skipIf(process.platform === "win32")(
+    `latest never executes Git from a saved ${kind} target`,
+    async () => {
+      const f = await fixture(true);
+      const other = join(f.root, "non-git-target");
+      await mkdir(other);
+      let target = other;
+      if (kind === "symlinked") {
+        await mkdir(join(other, ".git"));
+        const destination = join(f.root, "external-target");
+        await mkdir(destination);
+        target = join(other, "component");
+        await symlink(destination, target);
+      }
+      const marker = join(f.root, "non-git-probed");
+      await writeFile(
+        join(other, "git"),
+        '#!/bin/sh\nprintf probed > "$TEST_GIT_PROBE"\nprintf "not-git\\n"\n',
+        { mode: 0o700 },
       );
-      db.query(
-        "UPDATE scans SET target_path = ?, target_id = ? WHERE id = ?",
-      ).run(other, "non-git-target", f.second.scanId);
-    } finally {
-      db.close();
-    }
-    const workbench = await savedScanWorkbench("latest", {
-      environment: {
-        ...f.environment,
-        PYTHON: f.python,
-        PATH: other + delimiter + f.environment.PATH,
-        TEST_GIT_PROBE: marker,
-      },
-      pluginRoot: PLUGIN_ROOT,
-      currentDirectory: f.repository,
-    });
-    expect(
-      (
-        await resolveCompletedScan("latest", {
-          currentDirectory: () => f.repository,
-          runWorkbench: workbench,
-        })
-      ).scanId,
-    ).toBe(f.first.scanId);
-    expect(existsSync(marker)).toBe(false);
-  },
-);
+      const db = new Database(
+        join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+      );
+      try {
+        db.query("INSERT INTO security_targets VALUES (?, ?, ?, ?, ?)").run(
+          "non-git-target",
+          target,
+          "Synthetic non-Git target",
+          "2026-01-01T00:00:00Z",
+          "2026-01-01T00:00:00Z",
+        );
+        db.query(
+          "UPDATE scans SET target_path = ?, target_id = ? WHERE id = ?",
+        ).run(target, "non-git-target", f.second.scanId);
+      } finally {
+        db.close();
+      }
+      const workbench = await savedScanWorkbench("latest", {
+        environment: {
+          ...f.environment,
+          PYTHON: f.python,
+          PATH: other + delimiter + f.environment.PATH,
+          TEST_GIT_PROBE: marker,
+        },
+        pluginRoot: PLUGIN_ROOT,
+        currentDirectory: f.repository,
+      });
+      expect(
+        (
+          await resolveCompletedScan("latest", {
+            currentDirectory: () => f.repository,
+            runWorkbench: workbench,
+          })
+        ).scanId,
+      ).toBe(f.first.scanId);
+      expect(existsSync(marker)).toBe(false);
+    },
+  );
+}
 
 test.skipIf(process.platform === "win32")(
   "bootstrap protects a target committed only to the live WAL",
@@ -948,53 +958,61 @@ test("saved-scan bootstrap waits for a concurrent database writer", async () => 
   }
 });
 
-for (const source of ["PYTHON", "PATH"] as const) {
-  test.skipIf(process.platform === "win32")(
-    `saved missing targets still protect their enclosing checkout from ${source}`,
-    async () => {
-      const f = await fixture(true);
-      const target = join(f.repository, "deleted-component", "nested");
-      const python = join(f.repository, "python3");
-      const marker = join(f.root, "missing-target-probed");
-      await writeFile(
-        python,
-        '#!/bin/sh\nprintf probed > "$TEST_PYTHON_PROBE"\nprintf "codex-security-python-ok\\n"\n',
-        { mode: 0o700 },
-      );
-      const db = new Database(
-        join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
-      );
-      try {
-        db.query("UPDATE scans SET target_path = ? WHERE id = ?").run(
-          target,
-          f.first.scanId,
+for (const kind of ["missing", "symlinked"] as const) {
+  for (const source of ["PYTHON", "PATH"] as const) {
+    test.skipIf(process.platform === "win32")(
+      `saved ${kind} targets still protect their enclosing checkout from ${source}`,
+      async () => {
+        const f = await fixture(true);
+        const target = join(f.repository, "deleted-component", "nested");
+        if (kind === "symlinked") {
+          const destination = join(f.root, "external-target");
+          await mkdir(destination);
+          await mkdir(dirname(target), { recursive: true });
+          await symlink(destination, target);
+        }
+        const python = join(f.repository, "python3");
+        const marker = join(f.root, "missing-target-probed");
+        await writeFile(
+          python,
+          '#!/bin/sh\nprintf probed > "$TEST_PYTHON_PROBE"\nprintf "codex-security-python-ok\\n"\n',
+          { mode: 0o700 },
         );
-      } finally {
-        db.close();
-      }
-      const workbench = await savedScanWorkbench(f.first.scanId, {
-        environment: {
-          ...f.environment,
-          TEST_PYTHON_PROBE: marker,
-          ...(source === "PYTHON"
-            ? { PYTHON: python }
-            : { PATH: f.repository + delimiter + f.environment.PATH }),
-        },
-        pluginRoot: PLUGIN_ROOT,
-        currentDirectory: f.root,
-      });
-      const result = workbench(["get-scan", "--scan-id", f.first.scanId]);
-      if (source === "PYTHON")
-        await expect(result).rejects.toThrow(
-          "PYTHON interpreter is unavailable or unusable",
+        const db = new Database(
+          join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
         );
-      else {
-        expect((await result)["scan"]).toMatchObject({
-          scanId: f.first.scanId,
+        try {
+          db.query("UPDATE scans SET target_path = ? WHERE id = ?").run(
+            target,
+            f.first.scanId,
+          );
+        } finally {
+          db.close();
+        }
+        const workbench = await savedScanWorkbench(f.first.scanId, {
+          environment: {
+            ...f.environment,
+            TEST_PYTHON_PROBE: marker,
+            ...(source === "PYTHON"
+              ? { PYTHON: python }
+              : { PATH: f.repository + delimiter + f.environment.PATH }),
+          },
+          pluginRoot: PLUGIN_ROOT,
+          currentDirectory: f.root,
         });
-        expect(workbench.environment["PYTHON"]).not.toBe(python);
-      }
-      expect(existsSync(marker)).toBe(false);
-    },
-  );
+        const result = workbench(["get-scan", "--scan-id", f.first.scanId]);
+        if (source === "PYTHON")
+          await expect(result).rejects.toThrow(
+            "PYTHON interpreter is unavailable or unusable",
+          );
+        else {
+          expect((await result)["scan"]).toMatchObject({
+            scanId: f.first.scanId,
+          });
+          expect(workbench.environment["PYTHON"]).not.toBe(python);
+        }
+        expect(existsSync(marker)).toBe(false);
+      },
+    );
+  }
 }

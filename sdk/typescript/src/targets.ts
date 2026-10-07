@@ -797,6 +797,26 @@ export async function gitMarkerRoot(
       candidate = parent;
     }
   }
+  return await walkGitMarkers(current, signal, search);
+}
+
+/** Protect both the stored path's checkout and its resolved destination. */
+export async function gitProtectionRoots(
+  repository: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const roots = await Promise.all([
+    gitMarkerRoot(repository, signal, "outermost"),
+    walkGitMarkers(resolve(repository), signal, "outermost"),
+  ]);
+  return [...new Set(roots.filter((root): root is string => root !== null))];
+}
+
+async function walkGitMarkers(
+  current: string,
+  signal: AbortSignal | undefined,
+  search: "nearest" | "outermost",
+): Promise<string | null> {
   let root: string | null = null;
   while (true) {
     throwIfAborted(signal);
@@ -805,7 +825,8 @@ export async function gitMarkerRoot(
       if (search === "nearest") return current;
       root = current;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
     }
     const parent = dirname(current);
     if (parent === current) return root;
