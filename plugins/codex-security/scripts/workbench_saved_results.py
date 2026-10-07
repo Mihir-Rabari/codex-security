@@ -1272,6 +1272,8 @@ def merge_saved_results(
                 return record
         return None
 
+    reconciled_surface_ids: dict[tuple[str | None, str], str] = {}
+
     def project_missing_record(
         field: str, item: dict[str, Any], index: int, worker: Any, source: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1358,6 +1360,9 @@ def merge_saved_results(
                     if owner == worker["id"] and accepted:
                         source_surface_ids.setdefault(source_id, accepted[0])
                 for source_id, (offset, surface) in source_surface_ids.items():
+                    if (worker["id"], source_id) in reconciled_surface_ids:
+                        surface_ids[source_id] = reconciled_surface_ids[(worker["id"], source_id)]
+                        continue
                     projected_id = surface_id(surface, offset)
                     if id(source) in accepted_coverage_sources or accepted_positions(surface):
                         origin = projection_origins.get(id(surface))
@@ -2131,9 +2136,10 @@ def merge_saved_results(
                 removed_parent = [row for row in previous if id(row) in replaced]
                 coverage[field] = [row for row in coverage[field] if row not in removed_parent]
     if isinstance(coverage.get("surfaces"), list):
-        for _, _, source_surface, surface in surface_updates:
+        for _, owner, source_surface, surface in surface_updates:
             original_surface = surface
             surface = project_record("surfaces", surface, source_surface)
+            reconciled_surface_ids[record_key("surfaces", owner, source_surface)] = surface["id"]
             if surface not in coverage["surfaces"] and (
                 surface is original_surface or retained_coverage_record("surfaces", surface) is None
             ):

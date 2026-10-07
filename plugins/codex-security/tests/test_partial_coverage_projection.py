@@ -1517,6 +1517,7 @@ def test_selected_candidate_outcome_removes_its_projected_parent_pending_rows(
         "new linked surface",
         "revised linked surface",
         "reopened accepted surface",
+        "reopened mixed receipts",
         "candidate id fallback",
         "closed sibling candidate",
         "mixed receipts",
@@ -1549,10 +1550,10 @@ def test_selected_worker_projection_keeps_links_and_pending_authority(
         surface["candidateId"] = candidate
     elif change == "closed sibling candidate":
         deferred.append({**task, "id": "candidate-task", "candidateId": candidate})
-    elif change in {"new linked surface", "reopened accepted surface"}:
+    elif change in {"new linked surface", "reopened accepted surface", "reopened mixed receipts"}:
         surface["disposition"] = "no_issue_found"
         deferred = []
-    elif change == "mixed receipts":
+    if change in {"mixed receipts", "reopened mixed receipts"}:
         result = (
             scan.scan_dir
             / "artifacts"
@@ -1584,6 +1585,10 @@ def test_selected_worker_projection_keeps_links_and_pending_authority(
             "deferred": deferred,
         },
     }
+    if change == "reopened mixed receipts":
+        draft["coverage"]["resolvedDeferred"] = [
+            {"id": task["id"], "reason": "Earlier source follow-up completed."}
+        ]
     result.write_text(json.dumps(draft))
     projected = {}
     for field, name, rows in (
@@ -1623,9 +1628,18 @@ def test_selected_worker_projection_keeps_links_and_pending_authority(
     checkpoint = None
     if change != "unchanged":
         updated = copy.deepcopy(draft)
-        if change in {"new linked surface", "revised linked surface", "reopened accepted surface"}:
+        if change in {
+            "new linked surface",
+            "revised linked surface",
+            "reopened accepted surface",
+            "reopened mixed receipts",
+        }:
             updated_id = "new-surface" if change == "new linked surface" else surface["id"]
-            updated_task = task["id"] if change == "revised linked surface" else "new-task"
+            updated_task = (
+                task["id"]
+                if change in {"revised linked surface", "reopened mixed receipts"}
+                else "new-task"
+            )
             updated["coverage"].update(
                 surfaces=[
                     {
@@ -1637,6 +1651,9 @@ def test_selected_worker_projection_keeps_links_and_pending_authority(
                 ],
                 deferred=[{**task, "id": updated_task, "surfaceIds": [updated_id]}],
             )
+            if change == "reopened mixed receipts":
+                updated["coverage"].pop("resolvedDeferred")
+                updated["coverage"]["surfaces"][0]["receiptRefs"] = ["artifacts/new.txt"]
         elif change == "candidate id fallback":
             updated["coverage"].update(
                 surfaces=[{**surface, "disposition": "rejected"}], deferred=[]
@@ -1670,6 +1687,12 @@ def test_selected_worker_projection_keeps_links_and_pending_authority(
         )
     os.utime(result, ns=(100, 100))
     os.utime(coverage_path, ns=(200, 200))
+    if change == "reopened mixed receipts":
+        result.write_text(json.dumps(updated))
+        checkpoint.write_text(json.dumps(draft))
+        (result.parent / "checkpoint-head.json").unlink()
+        os.utime(checkpoint, ns=(100, 100))
+        os.utime(result, ns=(300, 300))
     originals = {
         path: path.read_bytes() for path in [result] + ([checkpoint] if checkpoint else [])
     }
@@ -1698,15 +1721,26 @@ def test_selected_worker_projection_keeps_links_and_pending_authority(
             "new linked surface",
             "revised linked surface",
             "reopened accepted surface",
+            "reopened mixed receipts",
             "repeated pending",
             "unchanged",
         }
     )
-    if change in {"new linked surface", "revised linked surface", "reopened accepted surface"}:
+    if change in {
+        "new linked surface",
+        "revised linked surface",
+        "reopened accepted surface",
+        "reopened mixed receipts",
+    }:
         linked = next(
             row for row in coverage["surfaces"] if row["id"] == pending[0]["surfaceIds"][0]
         )
         assert linked["label"] == "New follow-up"
+        if change == "reopened mixed receipts":
+            assert set(linked["receiptRefs"]) == {
+                (result.parent / "artifacts" / f"{name}.txt").relative_to(scan.scan_dir).as_posix()
+                for name in ("old", "new")
+            }
         assert len({row["id"] for row in coverage["surfaces"]}) == len(coverage["surfaces"])
     elif change in {"closed sibling candidate", "mixed receipts"}:
         saved_surface = next(
