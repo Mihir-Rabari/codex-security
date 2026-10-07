@@ -37,6 +37,7 @@ import {
   restoredDeepScanWorkerSettings,
   type DeepScanLegacySettingsContext,
 } from "./src/deep-scan/recovery-settings.js";
+import { createProviderProfile } from "../../../sdk/typescript/src/provider-profile.js";
 import { CodexSdkWorkerExecutor } from "./src/deep-scan/executor.js";
 import {
   CODEX_SANDBOX_STATE_META_CAPABILITY,
@@ -1171,6 +1172,7 @@ export function createCodexSecurityServer(): McpServer {
               store: deepScanStore,
               prepareExecutor: async (run) =>
                 new CodexSdkWorkerExecutor({
+                  createProviderProfile,
                   ...restoredDeepScanWorkerSettings(
                     await loadDeepScanExecutionSettings(
                       run.scanDir,

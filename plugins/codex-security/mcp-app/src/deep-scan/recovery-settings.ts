@@ -336,6 +336,7 @@ export function restoredDeepScanWorkerSettings(
   currentParentSandbox: DeepWorkerParentSandbox,
   environment: () => NodeJS.ProcessEnv = () => process.env,
 ): {
+  nativeProfileHome: string;
   codexOptions: CodexOptions;
   model?: string;
   reasoningEffort?: string;
@@ -357,6 +358,9 @@ export function restoredDeepScanWorkerSettings(
       ),
   );
   return {
+    get nativeProfileHome() {
+      return environment().CODEX_HOME || join(homedir(), ".codex");
+    },
     model: settings.model,
     reasoningEffort: settings.reasoningEffort,
     ...(settings.runtimeSettings === undefined

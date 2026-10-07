@@ -19,6 +19,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import {
+  DeepScanCoordinator,
   DeepScanCoordinatorRegistry,
   DeepScanNonRetryableError,
   DeepScanRemoteCoordinator,

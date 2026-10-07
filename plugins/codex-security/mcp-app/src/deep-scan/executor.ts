@@ -46,7 +46,14 @@ import type {
   CodexWorkerResult,
 } from "./types.js";
 
+import type {
+  createProviderProfile,
+  ProviderProfile,
+} from "../../../../../sdk/typescript/src/provider-profile.js";
+
 export interface CodexSdkWorkerModelSettings {
+  nativeProfileHome?: string;
+  createProviderProfile?: typeof createProviderProfile;
   /** Resolved by the execution owner, including when reconstructing a scan. */
   codexOptions?: CodexOptions;
   model?: string;
@@ -89,6 +96,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   ) {}
 
   async run(request: CodexWorkerRequest): Promise<CodexWorkerResult> {
+    let providerProfile: ProviderProfile | undefined;
     try {
       const parentSandbox = this.modelSettings.parentSandbox;
       if (!parentSandbox) {
@@ -101,7 +109,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const originalCwd = process.cwd();
       const childEnv = await snapshotWorkerEnvironment(resolved?.env);
       const runtimeSettings = await (this.runtimeSettings ??= (async () => ({
-        ...(await workerRuntimeSettings(childEnv)),
+        ...(await workerRuntimeSettings(
+          childEnv,
+          this.modelSettings.nativeProfileHome,
+        )),
         ...this.modelSettings.runtimeSettings,
       }))());
       for (const [name, value] of Object.entries(
@@ -165,6 +176,29 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
             workerProfile,
         }),
       ];
+      const profileHome = this.modelSettings.nativeProfileHome;
+      const boundHome =
+        environmentVariable(childEnv, "CODEX_HOME", process.platform) ||
+        join(homedir(), ".codex");
+      if (
+        runtimeSettings.nativeProfile !== undefined &&
+        profileHome !== undefined &&
+        this.modelSettings.createProviderProfile &&
+        (await fs.realpath(profileHome)) !== (await fs.realpath(boundHome))
+      ) {
+        // The account home is bound to the original scan; the current private
+        // provider profile belongs to this execution owner's environment.
+        const profileConfig = parseToml(
+          await fs.readFile(
+            join(profileHome, `${runtimeSettings.nativeProfile}.config.toml`),
+            "utf8",
+          ),
+        );
+        providerProfile = await this.modelSettings.createProviderProfile(
+          boundHome,
+          profileConfig as Parameters<typeof createProviderProfile>[1],
+        );
+      }
       const openAiApiKey = environmentVariable(
         childEnv,
         "OPENAI_API_KEY",
@@ -220,7 +254,8 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           ? createCodexClient(codexOptions)
           : createCodexProfileClient<ThreadEvent>({
               ...codexOptions,
-              profileName: runtimeSettings.nativeProfile,
+              profileName:
+                providerProfile?.name ?? runtimeSettings.nativeProfile,
             });
       const threadOptions = {
         ...(this.modelSettings.model
@@ -311,6 +346,8 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       }
     } catch (error) {
       throw classifyCodexWorkerError(error);
+    } finally {
+      await providerProfile?.cleanup();
     }
   }
 
@@ -633,6 +670,7 @@ export function workerRuntimeSettingsFromConfig(
 
 async function workerRuntimeSettings(
   environment: Record<string, string>,
+  nativeProfileHome?: string,
 ): Promise<CodexSdkWorkerRuntimeSettings> {
   const configPath = environmentVariable(
     environment,
@@ -680,6 +718,7 @@ async function workerRuntimeSettings(
     }
     settings.nativeProfile = nativeProfile;
     const codexHome =
+      nativeProfileHome ||
       environmentVariable(environment, "CODEX_HOME", process.platform) ||
       join(homedir(), ".codex");
     const nativeProfileConfig = parseToml(
