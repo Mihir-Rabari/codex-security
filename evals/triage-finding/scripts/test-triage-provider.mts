@@ -493,19 +493,28 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
     const alias = path.join(root, "codex-alias");
     fs.symlinkSync(fakeCodex, alias);
     const selectedPath = `${root}${path.delimiter}${process.env.PATH}`;
-    for (const command of [
-      fakeCodex,
-      path.relative(process.cwd(), fakeCodex),
-      path.basename(fakeCodex),
-      alias,
-    ]) {
-      const provider = await load(nodes[0], command, { PATH: selectedPath });
+    const builtinCodex = path.join(root, "test");
+    fs.copyFileSync(fakeCodex, builtinCodex);
+    const literalCodex = path.join(root, String.raw`codex\probe`);
+    fs.copyFileSync(fakeCodex, literalCodex);
+    const relativePath = path.relative(process.cwd(), root);
+    for (const [command, executable, searchPath] of [
+      [fakeCodex, fakeCodex, selectedPath],
+      [path.relative(process.cwd(), fakeCodex), fakeCodex, selectedPath],
+      [path.basename(fakeCodex), fakeCodex, selectedPath],
+      [alias, fakeCodex, selectedPath],
+      ["test", builtinCodex, selectedPath],
+      [path.basename(literalCodex), literalCodex, selectedPath],
+      ["test", builtinCodex, relativePath],
+      ["test", builtinCodex, `${path.delimiter}${relativePath}`],
+    ] as const) {
+      const provider = await load(nodes[0], command, { PATH: searchPath });
       try {
         const result = await provider.callApi("synthetic");
         assert.equal(result.error, undefined);
         const captured = JSON.parse(String(result.output));
-        assert.equal(captured.executable, fakeCodex);
-        assert.equal(captured.path, selectedPath);
+        assert.equal(captured.executable, executable);
+        assert.equal(captured.path, searchPath);
         assert.deepEqual(captured.directories, [path.dirname(nodes[0]), root]);
       } finally {
         await provider.cleanup?.();

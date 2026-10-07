@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { accessSync, constants, realpathSync } from "node:fs";
+import { accessSync, constants, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import type { ApiProvider, ProviderOptions } from "promptfoo";
 
@@ -24,19 +24,32 @@ function resolveCommand(
   cwd: string,
   environment: NodeJS.ProcessEnv,
 ) {
-  return /[/\\]/.test(command)
-    ? command
-    : execFileSync(
-        process.platform === "win32"
-          ? path.join(process.env.SystemRoot!, "System32", "where.exe")
-          : "/bin/sh",
-        process.platform === "win32"
-          ? [command]
-          : ["-c", 'command -v "$1"', "triage-node", command],
-        { cwd, env: environment, encoding: "utf8" },
-      )
-        .trim()
-        .split(/\r?\n/)[0];
+  if (
+    command.includes("/") ||
+    (process.platform === "win32" && command.includes("\\"))
+  )
+    return command;
+  if (process.platform === "win32") {
+    return execFileSync(
+      path.join(process.env.SystemRoot!, "System32", "where.exe"),
+      [command],
+      { cwd, env: environment, encoding: "utf8" },
+    )
+      .trim()
+      .split(/\r?\n/)[0];
+  }
+  for (const directory of (environment.PATH ?? "/usr/bin:/bin").split(
+    path.delimiter,
+  )) {
+    const candidate = path.resolve(cwd, directory, command);
+    try {
+      accessSync(candidate, constants.X_OK);
+      if (statSync(candidate).isFile()) return candidate;
+    } catch {
+      // Continue the same executable search used by native spawn.
+    }
+  }
+  throw new Error(`Executable not found on PATH: ${command}`);
 }
 
 // Resolve the throwaway runtime when the provider runs, not when Promptfoo
