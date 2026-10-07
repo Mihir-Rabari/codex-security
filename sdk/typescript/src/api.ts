@@ -5020,18 +5020,21 @@ function selectedWorkerRuntimeConfig(
       return value === undefined ? [] : [[name, value]];
     }),
   );
-  const instructionsFile = resolved["model_instructions_file"];
-  if (typeof instructionsFile === "string") {
-    resolved["model_instructions_file"] = resolve(
-      workingDirectory,
-      expandHome(instructionsFile, environment),
-    );
+  for (const key of ["model_instructions_file", "sqlite_home"]) {
+    const configuredPath = resolved[key];
+    if (typeof configuredPath === "string") {
+      resolved[key] = resolve(
+        workingDirectory,
+        expandHome(configuredPath, environment),
+      );
+    }
   }
   return {
     ...Object.fromEntries(
       [
         "features",
         "model_instructions_file",
+        "sqlite_home",
         "model_verbosity",
         "web_search",
         "windows",
@@ -5127,7 +5130,10 @@ function sqliteHomeEnvironment(
   const sqliteHome =
     typeof configured === "string"
       ? configured
-      : environmentValue(environment, "CODEX_SQLITE_HOME");
+      : (process.platform === "win32"
+          ? environmentValue(environment, "CODEX_SQLITE_HOME")
+          : environment["CODEX_SQLITE_HOME"]
+        )?.trim() || undefined;
   return sqliteHome === undefined
     ? {}
     : {

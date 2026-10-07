@@ -453,7 +453,9 @@ def _read_rollout_usage(
                 elif event.get("type") == "event_msg" and payload.get("type") == "token_count":
                     inherited_usage = _token_snapshot(payload)
                     if inherited_usage is not None:
-                        previous = inherited_usage
+                        previous = _retain_cache_write_baseline(
+                            previous, inherited_usage, _cache_writes_reported(payload)
+                        )
                 continue
             if event.get("type") != "event_msg" or payload.get("type") != "token_count":
                 continue
@@ -463,10 +465,7 @@ def _read_rollout_usage(
                 warnings.add("token_record_invalid")
                 continue
             reset = snapshot["totalTokens"] < previous["totalTokens"]
-            raw_usage = payload.get("info", {}).get("total_token_usage", {})
-            cache_writes_reported = (
-                "cache_write_input_tokens" in raw_usage or "cache_write_tokens" in raw_usage
-            )
+            cache_writes_reported = _cache_writes_reported(payload)
             fills_cache_writes = (
                 not previous_cache_writes_reported
                 and cache_writes_reported
@@ -479,7 +478,7 @@ def _read_rollout_usage(
                 key: value if reset or value < previous[key] else value - previous[key]
                 for key, value in snapshot.items()
             }
-            previous = snapshot
+            previous = _retain_cache_write_baseline(previous, snapshot, cache_writes_reported)
             if timestamp < started_at:
                 continue
             if completed_at is not None and timestamp > completed_at:
@@ -510,6 +509,23 @@ def _read_rollout_usage(
     if not boundary_reached:
         warnings.add("thread_ownership_unavailable")
     return total, warnings
+
+
+def _cache_writes_reported(payload: Mapping[str, Any]) -> bool:
+    raw_usage = payload.get("info", {}).get("total_token_usage", {})
+    return "cache_write_input_tokens" in raw_usage or "cache_write_tokens" in raw_usage
+
+
+def _retain_cache_write_baseline(
+    previous: dict[str, int], snapshot: dict[str, int], reported: bool
+) -> dict[str, int]:
+    if (
+        not reported
+        and snapshot["inputTokens"] >= previous["inputTokens"]
+        and snapshot["outputTokens"] >= previous["outputTokens"]
+    ):
+        return {**snapshot, "cacheWriteInputTokens": previous["cacheWriteInputTokens"]}
+    return snapshot
 
 
 def _session_parent_thread_id(payload: Mapping[str, Any]) -> str | None:

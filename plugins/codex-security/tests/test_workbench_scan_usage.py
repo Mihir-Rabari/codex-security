@@ -368,6 +368,56 @@ def test_completion_includes_cached_and_cache_write_tokens(
     }
 
 
+@pytest.mark.parametrize("cache_write_field", ["cache_write_input_tokens", "cache_write_tokens"])
+@pytest.mark.parametrize(
+    ("snapshots", "expected_input", "expected_writes"),
+    [
+        ([(100, 50), (100, None), (100, 50)], 100, 50),
+        ([(100, 80), (200, None), (200, 80)], 200, 80),
+        ([(100, 40), (200, None), (300, 60)], 300, 60),
+        ([(100, 40), (20, None), (100, 20)], 200, 60),
+        ([(100, 40), (200, 20), (300, 30)], 300, 70),
+        ([(100, None), (100, 50)], 100, 50),
+    ],
+    ids=[
+        "same-total",
+        "increasing",
+        "new-writes",
+        "epoch-reset",
+        "explicit-decrease",
+        "initial-omission",
+    ],
+)
+def test_completion_retains_cache_write_baseline_across_omissions(
+    tmp_path: Path,
+    cache_write_field: str,
+    snapshots: list[tuple[int, int | None]],
+    expected_input: int,
+    expected_writes: int,
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    events = []
+    for input_tokens, writes in snapshots:
+        event = _token_event(counted, input_tokens, 0)
+        reported = event["payload"]["info"]["total_token_usage"]
+        reported.pop("cache_write_input_tokens")
+        if writes is not None:
+            reported[cache_write_field] = writes
+        events.append(event)
+    parent = _rollout(tmp_path, "scan-parent", events)
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+
+    usage = _complete_scan(fixture)["scan"]["usage"]
+
+    assert usage == {
+        "coverage": "complete",
+        "source": "codex_rollout",
+        **_counts(expected_input, 0, 0, cache_write_input_tokens=expected_writes),
+        "threadCount": 1,
+    }
+
+
 def test_completion_excludes_separately_inherited_worker_snapshots(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)

@@ -1028,8 +1028,11 @@ function readSessionEvent(
     if (payload["type"] === "token_count" && isRecord(payload["info"])) {
       const usage = tokenUsage(payload["info"]["total_token_usage"]);
       if (usage !== null) {
-        session.inheritedUsage = usage;
-        session.previousRawUsage = usage;
+        session.previousRawUsage = retainCacheWriteBaseline(
+          session.previousRawUsage,
+          usage,
+        );
+        session.inheritedUsage = session.previousRawUsage;
       }
     }
     if (payload["type"] === "task_started") {
@@ -1219,18 +1222,10 @@ function readSessionEvent(
     );
   }
   if (usage === null) return;
-  // An omitted field does not reset a known cumulative count in this epoch.
-  session.previousRawUsage =
-    usage.cache_write_input_tokens_reported === false &&
-    session.previousRawUsage !== null &&
-    usage.input_tokens >= session.previousRawUsage.input_tokens &&
-    usage.output_tokens >= session.previousRawUsage.output_tokens
-      ? {
-          ...usage,
-          cache_write_input_tokens:
-            session.previousRawUsage.cache_write_input_tokens,
-        }
-      : usage;
+  session.previousRawUsage = retainCacheWriteBaseline(
+    session.previousRawUsage,
+    usage,
+  );
   if (accumulated !== null) session.accumulatedOwnUsage = accumulated;
   for (const candidate of [
     ownUsage === null ? null : { usage: ownUsage, cost },
@@ -1406,6 +1401,19 @@ function higherCostUsage(
     nextCost !== null &&
     previousCost.estimatedUsd > nextCost.estimatedUsd
     ? previous
+    : next;
+}
+
+function retainCacheWriteBaseline(
+  previous: ScanTokenUsage | null,
+  next: ScanTokenUsage,
+): ScanTokenUsage {
+  // An omitted field does not reset a known cumulative count in this epoch.
+  return next.cache_write_input_tokens_reported === false &&
+    previous !== null &&
+    next.input_tokens >= previous.input_tokens &&
+    next.output_tokens >= previous.output_tokens
+    ? { ...next, cache_write_input_tokens: previous.cache_write_input_tokens }
     : next;
 }
 

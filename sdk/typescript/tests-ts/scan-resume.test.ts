@@ -41,6 +41,7 @@ async function interruptedScan(
   > = {},
   resolvedDeep = false,
   modelProvider?: string,
+  config: { sqlite_home?: string } = {},
 ) {
   const root = await temporaryDirectory();
   const repository = bulk
@@ -121,6 +122,7 @@ async function interruptedScan(
     config: {
       model: "gpt-5.6-sol",
       approval_policy: "never",
+      ...config,
       ...(modelProvider === undefined ? {} : { model_provider: modelProvider }),
     },
     pluginVersion: "0.1.0",
@@ -448,6 +450,9 @@ test.each(["budgeted", "unbudgeted"])(
       "deep",
       false,
       mode === "budgeted" ? { maxCostUsd: 1 } : {},
+      false,
+      undefined,
+      { sqlite_home: " saved-state/selected" },
     );
     const { stderr, runCli } = createCliTest(main);
     const code = await runCli(
@@ -467,6 +472,15 @@ test.each(["budgeted", "unbudgeted"])(
                 const snapshot = parseToml(await readFile(configPath!, "utf8"))[
                   "worker_runtime"
                 ] as Record<string, unknown>;
+                expect(snapshot["sqlite_home"]).toBe(
+                  join(f.scanDir, " saved-state", "selected"),
+                );
+                expect(options.config?.["sqlite_home"]).toBe(
+                  join(f.scanDir, " saved-state", "selected"),
+                );
+                expect(f.recipe.config["sqlite_home"]).toBe(
+                  " saved-state/selected",
+                );
                 expect(snapshot["drain_session_records"]).toBe(
                   mode === "budgeted" ? true : undefined,
                 );

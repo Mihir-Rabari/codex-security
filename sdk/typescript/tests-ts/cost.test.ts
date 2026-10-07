@@ -6620,6 +6620,106 @@ test.each(["continuous", "reset"] as const)(
   },
 );
 
+test.each([
+  ["continuous", "cache_write_input_tokens"],
+  ["continuous", "cache_write_tokens"],
+  ["reset", "cache_write_input_tokens"],
+  ["reset", "cache_write_tokens"],
+] as const)(
+  "does not bill known copied-prefix cache writes again: %s / %s",
+  async (epoch, field) => {
+    const home = await codexHome();
+    const timestamp = "2026-07-26T12:02:00.250Z";
+    const token = (input: number, writes?: number) => ({
+      type: "event_msg",
+      timestamp,
+      payload: {
+        type: "token_count",
+        info: {
+          total_token_usage: {
+            input_tokens: input,
+            output_tokens: 0,
+            total_tokens: input,
+            ...(writes === undefined ? {} : { [field]: writes }),
+          },
+        },
+      },
+    });
+    const complete = {
+      type: "event_msg",
+      timestamp,
+      payload: { type: "task_complete" },
+    };
+    const parent = await writeUsageSession(home, scanThreadId, {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_write_input_tokens: 0,
+    });
+    await appendFile(parent, jsonLines([complete]) + "\n");
+    const child = join(home, "sessions", "copied-worker.jsonl");
+    await writeFile(
+      child,
+      jsonLines([
+        {
+          type: "session_meta",
+          payload: {
+            id: childUuid7Thread,
+            timestamp,
+            source: {
+              subagent: { thread_spawn: { parent_thread_id: scanThreadId } },
+            },
+          },
+        },
+        { type: "session_meta", payload: { id: scanThreadId } },
+        token(100, 50),
+        token(epoch === "reset" ? 20 : 100),
+        {
+          type: "event_msg",
+          timestamp,
+          payload: {
+            type: "task_started",
+            turn_id: higherUuid7Turn,
+            started_at: 1_785_067_320,
+          },
+        },
+        token(epoch === "reset" ? 100 : 200, epoch === "reset" ? 20 : 60),
+        complete,
+      ]) + "\n",
+    );
+    const expectedInput = epoch === "reset" ? 80 : 100;
+    const expectedWrites = epoch === "reset" ? 20 : 10;
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      maxCostUsd: 1,
+      resolveOwnedSessionPaths: async () =>
+        new Map([
+          [parent, scanThreadId],
+          [child, childUuid7Thread],
+        ]),
+    });
+    tracker.start(scanThreadId);
+    const result = await tracker.stop();
+    expect(result.usage).toMatchObject({
+      input_tokens: expectedInput,
+      output_tokens: 0,
+      cache_write_input_tokens: expectedWrites,
+      cache_write_input_tokens_reported: false,
+    });
+    expect(readPythonRolloutUsage(BUNDLED_PLUGIN_ROOT, child)).toEqual({
+      usage: {
+        inputTokens: expectedInput,
+        cachedInputTokens: 0,
+        cacheWriteInputTokens: expectedWrites,
+        outputTokens: 0,
+        reasoningOutputTokens: 0,
+        totalTokens: expectedInput,
+      },
+      warnings: [],
+    });
+  },
+);
+
 test("retains reported write charges when another worker omits cache writes", async () => {
   const home = await codexHome();
   await writeUsageSession(home, "scan-thread", {

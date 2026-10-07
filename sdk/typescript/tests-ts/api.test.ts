@@ -1649,6 +1649,7 @@ describe("CodexSecurity orchestration", () => {
         {
           model_reasoning_summary: "auto",
           service_tier: "flex",
+          sqlite_home: "direct-state",
           windows: { sandbox: "unelevated" },
         },
         "auto",
@@ -1661,6 +1662,7 @@ describe("CodexSecurity orchestration", () => {
             cloud: {
               model_reasoning_summary: "concise",
               service_tier: "fast",
+              sqlite_home: "profile-state",
               windows: { sandbox: "elevated" },
             },
           },
@@ -1756,6 +1758,16 @@ describe("CodexSecurity orchestration", () => {
                   const workerConfig = parseToml(
                     await readFile(deepConfigPath, "utf8"),
                   )["worker_runtime"] as JsonObject;
+                  const expectedSqliteHome =
+                    index === 1
+                      ? join(scanDir, "direct-state")
+                      : index === 2
+                        ? join(scanDir, "profile-state")
+                        : undefined;
+                  expect(workerConfig["sqlite_home"]).toBe(expectedSqliteHome);
+                  expect(options.config?.["sqlite_home"]).toBe(
+                    expectedSqliteHome,
+                  );
                   expect(workerConfig["drain_session_records"]).toBe(
                     index === 0 ? true : undefined,
                   );
@@ -8144,6 +8156,9 @@ test.each([
   "inherited-relative",
   "inherited-tilde",
   "inherited-padded",
+  "inherited-padded-absolute",
+  "inherited-mixed-case",
+  "configured-padded",
   "inherited-whitespace",
   "default",
   "native-provider",
@@ -8156,17 +8171,40 @@ test.each([
       scanDir = join(root, "scan"),
       stateDirectory = join(root, "state");
     const sqliteHome =
-      location === "default" || location === "inherited-whitespace"
+      location === "default" ||
+      location === "inherited-whitespace" ||
+      (location === "inherited-mixed-case" && process.platform !== "win32")
         ? codexHome
-        : location === "relative" || location === "inherited-relative"
+        : location === "relative" ||
+            location === "inherited-relative" ||
+            location === "inherited-padded"
           ? join(scanDir, "selected-state")
+          : location === "configured-padded"
+            ? join(scanDir, " selected-state", "nested")
+            : join(root, "selected-state");
+    const nativeSqliteHome = sqliteHome;
+    const inheritedHome =
+      location === "inherited-relative"
+        ? "selected-state"
+        : location === "inherited-tilde"
+          ? "~/selected-state"
           : location === "inherited-padded"
-            ? join(scanDir, " selected-state ")
-            : location === "tilde"
-              ? join(root, "selected-state")
-              : join(root, "selected-state");
-    const nativeSqliteHome =
-      location === "inherited-padded" ? sqliteHome.trim() : sqliteHome;
+            ? " selected-state "
+            : location === "inherited-padded-absolute"
+              ? ` ${sqliteHome} `
+              : location === "inherited-mixed-case"
+                ? join(root, "selected-state")
+                : location === "inherited-whitespace"
+                  ? "   "
+                  : join(root, "ambient-unselected-state");
+    const sqliteEnvironment =
+      location === "default" || location === "native-provider"
+        ? {}
+        : {
+            [location === "inherited-mixed-case"
+              ? "Codex_Sqlite_Home"
+              : "CODEX_SQLITE_HOME"]: inheritedHome,
+          };
     await Promise.all([
       mkdir(repository),
       mkdir(codexHome),
@@ -8191,16 +8229,20 @@ test.each([
             location === "inherited-relative" ||
             location === "inherited-tilde" ||
             location === "inherited-padded" ||
+            location === "inherited-padded-absolute" ||
+            location === "inherited-mixed-case" ||
             location === "inherited-whitespace"
           ? {}
           : {
               codexOverrides: {
                 sqlite_home:
-                  location === "relative"
-                    ? "selected-state"
-                    : location === "tilde"
-                      ? "~/selected-state"
-                      : sqliteHome,
+                  location === "configured-padded"
+                    ? " selected-state/nested"
+                    : location === "relative"
+                      ? "selected-state"
+                      : location === "tilde"
+                        ? "~/selected-state"
+                        : sqliteHome,
               },
             };
     const client = new TestClient(config, {
@@ -8214,20 +8256,7 @@ test.each([
         HOME: root,
         USERPROFILE: root,
         CODEX_SECURITY_STATE_DIR: stateDirectory,
-        ...(location === "default" || native !== null
-          ? {}
-          : {
-              CODEX_SQLITE_HOME:
-                location === "inherited-relative"
-                  ? "selected-state"
-                  : location === "inherited-tilde"
-                    ? "~/selected-state"
-                    : location === "inherited-padded"
-                      ? " selected-state "
-                      : location === "inherited-whitespace"
-                        ? "   "
-                        : join(root, "ambient-unselected-state"),
-            }),
+        ...sqliteEnvironment,
       },
       prepareRuntime: async () => ({
         ...preparedRuntime(codexHome),
@@ -8238,20 +8267,7 @@ test.each([
           HOME: root,
           USERPROFILE: root,
           CODEX_SECURITY_STATE_DIR: stateDirectory,
-          ...(location === "default" || native !== null
-            ? {}
-            : {
-                CODEX_SQLITE_HOME:
-                  location === "inherited-relative"
-                    ? "selected-state"
-                    : location === "inherited-tilde"
-                      ? "~/selected-state"
-                      : location === "inherited-padded"
-                        ? " selected-state "
-                        : location === "inherited-whitespace"
-                          ? "   "
-                          : join(root, "ambient-unselected-state"),
-              }),
+          ...sqliteEnvironment,
         },
       }),
       resolvePluginPython: async () => python,
@@ -8349,13 +8365,17 @@ test.each([
       expect(result).toMatchObject({ threadId: "thread-1" });
       expect(ownershipChecks).toBe(1);
       expect(selectedEnvironment?.["CODEX_SQLITE_HOME"]).toBe(
-        location === "default" || native !== null
+        location === "default" ||
+          native !== null ||
+          (location === "inherited-mixed-case" && process.platform !== "win32")
           ? undefined
           : location === "inherited-whitespace"
             ? "   "
             : sqliteHome,
       );
       expect(selectedEnvironment?.["CODEX_HOME"]).toBe(codexHome);
+      if (location === "inherited-mixed-case")
+        expect(selectedEnvironment?.["Codex_Sqlite_Home"]).toBe(inheritedHome);
       if (location === "inherited-tilde")
         expect(
           (await stat(join(nativeSqliteHome, "state_5.sqlite"))).isFile(),

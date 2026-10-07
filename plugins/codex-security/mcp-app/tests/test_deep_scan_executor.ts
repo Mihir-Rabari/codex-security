@@ -1453,6 +1453,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   },
             serviceTier,
             instructionsFile,
+            sqliteHome:
+              index === 0
+                ? undefined
+                : path.join(fixture.root, `configured-state-${index}`),
             verbosity,
             windowsSandbox,
             webSearch,
@@ -1494,6 +1498,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                     ? {}
                     : {
                         model_instructions_file: entry.instructionsFile,
+                        sqlite_home: entry.sqliteHome,
                         model_verbosity: entry.verbosity,
                         web_search: entry.webSearch,
                         model_provider: entry.provider,
@@ -1666,12 +1671,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               path.join(sqliteHomes[index], "explicit.sqlite"),
             );
             assert.equal(
-              invocation.argv.some((arg: string) =>
-                arg.startsWith("sqlite_home="),
-              ),
-              false,
-            );
-            assert.equal(
               workerLaunch.environment!.CODEX_SECURITY_PLUGIN_ROOT,
               path.join(fixture.root, "ambient-plugin"),
             );
@@ -1708,6 +1707,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               service_tier: workerConfigurations[index].serviceTier,
               model_instructions_file:
                 workerConfigurations[index].instructionsFile,
+              sqlite_home: workerConfigurations[index].sqliteHome,
               model_verbosity: workerConfigurations[index].verbosity,
               web_search: workerConfigurations[index].webSearch,
               "windows.sandbox": workerConfigurations[index].windowsSandbox,
@@ -1847,6 +1847,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             assertConfigOverrides(preflight.argv, {
               model_instructions_file: selectedProvider.instructionsFile,
+              sqlite_home: selectedProvider.sqliteHome,
               model_verbosity: selectedProvider.verbosity,
               web_search: selectedProvider.webSearch,
               "windows.sandbox": selectedProvider.windowsSandbox,
