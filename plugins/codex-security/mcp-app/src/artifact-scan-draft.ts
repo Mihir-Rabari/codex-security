@@ -397,6 +397,29 @@ async function preserveScanDraft(
   );
   const savedSources = [...current, ...archived];
   const sources = savedSources.map(({ input }) => input);
+  if (requiresClosureValidation && archived.length > 0) {
+    // Resolve the current worker's receipts before merging archived same-name refs.
+    const activePrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/output/`;
+    for (const surface of result.coverage.surfaces as JsonObject[]) {
+      if (!Array.isArray(surface.receiptRefs)) continue;
+      surface.receiptRefs = await Promise.all(
+        (surface.receiptRefs as string[]).map(async (value) => {
+          const ref = posix.normalize(value);
+          try {
+            await requireRegularFile(
+              join(context.root, ref),
+              context.root,
+              true,
+            );
+            return `${activePrefix}${ref}`;
+          } catch {
+            // Archived and shared references retain their resolved source context.
+            return ref;
+          }
+        }),
+      );
+    }
+  }
   // Older checkpoints can omit IDs already assigned in their published output.
   const savedDeferred = sources.flatMap(
     (source) => source.coverage.deferred as JsonObject[],

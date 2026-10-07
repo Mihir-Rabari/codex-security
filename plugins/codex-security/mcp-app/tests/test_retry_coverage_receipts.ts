@@ -293,3 +293,26 @@ for (const [name, options] of receiptOwnershipCases)
       await rm(root, { recursive: true, force: true });
     }
   });
+
+for (const resume of [false, true]) {
+  for (const [name, receiptSpelling, receiptCollision] of [
+    ["shared same-name collision", "shared scan", true],
+    ["shared distinct-name control", "shared scan", false],
+    ["worker-local same-name control", "worker", true],
+  ] as const) {
+    test(`same surface generic closeout retains both receipt owners: ${name}, ${resume ? "reconstructed" : "live"}`, async () => {
+      const root = await mkdtemp(path.join(tmpdir(), "same-surface-closeout-"));
+      try {
+        await publishCoverageFixture(root, "complete", {
+          receiptRetry: true,
+          closeRetriedSurface: true,
+          receiptSpelling,
+          receiptCollision,
+          resume,
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+}

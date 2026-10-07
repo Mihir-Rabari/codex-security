@@ -27,6 +27,7 @@ interface CoverageFixtureOptions {
   extraReceiptRetry?: boolean;
   rewriteReturnedCoverage?: boolean;
   sameNamedNewSurface?: boolean;
+  closeRetriedSurface?: boolean;
   receiptSpelling?:
     | "worker"
     | "scan"
@@ -109,6 +110,7 @@ export async function publishCoverageFixture(
     extraReceiptRetry = false,
     rewriteReturnedCoverage = false,
     sameNamedNewSurface = false,
+    closeRetriedSurface = false,
     receiptSpelling = "worker",
     activeReceiptSpelling = "worker",
     sharedReceipt = false,
@@ -255,6 +257,41 @@ runpy.run_path(sys.argv[0], run_name="__main__")
                   ? "artifacts/./"
                   : "artifacts/",
               );
+    if (closeRetriedSurface) {
+      await recordCodexSecurityWorkerScanDraft(
+        {
+          root: artifactDir,
+          layout: "worker",
+          repoRoot: targetPath,
+          scanId: run.scanId,
+        },
+        {
+          scanId: run.scanId,
+          complete: false,
+          findings: [],
+          coverage: {
+            completeness: "partial",
+            surfaces: [
+              {
+                id: "current",
+                label: "Current review",
+                disposition: "needs_follow_up",
+                receiptRefs: [receiptRef],
+              },
+            ],
+            explicitExclusions: [],
+            deferred: [
+              {
+                id: "prior-gap",
+                reason: "Verify the earlier boundary.",
+                surfaceIds: ["current"],
+              },
+            ],
+          },
+        },
+      );
+      return;
+    }
     await recordCodexSecurityWorkerScanDraft(
       {
         root: artifactDir,
@@ -414,15 +451,27 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       await mkdir(path.dirname(local), { recursive: true });
       await writeFile(local, "Synthetic review evidence.\n");
     }
-    const activeReceiptRef = sameNamedNewSurface
-      ? sharedRef
-      : sharedReceipt
+    const closureReceiptRef = receiptCollision
+      ? receiptSpelling === "shared scan"
         ? sharedRef
-        : activeReceiptSpelling === "worker"
-          ? "artifacts/review.md"
-          : activeReceiptSpelling === "scan"
-            ? activeQualifiedRef
-            : activeQualifiedRef.replace("artifacts/", "artifacts/./");
+        : "artifacts/prior.txt"
+      : "artifacts/review.md";
+    if (closeRetriedSurface) {
+      const local = path.join(artifactDir, closureReceiptRef);
+      await mkdir(path.dirname(local), { recursive: true });
+      await writeFile(local, "Synthetic review evidence.\n");
+    }
+    const activeReceiptRef = closeRetriedSurface
+      ? closureReceiptRef
+      : sameNamedNewSurface
+        ? sharedRef
+        : sharedReceipt
+          ? sharedRef
+          : activeReceiptSpelling === "worker"
+            ? "artifacts/review.md"
+            : activeReceiptSpelling === "scan"
+              ? activeQualifiedRef
+              : activeQualifiedRef.replace("artifacts/", "artifacts/./");
     const resultPath = path.join(artifactDir, "result.json");
     if (receiptRetry) {
       const saved = await recordCodexSecurityWorkerScanDraft(
@@ -450,6 +499,13 @@ runpy.run_path(sys.argv[0], run_name="__main__")
               },
             ],
             explicitExclusions: [],
+            ...(closeRetriedSurface
+              ? {
+                  resolvedDeferred: [
+                    { id: "prior-gap", reason: "The boundary is verified." },
+                  ],
+                }
+              : {}),
             deferred: retryPending
               ? [
                   {
@@ -749,6 +805,31 @@ runpy.run_path(sys.argv[0], run_name="__main__")
   }
   for (const [file, bytes] of rawSources)
     assert.equal(await readFile(file, "utf8"), bytes);
+  if (closeRetriedSurface) {
+    const coverage = await readFixtureCoverage(run.scanDir);
+    assert.equal(coverage.completeness, "complete");
+    assert.deepEqual(coverage.deferred, []);
+    assert.equal(coverage.surfaces.length, 1);
+    const surface = coverage.surfaces[0];
+    assert.equal(surface.label, "Current review");
+    assert.equal(surface.disposition, "no_issue_found");
+    assert.equal(
+      surface.receiptRefs.length,
+      2,
+      "Closing a saved surface keeps both source-context receipts.",
+    );
+    const receipts = await Promise.all(
+      surface.receiptRefs.map((ref) =>
+        readFile(path.join(run.scanDir, ref), "utf8"),
+      ),
+    );
+    assert.deepEqual(
+      receipts.sort(),
+      ["Archived receipt.\n", "Synthetic review evidence.\n"].sort(),
+    );
+    assert.equal(new Set(surface.receiptRefs).size, 2);
+    return { scanDir: run.scanDir, threadId, terminal };
+  }
   if (receiptRetry) {
     const coverage = await readFixtureCoverage(run.scanDir);
     for (const surface of coverage.surfaces) {
