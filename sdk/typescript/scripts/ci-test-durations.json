@@ -7,7 +7,8 @@
     "https://github.com/openai/codex-security/actions/runs/37472306800",
     "https://github.com/openai/codex-security/actions/runs/35092711898",
     "https://github.com/openai/codex-security/actions/runs/36146282987",
-    "https://github.com/openai/codex-security/actions/runs/37728365308"
+    "https://github.com/openai/codex-security/actions/runs/37728365308",
+    "https://github.com/openai/codex-security/actions/runs/37732027736"
   ],
   "unix": {
     "api-attribution-concurrency.test.ts": 1.552,
@@ -183,7 +184,7 @@
     "api-cancellation-order.test.ts": 0.482,
     "api-credentials.test.ts": 195.172,
     "api-cyber-access.test.ts": 11.756,
-    "api-deep-composition.test.ts": 611.121,
+    "api-deep-composition.test.ts": 1047.349,
     "api-environment.test.ts": 0.0,
     "api-events.test.ts": 15.29,
     "api-integration.test.ts": 0.0,
