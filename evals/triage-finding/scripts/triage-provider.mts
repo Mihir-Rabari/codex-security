@@ -163,10 +163,11 @@ export default class TriageProvider implements ApiProvider {
         return callApiInternal(prompt, context, options, {
           ...config,
           working_dir: runtimeRoot,
-          cli_env: { ...config.cli_env, CODEX_MCP_NODE_PATH: nodePath },
+          cli_env: { ...config.cli_env, CODEX_MCP_NODE_PATH: nodeCommand },
           additional_directories: [
             ...(config.additional_directories ?? []),
             path.dirname(nodePath),
+            path.dirname(nodeCommand),
           ],
         });
       };

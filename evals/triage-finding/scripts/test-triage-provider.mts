@@ -17,6 +17,7 @@ interface Capture {
   policy: string;
   proxies: Record<string, string>;
   nodePath: string;
+  nodeTarget: string;
   directories: string[];
   overrides: string[];
 }
@@ -79,7 +80,7 @@ fs.writeFileSync(path.join(fixture, 'SECURITY.md'), '# Synthetic policy\\n');
 const policy = cp.execFileSync(launcher, ['--helper', 'resolve-security-md', '--repo', fixture, '--scope', 'src/server.js', '--out', '-'], {encoding:'utf8'});
 const directories = process.argv.flatMap((arg, index) => arg === '--add-dir' ? [process.argv[index + 1]] : []);
 const overrides = process.argv.flatMap((arg, index) => arg === '--config' ? [process.argv[index + 1]] : []);
-fs.appendFileSync(${JSON.stringify(capture)}, JSON.stringify({cwd,policy,directories,overrides,nodePath:process.env.CODEX_MCP_NODE_PATH, proxies: Object.fromEntries(${JSON.stringify(Object.keys(proxies))}.map(key => [key,process.env[key]]))}) + '\\n');
+fs.appendFileSync(${JSON.stringify(capture)}, JSON.stringify({cwd,policy,directories,overrides,nodePath:process.env.CODEX_MCP_NODE_PATH,nodeTarget:fs.realpathSync.native(process.env.CODEX_MCP_NODE_PATH), proxies: Object.fromEntries(${JSON.stringify(Object.keys(proxies))}.map(key => [key,process.env[key]]))}) + '\\n');
 console.log(JSON.stringify({type:'thread.started', thread_id:'synthetic-thread'}));
 if (fs.existsSync(${JSON.stringify(fail)})) {
  console.log(JSON.stringify({type:'turn.failed',error:{message:'synthetic retryable failure'}}));
@@ -149,7 +150,16 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
       fs.constants.COPYFILE_FICLONE,
     );
     const nodeAlias = path.join(root, "node-alias");
-    fs.symlinkSync(customNode, nodeAlias);
+    const nodeDispatcher = path.join(root, "node-runtime", "dispatcher");
+    fs.mkdirSync(path.dirname(nodeDispatcher));
+    fs.writeFileSync(
+      nodeDispatcher,
+      `#!/bin/sh
+case "$0" in */node-alias) exec '${process.execPath.replaceAll("'", "'\\''")}' "$@" ;; *) echo 'synthetic dispatcher requires node-alias' >&2; exit 42 ;; esac
+`,
+      { mode: 0o755 },
+    );
+    fs.symlinkSync(nodeDispatcher, nodeAlias);
     const nodeChoices = [
       customNode,
       path.relative(path.join(os.tmpdir(), "runtime-placeholder"), customNode),
@@ -226,14 +236,16 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
         /permissions\.triage_runtime_only\.filesystem\.:workspace_roots="read"/,
       );
       assert.deepEqual(row.directories, [
-        ...(row.nodePath === customNode || row.nodePath === selectedNode
+        ...([customNode, selectedNode, nodeDispatcher].includes(row.nodeTarget)
           ? [path.join(root, "case")]
           : []),
+        path.dirname(row.nodeTarget),
         path.dirname(row.nodePath),
         path.dirname(fakeCodex),
       ]);
     }
-    assert.equal(rows.filter((row) => row.nodePath === customNode).length, 5);
+    assert.equal(rows.filter((row) => row.nodeTarget === customNode).length, 4);
+    assert.equal(rows.filter((row) => row.nodePath === nodeAlias).length, 1);
     assert.equal(rows.filter((row) => row.nodePath === selectedNode).length, 1);
     assert.equal(rows.filter((row) => row.nodePath === ambientNode).length, 1);
     assert.equal(
@@ -353,6 +365,7 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
       assert.deepEqual(row.proxies, proxies);
       assert.equal(fs.existsSync(row.cwd), false);
       assert.deepEqual(row.directories, [
+        path.dirname(row.nodePath),
         path.dirname(row.nodePath),
         path.dirname(row.nodePath),
         path.dirname(fakeCodex),
@@ -483,6 +496,7 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
         assert.deepEqual(captured.directories, [
           ...(overrides ? [extra] : []),
           path.dirname(node),
+          path.dirname(node),
           path.dirname(fakeCodex),
         ]);
         if (overrides) assert.equal(captured.marker, node);
@@ -523,9 +537,14 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
           const result = await provider.callApi("synthetic");
           assert.equal(result.error, undefined);
           const captured = JSON.parse(String(result.output));
-          assert.equal(captured.node, expected, command);
+          assert.equal(
+            fs.realpathSync.native(captured.node),
+            expected,
+            command,
+          );
           assert.deepEqual(captured.directories, [
             path.dirname(expected),
+            path.dirname(captured.node),
             path.dirname(fakeCodex),
           ]);
         } finally {
@@ -579,6 +598,7 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
         assert.equal(captured.path, searchPath);
         assert.deepEqual(captured.directories, [
           path.dirname(nodes[0]),
+          path.dirname(nodes[0]),
           path.dirname(executable),
         ]);
       } finally {
@@ -601,6 +621,7 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,cached_i
           const captured = JSON.parse(String(result.output));
           assert.equal(captured.executable, command);
           assert.deepEqual(captured.directories, [
+            path.dirname(nodes[0]),
             path.dirname(nodes[0]),
             path.dirname(command),
           ]);
@@ -671,6 +692,7 @@ process.exit(child.status ?? 1);
           assert.deepEqual(captured.directories, [
             ...configured,
             path.dirname(nodes[0]),
+            path.dirname(nodes[0]),
             path.dirname(launcher),
             ...(configured.length ? [] : [path.dirname(native), tools]),
           ]);
@@ -712,6 +734,7 @@ process.exit(child.status ?? 1);
         assert.equal(captured.node, selected);
         assert.deepEqual(captured.directories, [
           path.dirname(selected),
+          path.dirname(captured.node),
           path.dirname(fakeCodex),
         ]);
       } finally {
@@ -980,6 +1003,7 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
                 ),
               ]),
           path.dirname(fs.realpathSync(process.execPath)),
+          path.dirname(process.execPath),
           path.dirname(fakeCodex),
         ]);
       }
