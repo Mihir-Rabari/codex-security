@@ -118,6 +118,8 @@
 - bump the third-party group across 2 directories with 3 updates ([#1514](https://github.com/openai/codex-security/pull/1514))
 - restore devcontainer pins during cooldown ([#1515](https://github.com/openai/codex-security/pull/1515))
 - support optional Cyber access program selection ([#1516](https://github.com/openai/codex-security/pull/1516))
+- identify local plugin and knowledge-base failures ([#463](https://github.com/openai/codex-security/pull/463))
+- resume scans when old worker prompts are missing ([#900](https://github.com/openai/codex-security/pull/900))
 
 <!-- release-section: highlights:end -->
 
