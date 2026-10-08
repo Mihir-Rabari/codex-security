@@ -117,6 +117,7 @@
 - bump the codex group across 3 directories with 2 updates ([#1439](https://github.com/openai/codex-security/pull/1439))
 - bump the third-party group across 2 directories with 3 updates ([#1514](https://github.com/openai/codex-security/pull/1514))
 - restore devcontainer pins during cooldown ([#1515](https://github.com/openai/codex-security/pull/1515))
+- support optional Cyber access program selection ([#1516](https://github.com/openai/codex-security/pull/1516))
 
 <!-- release-section: highlights:end -->
 
