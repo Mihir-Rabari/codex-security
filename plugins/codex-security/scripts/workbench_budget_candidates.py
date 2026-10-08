@@ -15,6 +15,7 @@ from candidate_identity import (
     coverage_candidate_key,
     diff_candidate_disposition,
     finding_candidate_key,
+    is_candidate_row,
     surface_reference_key,
 )
 from finalize_scan_contract import (
@@ -50,6 +51,8 @@ def recover_candidate_receipts(
     scan_dir: Path,
     warnings: list[str],
     source: str | None = None,
+    *,
+    reopened: set[tuple[str | None, str]] | None = None,
 ) -> dict[str, Any] | None:
     if parent is None:
         return parent
@@ -151,6 +154,11 @@ def recover_candidate_receipts(
             }
             coverage["resolvedDeferred"] = [row for row in closures if row["id"] not in active]
         return parent
+    terminal = {
+        coverage_candidate_key(row)
+        for row in surfaces
+        if isinstance(row, dict) and row.get("disposition") in ("rejected", "not_applicable")
+    }
     _recover_unsealed_coverage(
         parent["coverage"],
         Path(__file__).resolve().parent.parent / "schemas",
@@ -158,6 +166,14 @@ def recover_candidate_receipts(
         warnings,
         [],
     )
+    if reopened is not None:
+        reopened.update(
+            key
+            for row in parent["coverage"]["surfaces"]
+            if row.get("disposition") == "needs_follow_up"
+            and (key := coverage_candidate_key(row)) is not None
+            and key in terminal
+        )
     return parent
 
 
@@ -759,12 +775,7 @@ def deferred_identity_collisions(
     unclosable: set[tuple[str | None, str]] = set()
     for relative, draft, owner in sources:
         rows = deferred_rows[relative]
-        candidates = [
-            row
-            for row in rows
-            if isinstance(row, dict)
-            and any(key in row for key in ("candidateId", "candidate", "finding"))
-        ]
+        candidates = [row for row in rows if isinstance(row, dict) and is_candidate_row(row)]
         aliases = {
             identity
             for row in candidates
@@ -794,7 +805,7 @@ def deferred_identity_collisions(
         for row in rows:
             if not isinstance(row, dict) or not isinstance(identity := row.get("id"), str):
                 continue
-            if any(key in row for key in ("candidateId", "candidate", "finding")):
+            if is_candidate_row(row):
                 continue
             key = (owner, identity)
             if identity in aliases:

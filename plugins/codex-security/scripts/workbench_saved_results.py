@@ -25,6 +25,7 @@ from candidate_identity import (
     candidate_owner,
     coverage_candidate_key,
     finding_candidate_key,
+    is_candidate_row,
     reducer_coverage,
     resolved_candidate_surface_keys,
     surface_reference_key,
@@ -767,6 +768,7 @@ def _stopped_diff_candidate_decisions(
     current_coverage: dict[str, Any],
     current_findings: list[dict[str, Any]],
     checkpoint_findings: list[dict[str, Any]],
+    receipt_reopened: set[tuple[str | None, str]],
 ) -> dict[str, Any] | None:
     """Freeze current candidate state before historical evidence is recovered."""
     pending = {}
@@ -965,7 +967,7 @@ def _stopped_diff_candidate_decisions(
                     **{k: v for k, v in previous.items() if k not in {"attack_path", "validation"}},
                     **candidate,
                 }
-                if decision is not None:
+                if decision is not None and (None, candidate_id) not in receipt_reopened:
                     decisions[candidate_id] = {
                         **generated.get(candidate_id, {}),
                         **decision,
@@ -1201,9 +1203,7 @@ def _generic_surface_updates(
             by_source = dict(matches)
             if any(row != by_source[saved_path] for saved_path, row in matches):
                 continue
-            if any(
-                "candidateId" in row or "candidate" in row or "finding" in row for _, row in matches
-            ):
+            if any(is_candidate_row(row) for _, row in matches):
                 continue
             if any(
                 row is not surface
@@ -1220,7 +1220,7 @@ def _generic_surface_updates(
                     or (
                         isinstance(row.get("id"), str)
                         and (owner, row["id"]) in ambiguous_deferred
-                        and not any(key in row for key in ("candidateId", "candidate", "finding"))
+                        and not is_candidate_row(row)
                     )
                 )
                 and linked(row, identity)
@@ -1602,7 +1602,8 @@ def merge_saved_results(
                 parent = _merge_tied_parent_observations(parent, draft)
                 parent_is_canonical = False
 
-    parent = recover_candidate_receipts(parent, scan_dir, warnings)
+    receipt_reopened: set[tuple[str | None, str]] = set()
+    parent = recover_candidate_receipts(parent, scan_dir, warnings, reopened=receipt_reopened)
 
     decision_drafts = [
         draft
@@ -1620,6 +1621,7 @@ def merge_saved_results(
             scan_id,
             ([parent] if parent else []) + [draft for _, draft, owner in sources if owner is None],
             warnings,
+            receipt_reopened=receipt_reopened,
             current_coverage=parent["coverage"] if parent else {},
             current_findings=[finding for finding in parent["findings"] if valid_finding(finding)]
             if parent
@@ -1700,9 +1702,7 @@ def merge_saved_results(
             for row in rows:
                 if not isinstance(row, dict) or "id" in row:
                     continue
-                if field == "deferred" and any(
-                    key in row for key in ("candidateId", "candidate", "finding")
-                ):
+                if field == "deferred" and is_candidate_row(row):
                     continue
                 content = {"receiptRefs": [], **row} if field == "surfaces" else row
                 identity = next(
@@ -1877,7 +1877,7 @@ def merge_saved_results(
             if not isinstance(item, dict):
                 continue
             item_owner = _deferred_owner(item, owner)
-            if isinstance(item.get("candidateId"), str) or "candidate" in item or "finding" in item:
+            if is_candidate_row(item):
                 candidate_ids.update(
                     (item_owner, identity)
                     for identity in (item.get("id"), item.get("candidateId"))
@@ -1944,7 +1944,7 @@ def merge_saved_results(
                 isinstance(row, dict)
                 and isinstance(identity := row.get("id"), str)
                 and (owner, identity) in ambiguous_deferred
-                and not any(key in row for key in ("candidateId", "candidate", "finding"))
+                and not is_candidate_row(row)
                 and (owner, row) not in reopened_rows
             ):
                 reopened_rows.append((owner, row))
@@ -2165,7 +2165,7 @@ def merge_saved_results(
         for owner, row in reopened_rows
         if isinstance(row.get("id"), str)
         and (owner, row["id"]) in ambiguous_deferred
-        and not any(key in row for key in ("candidateId", "candidate", "finding"))
+        and not is_candidate_row(row)
         for identity in [
             row["id"],
             *(row.get("surfaceIds", []) if isinstance(row.get("surfaceIds", []), list) else []),
@@ -2189,7 +2189,7 @@ def merge_saved_results(
                 and isinstance(surface.get("id"), str)
                 and (owner, surface["id"]) in ambiguous_surface_ids
                 and surface.get("disposition") == "needs_follow_up"
-                and not any(key in surface for key in ("candidateId", "candidate", "finding"))
+                and not is_candidate_row(surface)
                 and isinstance(coverage.get("surfaces"), list)
             ):
                 retained_surface = {**surface, "receiptRefs": surface.get("receiptRefs", [])}
@@ -2468,10 +2468,7 @@ def merge_saved_results(
                 if (
                     selected_coverage_superseded
                     and field != "deferred"
-                    and not (
-                        isinstance(item, dict)
-                        and any(key in item for key in ("candidateId", "candidate", "finding"))
-                    )
+                    and not (isinstance(item, dict) and is_candidate_row(item))
                 ):
                     continue
                 # A selected outcome must retain its evidence even if its result write failed.

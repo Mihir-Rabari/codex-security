@@ -21,6 +21,7 @@ from test_workbench_standard_deep_results import (
     generic_review_recovery as generic_review_recovery,
 )
 from workbench_test_support import (
+    empty_target_scan,
     get_scan,
     preserve_scan_results,
     replay_saved_results,
@@ -1307,3 +1308,70 @@ def test_selected_reopened_report_keeps_general_task_identity_separate(
                 for row in recovered[2]["deferred"]
             )
     assert all(file.read_bytes() == original for file, original in originals.items())
+
+
+@pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan", "complete-scan"])
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {},
+        {"candidateId": None},
+        {"candidateId": 0},
+        {"candidateId": False},
+        {"candidateId": {}},
+        {"candidateId": []},
+        {"candidateId": "candidate-one"},
+    ],
+)
+def test_public_generic_metadata_closure_survives_later_progress(
+    tmp_path: Path, termination: str, metadata: dict[str, object]
+) -> None:
+    state, target, scan_id, scan_dir = empty_target_scan(tmp_path)
+    write_completed_contract(scan_dir, scan_id, target)
+    documents = {
+        key: json.loads((scan_dir / filename).read_text())
+        for key, filename in (
+            ("manifest", "scan-manifest.json"),
+            ("findings", "findings.json"),
+            ("coverage", "coverage.json"),
+        )
+    }
+    documents["findings"]["findings"] = []
+    documents["coverage"].update(surfaces=[], explicitExclusions=[], deferred=[])
+    task = {"id": "generic-review", "reason": "Review the endpoint.", **metadata}
+    closure = {"id": task["id"], "reason": "Review completed."}
+    candidate = isinstance(metadata.get("candidateId"), str)
+    writes = [(False, {"deferred": [task]}), (True, {"resolvedDeferred": [closure]})]
+    if termination != "complete-scan":
+        writes.append((False, {}))
+    for complete, update in writes:
+        documents["manifest"]["scan"]["complete"] = complete
+        documents["coverage"].update(
+            completeness="complete" if complete else "partial", deferred=[]
+        )
+        documents["coverage"].pop("resolvedDeferred", None)
+        documents["coverage"].update(update)
+        staged = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
+        staged.parent.mkdir(exist_ok=True)
+        staged.write_text(json.dumps(documents))
+        run_workbench(state, "write-scan-draft", "--scan-id", scan_id, "--draft-path", str(staged))
+    originals = {path: path.read_bytes() for path in (scan_dir / "checkpoints").iterdir()}
+    commands = (
+        ("prepare-scan-completion", "complete-scan")
+        if termination == "complete-scan"
+        else (termination, "preserve-scan-results", "preserve-scan-results")
+    )
+    for command in commands:
+        run_workbench(
+            state,
+            command,
+            "--scan-id",
+            scan_id,
+            *(["--message", "Synthetic interruption."] if command == "fail-scan" else []),
+        )
+        coverage = json.loads((scan_dir / "coverage.json").read_text())
+        assert any(row.get("id") == task["id"] for row in coverage["deferred"]) is (
+            candidate and termination != "complete-scan"
+        )
+        assert (closure in coverage.get("resolvedDeferred", [])) is not candidate
+    assert all(path.read_bytes() == content for path, content in originals.items())
