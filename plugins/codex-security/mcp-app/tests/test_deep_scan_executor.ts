@@ -990,6 +990,9 @@ async function testOpenAiCredentialsReachWorker() {
       accountResult: { account: { type: "chatgpt" }, requiresOpenaiAuth: true },
     },
     {
+      accountResult: { account: { type: "chatgpt" }, requiresOpenaiAuth: true },
+    },
+    {
       openai: "synthetic-provider-key",
       accountResult: { account: null, requiresOpenaiAuth: false },
     },

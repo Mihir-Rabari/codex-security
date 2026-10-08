@@ -82,8 +82,15 @@ with `requires_openai_auth = true`.
 Codex carries credential-storage, forced-login, and workspace settings from the
 ambient configuration into this home. Managed-device policies still apply;
 workspace-managed policies may require ChatGPT credentials even with an API key.
-If the home has no credentials, it imports an existing file-based Codex login.
-Logout disables imports until the next login.
+Without an overriding environment API key, scans and status checks import
+existing file-based Codex credentials when this home is empty. Import errors make
+`login status` exit with code 2 and SDK `account()` reject its promise. Logout
+disables imports until you log in again. Status imports and logout share the
+credential-home lock so a concurrent status check cannot restore credentials
+after logout completes.
+
+Scans and status checks expand a home-relative `CODEX_HOME` using the caller's
+`HOME` or `USERPROFILE` environment setting.
 
 If credentials cannot refresh, run `login status`. Retry if the sign-in recently
 changed; otherwise run `logout`, then `login`.

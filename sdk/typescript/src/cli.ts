@@ -29,7 +29,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import {
   basename,
   dirname,
@@ -66,6 +66,7 @@ import {
   environmentValue,
   formatEnvironmentVariableRemovalGuidance,
   initialCredentialsAvailable,
+  scanCodexHome,
   listRepositoryFindings,
   SCAN_AUTH_MODES,
   scanAuthentication,
@@ -185,6 +186,7 @@ import { importScan, type ImportScanOptions } from "./import-scan.js";
 import {
   bundledPluginRoot,
   acquireCodexSecurityCredentialHomeLock,
+  withCredentialHomeLock,
   requireOutputOutsideRepositories,
   canonicalizeModelSafePath,
   codexSecurityCredentialHome,
@@ -1159,9 +1161,6 @@ interface CliDependencies {
   createPolicySecurity?: (config: CodexSecurityConfig) => PolicySecurity;
   policyPrompt?: PolicyPrompt;
   environment: NodeJS.ProcessEnv;
-  prepareAuthenticationHome?: (
-    environment: NodeJS.ProcessEnv,
-  ) => Promise<string>;
   hasStoredChatGPTSignIn?: (signal?: AbortSignal) => Promise<boolean>;
   scanAuthenticationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
   scanInput?: ConstructorParameters<typeof ScanDashboard>[1]["input"];
@@ -1228,7 +1227,6 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
   createSecurity: (config) =>
     new CodexSecurity(config, undefined, { surface: "cli" }),
   environment: process.env,
-  prepareAuthenticationHome: prepareCodexSecurityCredentialHome,
   checkForUpdate: (signal) =>
     checkForUpdate({ environment: process.env, signal }),
   hasStoredChatGPTSignIn: async (signal) => {
@@ -5408,22 +5406,18 @@ export async function main(
         { args: { action: "status" }, description: "Check authentication." },
       ],
       async run({ args, options }) {
-        const credentialHome =
-          dependencies.prepareAuthenticationHome !== undefined
-            ? await dependencies.prepareAuthenticationHome(
-                dependencies.environment,
-              )
-            : await prepareCodexSecurityCredentialHome(
-                dependencies.environment,
-              );
-        if (args.action === "status" && existsSync(credentialHome)) {
-          const ambientHome =
-            environmentValue(dependencies.environment, "CODEX_HOME") ??
-            join(homedir(), ".codex");
-          await initialCredentialsAvailable(
-            dependencies.environment,
-            ambientHome,
-            credentialHome,
+        const credentialHome = await prepareCodexSecurityCredentialHome(
+          dependencies.environment,
+        );
+        const authentication = scanAuthentication(dependencies.environment);
+        if (args.action === "status" && authentication.method !== "api_key") {
+          const ambientHome = scanCodexHome(dependencies.environment);
+          await withCredentialHomeLock(credentialHome, () =>
+            initialCredentialsAvailable(
+              dependencies.environment,
+              ambientHome,
+              credentialHome,
+            ),
           );
         }
         const authenticationEnvironment = {
@@ -5441,15 +5435,10 @@ export async function main(
           undefined,
           authenticationEnvironment,
         );
-        if (
-          args.action === undefined &&
-          exitCode === 0 &&
-          dependencies.prepareAuthenticationHome !== undefined
-        ) {
+        if (args.action === undefined && exitCode === 0) {
           await setCodexSecurityCredentialLogout(credentialHome, false);
         }
         if (args.action === "status") {
-          const authentication = scanAuthentication(dependencies.environment);
           if (
             authentication.method === "api_key" &&
             (exitCode === 0 || exitCode === 1)
@@ -5463,7 +5452,6 @@ export async function main(
             );
           }
         } else if (exitCode === 0 && !options.withApiKey) {
-          const authentication = scanAuthentication(dependencies.environment);
           if (authentication.method === "api_key") {
             const configuredApiKeyVariables = Object.entries(
               dependencies.environment,
@@ -5495,29 +5483,23 @@ export async function main(
       destructive: true,
       mcp: false,
       async run() {
-        const credentialHome =
-          dependencies.prepareAuthenticationHome !== undefined
-            ? await dependencies.prepareAuthenticationHome(
-                dependencies.environment,
-              )
-            : await prepareCodexSecurityCredentialHome(
-                dependencies.environment,
-              );
+        const credentialHome = await prepareCodexSecurityCredentialHome(
+          dependencies.environment,
+        );
         const authenticationEnvironment = {
           ...dependencies.environment,
           CODEX_HOME: credentialHome,
         };
-        exitCode = await dependencies.runCodex(
-          ["logout"],
-          undefined,
-          authenticationEnvironment,
-        );
-        if (
-          exitCode === 0 &&
-          dependencies.prepareAuthenticationHome !== undefined
-        ) {
-          await setCodexSecurityCredentialLogout(credentialHome, true);
-        }
+        await withCredentialHomeLock(credentialHome, async () => {
+          exitCode = await dependencies.runCodex(
+            ["logout"],
+            undefined,
+            authenticationEnvironment,
+          );
+          if (exitCode === 0) {
+            await setCodexSecurityCredentialLogout(credentialHome, true);
+          }
+        });
       },
     })
     .command("serve", {
@@ -5693,11 +5675,7 @@ export async function main(
             ? await resolveDeepScanConfig(
                 resolved.options,
                 join(
-                  expandHome(
-                    environmentValue(dependencies.environment, "CODEX_HOME") ??
-                      join(homedir(), ".codex"),
-                    dependencies.environment,
-                  ),
+                  scanCodexHome(dependencies.environment),
                   "codex-security",
                   "config.toml",
                 ),
