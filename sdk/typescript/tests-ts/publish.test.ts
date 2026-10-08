@@ -2903,7 +2903,7 @@ describe("connected Linear publication", () => {
           '].join("");',
           'spawn(process.execPath, ["-e", descendant], { env: { CODEX_PUBLICATION_DESCENDANT_PID: process.env.CODEX_PUBLICATION_DESCENDANT_PID }, stdio: "ignore" });',
           "const waiter = new Int32Array(new SharedArrayBuffer(4));",
-          "for (let attempts = 0; !fs.existsSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID); attempts += 1) {",
+          "for (let attempts = 0; (!fs.existsSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID) || fs.statSync(process.env.CODEX_PUBLICATION_DESCENDANT_PID).size === 0); attempts += 1) {",
           "  if (attempts === 1000) process.exit(3);",
           "  Atomics.wait(waiter, 0, 0, 10);",
           "}",
