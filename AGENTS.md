@@ -78,6 +78,10 @@ variables, and defaults as public API.
 - Update relevant help, schemas, documentation, and tests in the same change.
   Describe the public CLI change in the pull request.
 
+## Dependency cooldowns
+
+Apply the cooldowns and exclusions in `.github/dependabot.yml` before merging manual or bot dependency upgrades. Devcontainer upgrades must pass the CI publication-age check; missing publication metadata does not make a version eligible. Dependabot can still open an early PR when a feature omits its publication timestamp, so wait for the reported eligibility time and rerun CI before merging.
+
 ## Public repository and pull requests
 
 Everything published in this repository is public. Review branch names before
