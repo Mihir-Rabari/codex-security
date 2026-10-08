@@ -1,5 +1,4 @@
 import { testCapturedCustomProviderSettings } from "./captured-provider-fixture.ts";
-import { rm } from "node:fs/promises";
 import { readJson, writeJson } from "./support/json.ts";
 import {
   assertFlagPair,

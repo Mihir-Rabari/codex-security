@@ -439,31 +439,6 @@ function workerPermissionProfile(sandbox: DeepWorkerParentSandbox): TomlObject {
   };
 }
 
-function workerPermissionProfileConfigOverrides(profile: TomlObject): string[] {
-  return [
-    `default_permissions=${tomlString(DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID)}`,
-    `permissions.${DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID}=${tomlInlineValue(profile)}`,
-  ];
-}
-
-function tomlInlineValue(value: TomlValue): string {
-  if (typeof value === "string") return tomlString(value);
-  if (typeof value === "number") return String(value);
-  if (typeof value === "boolean") return value ? "true" : "false";
-  if (Array.isArray(value)) return `[${value.map(tomlInlineValue).join(",")}]`;
-  return `{${Object.entries(value)
-    .map(([key, entry]) => `${tomlKey(key)}=${tomlInlineValue(entry)}`)
-    .join(",")}}`;
-}
-
-function tomlKey(value: string): string {
-  return /^[A-Za-z0-9_-]+$/.test(value) ? value : tomlString(value);
-}
-
-function tomlString(value: string): string {
-  return JSON.stringify(value).replace(/\u007f/g, "\\u007f");
-}
-
 /**
  * Convert SDK item failures into bounded classifications without retaining the
  * command, output, or paths carried by the event. Those fields can contain
