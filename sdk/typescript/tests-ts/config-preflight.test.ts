@@ -1014,9 +1014,12 @@ test("absolute project-root markers retain trusted cwd configuration", async () 
   expect(capacity(result.payload!).actual).toBe(19);
 });
 
-test.skipIf(process.platform !== "win32")(
-  "invalid Windows marker names do not hide a later project marker",
-  async () => {
+test.each([
+  ["NUL", "invalid\0marker"],
+  ...(process.platform === "win32" ? [["Windows", "invalid?marker"]] : []),
+])(
+  "invalid %s marker names do not hide a later project marker",
+  async (_kind, marker) => {
     const root = await temporaryDirectory(),
       home = join(root, "home"),
       repo = join(root, "repo");
@@ -1026,7 +1029,7 @@ test.skipIf(process.platform !== "win32")(
     await writeFile(
       join(home, "config.toml"),
       stringifyToml({
-        project_root_markers: ["invalid?marker", ".git"],
+        project_root_markers: [marker, ".git"],
         projects: { [repo]: { trust_level: "trusted" } },
       }),
     );
@@ -1040,11 +1043,21 @@ test.skipIf(process.platform !== "win32")(
     expect(result.payload!.config_discovery?.["project_root"]).toBe(repo);
     expect(capacity(result.payload!).actual).toBe(19);
     const explicit = await run(
-      [...args, "--config", join(repo, "invalid?config.toml")],
+      [
+        ...args,
+        "--config",
+        process.platform === "win32" ? join(repo, "invalid?config.toml") : repo,
+      ],
       { CODEX_HOME: home },
     );
     expect(explicit.status).toBe(2);
     expect(explicit.payload!.status).toBe("error");
+    const invalidCwd = await run(
+      ["--profile", "security_scan", "--cwd", join(repo, "missing"), ...v1],
+      { CODEX_HOME: home },
+    );
+    expect(invalidCwd.status).toBe(2);
+    expect(invalidCwd.payload!.status).toBe("error");
   },
 );
 

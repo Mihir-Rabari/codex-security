@@ -105,6 +105,7 @@ const diagnostic = (value: unknown) =>
   typeof value === "string" ? `'${value}'` : stringifyJson(value, 0);
 
 function metadata(path: string) {
+  if (path.includes("\0")) return undefined;
   try {
     return windows
       ? windowsFiles().stat(encodePath(path))
