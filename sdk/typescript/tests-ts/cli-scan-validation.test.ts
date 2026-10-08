@@ -7,7 +7,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, join } from "node:path";
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { CodexSecurity } from "../src/api.js";
@@ -475,7 +475,7 @@ test("empty scan validation preserves knowledge-base Git exclusions", async () =
     for (const trustedFallback of [false, true]) {
       process.env["PATH"] = [
         tools,
-        ...(trustedFallback ? [dirname(hostGit)] : []),
+        ...(trustedFallback ? [previous.PATH ?? ""] : []),
       ].join(delimiter);
       const scanDir = join(root, `scan-${trustedFallback}`);
       await mkdir(scanDir, { mode: 0o700 });
