@@ -18,7 +18,7 @@ import * as fsPromises from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import * as childProcess from "node:child_process";
 import { hash } from "node:crypto";
-import { existsSync, writeSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { basename, delimiter, dirname, join, relative, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -27,14 +27,7 @@ import {
   type ThreadEvent,
   type ThreadOptions,
 } from "@openai/codex-sdk";
-import {
-  afterEach,
-  describe,
-  expect,
-  mock,
-  spyOn,
-  test as bunTest,
-} from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import {
   AuthenticationRequiredError,
@@ -106,43 +99,6 @@ const REPOSITORY_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
-
-// Temporary Windows diagnostics identify the active test when the shard stalls.
-const test = process.platform === "win32" ? traceApiTests(bunTest) : bunTest;
-
-type TestRegistration = (...args: never[]) => unknown;
-
-function traceApiTests<T extends TestRegistration>(registration: T): T {
-  return new Proxy(registration, {
-    apply(target, receiver, args) {
-      const callbackIndex = args.findIndex(
-        (value) => typeof value === "function",
-      );
-      if (callbackIndex === -1) return Reflect.apply(target, receiver, args);
-      const traced = [...args];
-      const callback = args[callbackIndex];
-      const wrapper = function (this: unknown, ...callbackArgs: unknown[]) {
-        writeSync(2, `[api-test-start] ${String(args[0])}\n`);
-        return Reflect.apply(callback, this, callbackArgs);
-      };
-      Object.defineProperty(wrapper, "length", { value: callback.length });
-      traced[callbackIndex] = wrapper;
-      return Reflect.apply(target, receiver, traced);
-    },
-    get(target, property, receiver) {
-      const value = Reflect.get(target, property, receiver);
-      if (property !== "each" && property !== "skipIf") return value;
-      return (...args: unknown[]) =>
-        traceApiTests(
-          Reflect.apply(
-            value as (...args: unknown[]) => TestRegistration,
-            target,
-            args,
-          ),
-        );
-    },
-  });
-}
 
 function localClient(
   config: ConstructorParameters<typeof TestClient>[0] = {},
@@ -3716,12 +3672,6 @@ describe("CodexSecurity orchestration", () => {
   test.each(["EACCES", "EPERM", "EMFILE"])(
     "retries session logs and limits repeated %s diagnostics appropriately",
     async (code) => {
-      if (process.platform === "win32")
-        writeSync(2, `[api-log-retry] ${code}\n`);
-      const trace = (phase: string) => {
-        if (process.platform === "win32")
-          writeSync(2, `[api-log-retry] ${code} ${phase}\n`);
-      };
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const sessions = join(codexHome, "sessions");
       await mkdir(sessions);
@@ -3732,7 +3682,6 @@ describe("CodexSecurity orchestration", () => {
       await Promise.all(logs.map((path) => writeFile(path, "")));
       const denied = new Set([logs[0]!]);
       const attempts = new Map<string, number>();
-      const observedOpens = new Map<number, number>();
       let firstRepeated!: () => void;
       let secondRepeated!: () => void;
       const first = new Promise<void>((resolve) => {
@@ -3745,18 +3694,6 @@ describe("CodexSecurity orchestration", () => {
       const opening = spyOn(fsPromises, "open").mockImplementation(
         async (...args: Parameters<typeof fsPromises.open>) => {
           const path = String(args[0]);
-          const index = logs.findIndex(
-            (log) =>
-              basename(log).toLowerCase() === basename(path).toLowerCase(),
-          );
-          if (index !== -1) {
-            const count = (observedOpens.get(index) ?? 0) + 1;
-            observedOpens.set(index, count);
-            if (count <= 3)
-              trace(
-                `open.${index} attempt=${count} exact=${path === logs[index]} denied=${denied.has(path)}`,
-              );
-          }
           if (denied.has(path)) {
             const count = (attempts.get(path) ?? 0) + 1;
             attempts.set(path, count);
@@ -3767,12 +3704,7 @@ describe("CodexSecurity orchestration", () => {
               { code, syscall: "open", path },
             );
           }
-          const traceDelegate =
-            index !== -1 && (observedOpens.get(index) ?? 0) <= 4;
-          if (traceDelegate) trace(`open.${index}.delegate.begin`);
-          const file = await open(...args);
-          if (traceDelegate) trace(`open.${index}.delegate.end`);
-          return file;
+          return await open(...args);
         },
       );
       const warnings: string[] = [];
@@ -3782,19 +3714,13 @@ describe("CodexSecurity orchestration", () => {
           startThread: () => ({
             id: null,
             async runStreamed() {
-              trace("runStreamed.enter");
               await copyCompletedScan(root);
-              trace("artifacts.ready");
               async function* events(): AsyncGenerator<ThreadEvent> {
-                trace("thread-started.yield");
                 yield { type: "thread.started", thread_id: "thread-1" };
-                trace("first.wait");
                 await first;
-                trace("first.ready");
                 denied.delete(logs[0]!);
                 denied.add(logs[1]!);
                 await second;
-                trace("second.ready");
                 denied.delete(logs[1]!);
                 for await (const event of completedEvents()) {
                   if (event.type !== "thread.started") yield event;
@@ -3805,14 +3731,12 @@ describe("CodexSecurity orchestration", () => {
           }),
         }),
       });
-      trace("fixture.ready");
       // The fake stream has no process handle to keep the unref'ed poll alive.
       const keepAlive = setTimeout(() => {}, 10_000);
       const operation = client.run(repository, {
         onActivity: () => {},
         onWarning: (warning) => warnings.push(warning),
       });
-      trace("run.returned");
       try {
         expect(await operation).toMatchObject({
           threadId: "thread-1",
@@ -3829,16 +3753,12 @@ describe("CodexSecurity orchestration", () => {
         }
       } finally {
         clearTimeout(keepAlive);
-        trace("cleanup.begin");
         denied.clear();
         firstRepeated();
         secondRepeated();
         await operation.catch(() => {});
-        trace("operation.drained");
         await client.close();
-        trace("close.end");
         opening.mockRestore();
-        trace("spy.restored");
       }
     },
   );
