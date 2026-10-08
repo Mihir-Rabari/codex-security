@@ -163,6 +163,11 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
     fs.writeFileSync(
       calibrationConfig,
       JSON.stringify({
+        defaultTest: {
+          options: {
+            transformVars: `file://${path.join(import.meta.dirname, "runtime-vars.mts")}`,
+          },
+        },
         providers: nodeChoices.map((nodePath, index) => ({
           ...calibration,
           label: `custom-runtime-${index}`,
@@ -178,7 +183,7 @@ if (fs.existsSync(${JSON.stringify(fail)})) {
         prompts: ["hello"],
         tests: [
           {
-            vars: { target_repo_root: root, case_id: "case" },
+            vars: { calibration_repo_root: root, calibration_repo: "case" },
             assert: [{ type: "equals", value: "ok" }],
           },
         ],
@@ -736,23 +741,24 @@ process.exit(child.status ?? 1);
   },
 );
 
-test(
-  "SAST provider survives persisted retry, resume, and viewer replay",
-  { skip: process.platform === "win32", timeout: 120000 },
-  async (t) => {
-    const root = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), "sast-provider-replay-")),
-    );
-    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-    const capture = path.join(root, "captures.jsonl");
-    const failure = path.join(root, "failure");
-    const fakeCodex = path.join(root, "codex");
-    fs.writeFileSync(
-      fakeCodex,
-      `#!${process.execPath}
+for (const suite of ["SAST", "calibration"] as const) {
+  test(
+    `${suite} provider survives persisted retry, resume, and viewer replay`,
+    { skip: process.platform === "win32", timeout: 120000 },
+    async (t) => {
+      const root = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), "sast-provider-replay-")),
+      );
+      t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+      const capture = path.join(root, "captures.jsonl");
+      const failure = path.join(root, "failure");
+      const fakeCodex = path.join(root, "codex");
+      fs.writeFileSync(
+        fakeCodex,
+        `#!${process.execPath}
 const fs = require('node:fs');
 const cwd = process.argv[process.argv.indexOf('--cd') + 1];
-fs.appendFileSync(${JSON.stringify(capture)}, JSON.stringify({ cwd }) + '\\n');
+fs.appendFileSync(${JSON.stringify(capture)}, JSON.stringify({ cwd, directories: process.argv.flatMap((arg, index) => arg === '--add-dir' ? [process.argv[index + 1]] : []) }) + '\\n');
 console.log(JSON.stringify({ type: 'thread.started', thread_id: 'synthetic-sast-replay' }));
 if (fs.existsSync(${JSON.stringify(failure)})) {
  console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'synthetic retryable failure' } }));
@@ -761,156 +767,222 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
  console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }));
 }
 `,
-      { mode: 0o755 },
-    );
-    const environment = {
-      OPENAI_API_KEY: "synthetic-test-key",
-      PROMPTFOO_CONFIG_DIR: path.join(root, "state"),
-      PROMPTFOO_DISABLE_WAL_MODE: "true",
-      PROMPTFOO_DISABLE_TELEMETRY: "1",
-      PROMPTFOO_DISABLE_UPDATE: "1",
-      SASTBENCH_TARGET_ROOT: root,
-      SASTBENCH_GIT_CACHE_ROOT: root,
-    };
-    const provider = parse(
-      fs.readFileSync(
-        path.join(evalRoot, "sastbench/promptfooconfig.sastbench.yaml"),
-        "utf8",
-      ),
-    ).providers[0];
-    provider.config.codex_path_override = fakeCodex;
-    // Keep the real YAML provider reference and its original configuration directory.
-    const configPath = path.join(
-      evalRoot,
-      "sastbench",
-      `.provider-replay-${process.pid}.json`,
-    );
-    t.after(() => fs.rmSync(configPath, { force: true }));
-    fs.writeFileSync(
-      configPath,
-      JSON.stringify({
-        providers: [provider],
-        prompts: ["hello"],
-        tests: [{ assert: [{ type: "equals", value: "ok" }] }],
-      }),
-    );
-    fs.writeFileSync(failure, "");
-    const initial = await invoke(
-      [
-        "eval",
-        "-c",
+        { mode: 0o755 },
+      );
+      const environment = {
+        OPENAI_API_KEY: "synthetic-test-key",
+        CODEX_MCP_NODE_PATH: process.execPath,
+        PROMPTFOO_CONFIG_DIR: path.join(root, "state"),
+        PROMPTFOO_DISABLE_WAL_MODE: "true",
+        PROMPTFOO_DISABLE_TELEMETRY: "1",
+        PROMPTFOO_DISABLE_UPDATE: "1",
+      };
+      const template = parse(
+        fs.readFileSync(
+          path.join(
+            evalRoot,
+            suite === "SAST"
+              ? "sastbench/promptfooconfig.sastbench.yaml"
+              : "promptfooconfig.calibration.yaml",
+          ),
+          "utf8",
+        ),
+      );
+      const provider = template.providers[0];
+      provider.config.codex_path_override = fakeCodex;
+      // Keep the real YAML provider reference and its original configuration directory.
+      const configPath = path.join(
+        evalRoot,
+        suite === "SAST" ? "sastbench" : ".",
+        `.provider-replay-${process.pid}.json`,
+      );
+      t.after(() => fs.rmSync(configPath, { force: true }));
+      fs.writeFileSync(
         configPath,
-        "--no-cache",
-        "--no-share",
-        "--no-progress-bar",
-      ],
-      environment,
-    );
-    assert.notEqual(initial.code, 0, initial.output);
-    assert.match(initial.output, /synthetic retryable failure/);
-    fs.rmSync(failure);
-    const retry = await invoke(
-      [
-        "eval",
-        "--retry-errors",
-        "--no-cache",
-        "--no-share",
-        "--no-progress-bar",
-      ],
-      environment,
-    );
-    assert.equal(retry.code, 0, retry.output);
-    const database = new DatabaseSync(
-      path.join(environment.PROMPTFOO_CONFIG_DIR, "promptfoo.db"),
-      { enableForeignKeyConstraints: false },
-    );
-    const stored = database
-      .prepare("SELECT id, config FROM evals ORDER BY created_at DESC LIMIT 1")
-      .get();
-    assert.ok(stored && typeof stored.config === "string");
-    assert.equal(
-      JSON.parse(stored.config).providers[0].id,
-      `file://${path.join(import.meta.dirname, "triage-provider.mts")}`,
-    );
-    database.prepare("DELETE FROM eval_results").run();
-    database.close();
-    const resumed = await invoke(
-      ["eval", "--resume", "--no-cache", "--no-share", "--no-progress-bar"],
-      environment,
-    );
-    assert.equal(resumed.code, 0, resumed.output);
+        JSON.stringify({
+          providers: [provider],
+          prompts: ["hello"],
+          defaultTest:
+            suite === "calibration"
+              ? {
+                  options: {
+                    transformVars: `file://${path.join(import.meta.dirname, "runtime-vars.mts")}`,
+                  },
+                }
+              : undefined,
+          tests: [
+            {
+              vars:
+                suite === "SAST"
+                  ? { target_repo: root }
+                  : {
+                      calibration_repo: "calibration-0123456789abcdef",
+                      calibration_repo_root: "",
+                    },
+              assert: [{ type: "equals", value: "ok" }],
+            },
+          ],
+        }),
+      );
+      fs.writeFileSync(failure, "");
+      const initial = await invoke(
+        [
+          "eval",
+          "-c",
+          configPath,
+          "--no-cache",
+          "--no-share",
+          "--no-progress-bar",
+        ],
+        environment,
+      );
+      assert.notEqual(initial.code, 0, initial.output);
+      assert.match(initial.output, /synthetic retryable failure/);
+      fs.rmSync(failure);
+      const retry = await invoke(
+        [
+          "eval",
+          "--retry-errors",
+          "--no-cache",
+          "--no-share",
+          "--no-progress-bar",
+        ],
+        environment,
+      );
+      assert.equal(retry.code, 0, retry.output);
+      const database = new DatabaseSync(
+        path.join(environment.PROMPTFOO_CONFIG_DIR, "promptfoo.db"),
+        { enableForeignKeyConstraints: false },
+      );
+      const stored = database
+        .prepare(
+          "SELECT id, config FROM evals ORDER BY created_at DESC LIMIT 1",
+        )
+        .get();
+      assert.ok(stored && typeof stored.config === "string");
+      assert.equal(
+        JSON.parse(stored.config).providers[0].id,
+        suite === "SAST"
+          ? `file://${path.join(import.meta.dirname, "triage-provider.mts")}`
+          : provider.id,
+      );
+      database.prepare("DELETE FROM eval_results").run();
+      database.close();
+      const resumed = await invoke(
+        ["eval", "--resume", "--no-cache", "--no-share", "--no-progress-bar"],
+        environment,
+      );
+      assert.equal(resumed.code, 0, resumed.output);
 
-    const listener = createServer();
-    await new Promise<void>((resolve) =>
-      listener.listen(0, "127.0.0.1", resolve),
-    );
-    const address = listener.address();
-    assert.ok(address && typeof address !== "string");
-    const port = address.port;
-    await new Promise<void>((resolve, reject) =>
-      listener.close((error) => (error ? reject(error) : resolve())),
-    );
-    const viewer = spawn(
-      process.execPath,
-      [
-        "--experimental-strip-types",
-        runner,
-        "view",
-        "--port",
-        String(port),
-        "--no",
-      ],
-      {
-        cwd: evalRoot,
-        env: { ...process.env, ...environment, NODE_USE_ENV_PROXY: "" },
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-    let viewerOutput = "";
-    for (const stream of [viewer.stdout, viewer.stderr])
-      stream.on("data", (chunk) => {
-        viewerOutput += chunk;
+      const resumedDatabase = new DatabaseSync(
+        path.join(environment.PROMPTFOO_CONFIG_DIR, "promptfoo.db"),
+        { enableForeignKeyConstraints: false },
+      );
+      const resumedResult = resumedDatabase
+        .prepare(
+          "SELECT metadata, test_case FROM eval_results WHERE eval_id = ? LIMIT 1",
+        )
+        .get(String(stored.id));
+      resumedDatabase.close();
+      assert.ok(resumedResult && typeof resumedResult.test_case === "string");
+      // Match the viewer: prefer saved inputVars, then the resolved test-case vars.
+      const replayVariables =
+        JSON.parse((resumedResult.metadata as string | null) ?? "{}")
+          .inputVars || JSON.parse(resumedResult.test_case).vars;
+      assert.equal(typeof replayVariables.target_repo, "string");
+
+      const listener = createServer();
+      await new Promise<void>((resolve) =>
+        listener.listen(0, "127.0.0.1", resolve),
+      );
+      const address = listener.address();
+      assert.ok(address && typeof address !== "string");
+      const port = address.port;
+      await new Promise<void>((resolve, reject) =>
+        listener.close((error) => (error ? reject(error) : resolve())),
+      );
+      const viewer = spawn(
+        process.execPath,
+        [
+          "--experimental-strip-types",
+          runner,
+          "view",
+          "--port",
+          String(port),
+          "--no",
+        ],
+        {
+          cwd: evalRoot,
+          env: { ...process.env, ...environment, NODE_USE_ENV_PROXY: "" },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      let viewerOutput = "";
+      for (const stream of [viewer.stdout, viewer.stderr])
+        stream.on("data", (chunk) => {
+          viewerOutput += chunk;
+        });
+      const closed = new Promise<number | null>((resolve, reject) => {
+        viewer.once("error", reject);
+        viewer.once("close", resolve);
       });
-    const closed = new Promise<number | null>((resolve, reject) => {
-      viewer.once("error", reject);
-      viewer.once("close", resolve);
-    });
-    t.after(async () => {
-      if (viewer.exitCode === null) viewer.kill("SIGTERM");
-      await closed;
-    });
-    const url = `http://127.0.0.1:${port}`;
-    while (true) {
-      try {
-        const response = await fetch(`${url}/api/eval`);
-        if (response.ok) break;
-      } catch {
-        /* The actual viewer is still building its staged runtime. */
+      t.after(async () => {
+        if (viewer.exitCode === null) viewer.kill("SIGTERM");
+        await closed;
+      });
+      const url = `http://127.0.0.1:${port}`;
+      while (true) {
+        try {
+          const response = await fetch(`${url}/api/eval`);
+          if (response.ok) break;
+        } catch {
+          /* The actual viewer is still building its staged runtime. */
+        }
+        assert.equal(viewer.exitCode, null, viewerOutput);
+        await new Promise((resolve) => setTimeout(resolve, 50));
       }
-      assert.equal(viewer.exitCode, null, viewerOutput);
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    const replay = await fetch(`${url}/api/eval/replay`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        evaluationId: stored.id,
-        testIndex: 0,
-        prompt: "hello",
-        variables: {},
-      }),
-    });
-    assert.equal(replay.status, 200, viewerOutput);
-    assert.equal(((await replay.json()) as { output: unknown }).output, "ok");
-    viewer.kill("SIGTERM");
-    await closed;
-    const rows = fs
-      .readFileSync(capture, "utf8")
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line));
-    assert.equal(rows.length, 4);
-    assert.equal(new Set(rows.map((row) => row.cwd)).size, 4);
-    for (const row of rows) assert.equal(fs.existsSync(row.cwd), false);
-  },
-);
+      const replay = await fetch(`${url}/api/eval/replay`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          evaluationId: stored.id,
+          testIndex: 0,
+          prompt: "hello",
+          variables: replayVariables,
+        }),
+      });
+      assert.equal(replay.status, 200, viewerOutput);
+      const replayResult = (await replay.json()) as { output: unknown };
+      assert.equal(replayResult.output, "ok", JSON.stringify(replayResult));
+      viewer.kill("SIGTERM");
+      await closed;
+      const rows = fs
+        .readFileSync(capture, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      assert.equal(rows.length, 4);
+      assert.equal(new Set(rows.map((row) => row.cwd)).size, 4);
+      for (const row of rows) {
+        assert.equal(fs.existsSync(row.cwd), false);
+        assert.deepEqual(row.directories, [
+          ...(suite === "SAST"
+            ? [
+                path.join(evalRoot, "artifacts", "sastbench-targets"),
+                path.join(evalRoot, "artifacts", "sastbench-git-cache"),
+              ]
+            : [
+                path.join(
+                  evalRoot,
+                  "artifacts",
+                  "calibration-repos",
+                  "calibration-0123456789abcdef",
+                ),
+              ]),
+          path.dirname(fs.realpathSync(process.execPath)),
+          path.dirname(fakeCodex),
+        ]);
+      }
+    },
+  );
+}

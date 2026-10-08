@@ -161,7 +161,11 @@ def parse_args(description: str) -> argparse.Namespace:
     recipe.add_argument("--recipe-json-stdin", action="store_true")
     recipe.add_argument("--registration-json-stdin", action="store_true")
     register_cli_scan.add_argument("--parent-scan-id")
-    register_cli_scan.add_argument("--archive-existing", action="store_true")
+    register_cli_scan.add_argument(
+        "--archive-existing",
+        action="store_true",
+        help="Archive output in the registration transaction. Supports cancellable archival preparation.",
+    )
     register_cli_scan.add_argument("--archived-scan-dir")
 
     set_scan_thread = subparsers.add_parser("set-scan-thread")
@@ -381,23 +385,10 @@ def parse_args(description: str) -> argparse.Namespace:
         publication.add_argument("--input-file", required=True)
 
     subparsers.add_parser("database-info")
-    subparsers.add_parser("dashboard")
     subparsers.add_parser("finding-workflow")
     subparsers.add_parser("severity-classification")
     severity = subparsers.add_parser("read-severity-classification")
     severity.add_argument("--scan-id", required=True)
-    subparsers.add_parser("store-findings")
-    subparsers.add_parser("store-dedupe-groups")
-    dedupe_groups = subparsers.add_parser("list-dedupe-groups")
-    dedupe_groups.add_argument("--finding-id", required=True)
-    potential_duplicates = subparsers.add_parser("find-potential-duplicates")
-    potential_duplicates.add_argument("--finding-id", required=True)
-    scope = potential_duplicates.add_mutually_exclusive_group(required=True)
-    scope.add_argument("--repository-id")
-    scope.add_argument("--all-repositories", action="store_true")
-    stored_findings = subparsers.add_parser("list-stored-findings")
-    stored_findings.add_argument("--limit", type=positive_int, required=True)
-    stored_findings.add_argument("--offset", type=non_negative_int, required=True)
     arguments = sys.argv[1:]
     if "--user-context-stdin" in arguments:
         if arguments.count("--user-context-stdin") != 1 or "--user-context" in arguments:

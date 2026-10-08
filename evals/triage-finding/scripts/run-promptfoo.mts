@@ -75,18 +75,16 @@ async function runPromptfoo(
   environment: NodeJS.ProcessEnv = {},
 ) {
   const runtimeRoot = stageSkillRuntime();
+  const artifacts = path.join(EVAL_ROOT, "artifacts");
   const env = {
+    TRIAGE_CALIBRATION_ROOT: path.join(artifacts, "calibration-repos"),
+    SASTBENCH_TARGET_ROOT: path.join(artifacts, "sastbench-targets"),
+    SASTBENCH_GIT_CACHE_ROOT: path.join(artifacts, "sastbench-git-cache"),
     ...process.env,
     ...environment,
     // Promptfoo persists this stable harness path for retry, resume, and viewer replay.
     TRIAGE_PROVIDER_PATH: path.join(import.meta.dirname, "triage-provider.mts"),
     TRIAGE_RUNTIME_ROOT: runtimeRoot,
-    SASTBENCH_RUNTIME_ROOT: runtimeRoot,
-    TRIAGE_CALIBRATION_ROOT: path.join(
-      EVAL_ROOT,
-      "artifacts",
-      "calibration-repos",
-    ),
   };
   let child: ChildProcess | undefined;
   let interrupted: NodeJS.Signals | undefined;

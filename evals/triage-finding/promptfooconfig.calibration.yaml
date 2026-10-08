@@ -16,7 +16,7 @@ providers:
         ALL_PROXY: "{{env.ALL_PROXY}}"
         NO_PROXY: "{{env.NO_PROXY}}"
       additional_directories:
-        - "{% if target_repo_root %}{{target_repo_root}}{% else %}{{env.TRIAGE_CALIBRATION_ROOT}}{% endif %}/{{case_id}}"
+        - "{% if calibration_repo_root %}{{calibration_repo_root}}{% else %}{{env.TRIAGE_CALIBRATION_ROOT}}{% endif %}/{{calibration_repo}}"
       cli_config:
         default_permissions: triage_runtime_only
         permissions:
@@ -34,6 +34,8 @@ evaluateOptions:
   maxConcurrency: 1
 
 defaultTest:
+  options:
+    transformVars: file://./scripts/runtime-vars.mts
   vars:
     invocation_preamble: "Use $codex-security:triage-finding to triage the supplied existing security finding."
   assert:

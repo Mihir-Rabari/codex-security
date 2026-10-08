@@ -89,10 +89,7 @@ assert.match(
 assert.doesNotMatch(sampleConfig, /providers:/);
 assert.doesNotMatch(sampleConfig, /derivedMetrics:/);
 
-assert.match(
-  packageJson.scripts["eval:sastbench"],
-  /run-sastbench-promptfoo\.mts eval/,
-);
+assert.match(packageJson.scripts["eval:sastbench"], /run-promptfoo\.mts eval/);
 assert.match(packageJson.scripts["eval:sastbench"], /--no-cache/);
 assert.match(packageJson.scripts["eval:sastbench"], /--no-share/);
 assert.doesNotMatch(packageJson.scripts["eval:sastbench"], /--filter-range/);
@@ -105,11 +102,11 @@ assert.doesNotMatch(
 );
 assert.match(
   packageJson.scripts["validate:sastbench:sample"],
-  /run-sastbench-promptfoo\.mts validate config -c .\/sastbench\/promptfooconfig\.sastbench-sample\.yaml/,
+  /run-promptfoo\.mts validate config -c .\/sastbench\/promptfooconfig\.sastbench-sample\.yaml/,
 );
 assert.match(
   packageJson.scripts["eval:sastbench:sample"],
-  /run-sastbench-promptfoo\.mts eval -c .\/sastbench\/promptfooconfig\.sastbench-sample\.yaml/,
+  /run-promptfoo\.mts eval -c .\/sastbench\/promptfooconfig\.sastbench-sample\.yaml/,
 );
 assert.match(packageJson.scripts["eval:sastbench:sample"], /--no-cache/);
 assert.match(packageJson.scripts["eval:sastbench:sample"], /--no-share/);
@@ -120,7 +117,7 @@ assert.match(
 assert.equal("sastbench:generate" in packageJson.scripts, false);
 assert.equal(
   fs.existsSync(path.join(import.meta.dirname, "run-sastbench-promptfoo.mts")),
-  true,
+  false,
 );
 assert.equal(
   fs.existsSync(
@@ -139,9 +136,8 @@ const dispatchRoot = fs.mkdtempSync(
   path.join(os.tmpdir(), "sastbench-dispatch-"),
 );
 try {
-  const wrapper = path.join(import.meta.dirname, "run-sastbench-promptfoo.mts");
   const runner = path.join(evalRoot, "scripts", "run-promptfoo.mts");
-  for (const module of [wrapper, runner]) {
+  for (const module of [runner]) {
     for (const entry of ["-", path.join(dispatchRoot, "virtual-entry.mts")]) {
       const imported = execFileSync(
         process.execPath,
@@ -158,7 +154,7 @@ try {
   }
   if (process.platform !== "win32") {
     const link = path.join(dispatchRoot, "sastbench-runner.mts");
-    fs.symlinkSync(wrapper, link);
+    fs.symlinkSync(runner, link);
     const version = execFileSync(
       process.execPath,
       ["--experimental-strip-types", link, "--version"],

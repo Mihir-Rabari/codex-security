@@ -2,7 +2,7 @@
 import type { CalibrationCase, CalibrationVariant } from "../types.ts";
 
 import fs from "node:fs";
-import { createHash } from "node:crypto";
+import { hash } from "node:crypto";
 import path from "node:path";
 
 export const DEFAULT_DATASET = path.join(
@@ -17,7 +17,7 @@ const DEFAULT_OUTPUT = path.join(
   "tests",
   "calibration-oss.yaml",
 );
-const DEFAULT_REPO_ROOT = "{{env.TRIAGE_CALIBRATION_ROOT}}";
+const DEFAULT_REPO_ROOT = "evals/triage-finding/artifacts/calibration-repos";
 
 function parseArgs(argv: string[]) {
   const args = {
@@ -35,7 +35,7 @@ function parseArgs(argv: string[]) {
     } else if (arg === "--output") {
       args.output = argv[++index];
     } else if (arg === "--repo-root") {
-      args.repoRoot = path.resolve(argv[++index]);
+      args.repoRoot = argv[++index];
     } else if (arg === "--case") {
       args.caseId = argv[++index];
     } else if (arg === "--variant") {
@@ -58,32 +58,24 @@ function indentedBlock(value: unknown) {
     .replace(/\n/g, "\n      ")}`;
 }
 
-function variantCaseId(
+export function variantCaseId(
   testCase: Pick<CalibrationCase, "case_id">,
-  variant: Pick<CalibrationVariant, "checkout_ref">,
+  variant: CalibrationVariant,
 ) {
-  return `case-${createHash("sha256").update(`${testCase.case_id}\0${variant.checkout_ref}`).digest("hex").slice(0, 16)}`;
+  return `calibration-${hash("sha256", `${testCase.case_id}\0${variant.checkout_ref}`).slice(0, 16)}`;
 }
 
-function targetRepoPath(
-  repoRoot: string,
-  testCase: Pick<CalibrationCase, "case_id">,
-  variant: Pick<CalibrationVariant, "checkout_ref">,
-) {
-  return path.posix.join(repoRoot, variantCaseId(testCase, variant));
-}
-
-function evidenceTerms(testCase: CalibrationCase, variant: CalibrationVariant) {
+function evidenceTerms(testCase: CalibrationCase) {
   const terms = (testCase.finding.anchor_locations || []).map(
     (location) => location.path,
   );
-  if (variant.variant_id === "fixed" && testCase.finding.fix_patch_ref) {
-    terms.push(variant.checkout_ref);
-  }
   return [...new Set(terms)];
 }
 
-function findingInput(testCase: CalibrationCase, variant: CalibrationVariant) {
+export function findingInput(
+  testCase: CalibrationCase,
+  variant: CalibrationVariant,
+) {
   const finding = testCase.finding;
   const lines = [
     `Source type: ${testCase.source_type}`,
@@ -109,12 +101,6 @@ function findingInput(testCase: CalibrationCase, variant: CalibrationVariant) {
       .join(", ");
     lines.push(`   anchor locations: ${anchors}`);
   }
-  if (finding.fix_patch_ref) {
-    lines.push(`   fix evidence: ${finding.fix_patch_ref}`);
-  }
-  lines.push(
-    `   repository state: checked out at ${variant.checkout_ref}. Triage whether the original finding affects this exact state.`,
-  );
 
   return lines.join("\n");
 }
@@ -125,7 +111,7 @@ function testYaml(
   repoRoot: string,
 ) {
   const generatedCaseId = variantCaseId(testCase, variant);
-  const terms = evidenceTerms(testCase, variant);
+  const terms = evidenceTerms(testCase);
   const lines = [
     `- description: ${quote(`calibration ${variant.variant_id}: ${testCase.case_id}`)}`,
     "  metadata:",
@@ -137,12 +123,10 @@ function testYaml(
     `    expected_binary_label: ${variant.expected_binary_label}`,
     "  vars:",
     `    case_id: ${generatedCaseId}`,
-    `    target_repo: ${quote(targetRepoPath(repoRoot, testCase, variant))}`,
-    ...(repoRoot === DEFAULT_REPO_ROOT
-      ? []
-      : [`    target_repo_root: ${quote(repoRoot)}`]),
+    `    calibration_repo: ${generatedCaseId}`,
+    `    calibration_repo_root: ${quote(repoRoot === DEFAULT_REPO_ROOT ? "" : path.resolve(repoRoot))}`,
     `    source_type_under_test: ${testCase.source_type}`,
-    `    expected_ids: ${generatedCaseId}`,
+    `    expected_ids: ${variantCaseId(testCase, variant)}`,
     `    expected_source_types: ${testCase.source_type}`,
     `    expected_verdicts: ${variant.expected_verdict}`,
     `    expected_binary_label: ${variant.expected_binary_label}`,
@@ -152,7 +136,7 @@ function testYaml(
     "    eval_instructions: |-",
     indentedBlock(
       `This is an automated OSS calibration eval. Do not ask follow-up questions.
-Inspect only the supplied repository checkout, the named anchor locations, the fix evidence, and the smallest related static evidence needed for the verdict.
+Inspect only the supplied repository checkout, the named anchor locations and the smallest related static evidence needed for the verdict.
 Do not spawn subagents, run tests, run builds, start applications, run exploit PoCs, modify files, or search for unrelated vulnerabilities.
 Return the normal triage-finding result: concise Markdown plus exactly one fenced JSON block.
 The JSON block must conform to schema_version "triage-finding/v0" and include source_type, verdict, evidence, counterevidence, proof_gaps, boundary_assessment, and exploitability_stack_rank.`,
@@ -162,7 +146,7 @@ The JSON block must conform to schema_version "triage-finding/v0" and include so
   return lines.join("\n");
 }
 
-function selectedVariants(
+export function selectedVariants(
   dataset: { cases: CalibrationCase[] },
   args: { caseId?: string | null; variantId?: string | null },
 ) {
@@ -186,7 +170,11 @@ function selectedVariants(
   return variants;
 }
 
-function main() {
+if (
+  process.argv[1] &&
+  fs.existsSync(process.argv[1]) &&
+  import.meta.filename === fs.realpathSync(process.argv[1])
+) {
   const args = parseArgs(process.argv.slice(2));
   const dataset = JSON.parse(fs.readFileSync(args.dataset, "utf8"));
   const variants = selectedVariants(dataset, args);
@@ -198,13 +186,3 @@ function main() {
   fs.writeFileSync(args.output, output);
   console.log(`wrote ${variants.length} calibration tests to ${args.output}`);
 }
-
-if (
-  process.argv[1] &&
-  fs.existsSync(process.argv[1]) &&
-  import.meta.filename === fs.realpathSync(process.argv[1])
-) {
-  main();
-}
-
-export { selectedVariants, targetRepoPath };
