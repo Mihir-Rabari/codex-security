@@ -530,7 +530,10 @@ async function preserveScanDraft(
       reservedIds.add(id);
       return { ...row, id };
     });
-    const normalizedDeferred = normalizeDeferred(deferred);
+    const normalizedDeferred = normalizeDeferred(
+      deferred,
+      resolvedDeferred(source.coverage),
+    );
     // Historical explicit IDs still identify ambiguous generic work.
     source.coverage.deferred = deferred.map((row, index) =>
       typeof row.id === "string" ? row : normalizedDeferred[index]!,
@@ -994,6 +997,7 @@ async function preserveScanDraft(
   }
   result.coverage.deferred = normalizeDeferred(
     result.coverage.deferred as JsonObject[],
+    resolvedDeferred(result.coverage),
   );
   result.coverage = normalizeCoverageEntries(
     result.coverage,
@@ -2155,6 +2159,7 @@ export function parseScanDraft(input: ScanDraftInput): ScanDraftInput {
   parsed.coverage = normalizeCheckpointCoverage(parsed.coverage);
   parsed.coverage.deferred = normalizeDeferred(
     parsed.coverage.deferred as JsonObject[],
+    resolvedDeferred(parsed.coverage),
   );
   parsed.coverage.surfaces = normalizeSurfaces(
     parsed.coverage.surfaces as JsonObject[],
@@ -2732,9 +2737,12 @@ function normalizeCoverageEntries(
   }
   const deferred = coverage.deferred as JsonObject[];
   // Reserve later owned identities before deriving any earlier missing ones.
-  const deferredIds = new Set(
-    deferred.flatMap((item) => (typeof item.id === "string" ? [item.id] : [])),
-  );
+  const deferredIds = new Set([
+    ...deferred.flatMap((item) =>
+      typeof item.id === "string" ? [item.id] : [],
+    ),
+    ...resolvedDeferred(coverage).map((item) => item.id as string),
+  ]);
   const reservedCandidateIds = new Set(
     deferred.flatMap((item) =>
       typeof item.candidateId === "string" ? [item.candidateId] : [],
@@ -2827,11 +2835,15 @@ function normalizeSurfaces(surfaces: JsonObject[]): JsonObject[] {
   });
 }
 
-function normalizeDeferred(rows: JsonObject[]): JsonObject[] {
-  // Reserve later owned identities before deriving any earlier missing ones.
-  const ids = new Set(
-    rows.flatMap((item) => (typeof item.id === "string" ? [item.id] : [])),
-  );
+function normalizeDeferred(
+  rows: JsonObject[],
+  closures: JsonObject[] = [],
+): JsonObject[] {
+  // Reserve later owned identities and closures before deriving missing task IDs.
+  const ids = new Set([
+    ...rows.flatMap((item) => (typeof item.id === "string" ? [item.id] : [])),
+    ...closures.map((item) => item.id as string),
+  ]);
   const reservedCandidateIds = new Set(
     rows.flatMap((item) =>
       typeof item.candidateId === "string" ? [item.candidateId] : [],

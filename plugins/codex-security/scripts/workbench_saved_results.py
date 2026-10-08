@@ -65,6 +65,8 @@ from workbench_budget_candidates import (
     deferred_identity_collisions,
     project_resolved_candidate_rows,
     recover_candidate_receipts,
+    retained_source_candidate_key,
+    reuse_candidate_task_ids,
 )
 from workbench_budget_candidates import (
     finding_content as _finding_content,
@@ -1561,15 +1563,14 @@ def merge_saved_results(
     source_order.update(selected_observations)
 
     worker_ids = {worker["id"] for worker in workers if worker["kind"] == "discovery"}
+    source_owners = {
+        (f"{owner}:{index}", candidate_id): owner
+        for _, draft, owner in sources
+        if owner is not None
+        for index, finding in enumerate(draft["findings"])
+        if isinstance(finding, dict) and (candidate_id := finding_candidate_id(finding)) is not None
+    }
     if worker_ids:
-        source_owners = {
-            (f"{owner}:{index}", candidate_id): owner
-            for _, draft, owner in sources
-            if owner is not None
-            for index, finding in enumerate(draft["findings"])
-            if isinstance(finding, dict)
-            and (candidate_id := finding_candidate_id(finding)) is not None
-        }
         if parent is not None:
             parent = _bind_retained_source_owners(parent, source_owners)
         sources = [
@@ -1847,6 +1848,7 @@ def merge_saved_results(
     }
 
     source_order["parent"] = (0, parent_modified)
+    reuse_candidate_task_ids(all_sources)
     deferred_rows = {
         relative: _deferred_rows(draft["coverage"]) for relative, draft, _ in all_sources
     }
@@ -2069,13 +2071,10 @@ def merge_saved_results(
                 originals = finding["provenance"].get("sourceFindings", [])
                 for original in originals if isinstance(originals, list) else []:
                     if isinstance(original, dict) and isinstance(original.get("finding"), dict):
-                        source_id = original.get("id")
-                        candidate_id = finding_candidate_id(original["finding"])
-                        if isinstance(source_id, str) and ":" in source_id and candidate_id:
+                        key = retained_source_candidate_key(original, source_owners, worker_ids)
+                        if key is not None and key[0] is not None:
                             worker_candidate = _worker_candidate_key(
-                                source_id.rsplit(":", 1)[0],
-                                candidate_id,
-                                original["finding"],
+                                key[0], key[1], original["finding"]
                             )
                             previous_key = represented_candidates.get(worker_candidate)
                             if worker_candidate not in represented_candidates:
@@ -2595,7 +2594,9 @@ def merge_saved_results(
                     output.append(copy.deepcopy(item))
 
     if isinstance(coverage.get("deferred"), list):
-        archive_resolved_deferred_payloads(coverage, findings, resolved, valid_finding)
+        archive_resolved_deferred_payloads(
+            coverage, findings, resolved, valid_finding, source_owners, worker_ids
+        )
         coverage["deferred"] = [
             item
             for item in coverage["deferred"]

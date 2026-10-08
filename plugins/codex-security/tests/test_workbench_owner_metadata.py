@@ -612,3 +612,179 @@ def test_retained_finding_owner_is_not_rebound_from_source_reference(
             )
         assert provenance["sourceFindings"] == finding["provenance"]["sourceFindings"]
     assert all(path.read_bytes() == value for path, value in originals.items())
+
+
+@pytest.mark.parametrize("reference", ["opaque", "0", "other-owner"])
+@pytest.mark.parametrize("owned", [False, True])
+@pytest.mark.parametrize("worker_time", [100, 200, 300])
+def test_parent_source_reference_preserves_independent_pending_candidate(
+    tmp_path: Path, workbench_api, reference: str, owned: bool, worker_time: int
+) -> None:
+    scan_id = "parent-source-reference"
+    scan_dir, manifest, finding, _ = saved_parent(tmp_path, scan_id)
+    finding["provenance"]["candidateId"] = "shared-candidate"
+    if owned:
+        finding["provenance"]["sourceWorkerId"] = "worker-two"
+    original = copy.deepcopy(finding)
+    source_id = "worker-two:opaque" if reference == "other-owner" else f"worker-one:{reference}"
+    finding["provenance"]["sourceFindings"] = [{"id": source_id, "finding": original}]
+    (scan_dir / "findings.json").write_text(json.dumps({"findings": [finding]}))
+    os.utime(scan_dir / "coverage.json", ns=(200, 200))
+    output = scan_dir / "worker"
+    output.mkdir()
+    pending = {
+        "id": "independent-gap",
+        "candidateId": "shared-candidate",
+        "reason": "Independent worker review remains pending.",
+    }
+    draft = {
+        "scanId": scan_id,
+        "complete": True,
+        "findings": [],
+        "coverage": {
+            "completeness": "partial",
+            "surfaces": [],
+            "explicitExclusions": [],
+            "deferred": [pending],
+        },
+    }
+    result_path = output / "result.json"
+    result_path.write_text(json.dumps(draft))
+    checkpoint = write_checkpoint(output / "checkpoints", draft)
+    for file in (result_path, checkpoint):
+        os.utime(file, ns=(worker_time, worker_time))
+    originals = {file: file.read_bytes() for file in (result_path, checkpoint)}
+    workers = [
+        {
+            "id": "worker-one",
+            "kind": "discovery",
+            "status": "succeeded",
+            "artifact_dir": str(output),
+            "result_manifest_path": str(result_path),
+            "attempt": 1,
+        }
+    ]
+    binding = {
+        "status": "interrupted",
+        "allowedTargetKinds": ["directory_snapshot"],
+        "target": manifest["scan"]["target"],
+        "scope": manifest["scan"]["scope"],
+        "coverageMode": "deep_repository",
+    }
+    module = workbench_api["saved_results"]
+    first = module.merge_saved_results(
+        scan_dir, scan_id, binding, workers, [], stopped=True, reason="Synthetic interruption."
+    )
+    assert first is not None
+    replay = module.merge_saved_results(
+        scan_dir,
+        scan_id,
+        binding,
+        workers,
+        [],
+        stopped=True,
+        reason="Synthetic interruption.",
+        frozen_source_digests=first[0]["scan"]["preservedSources"],
+    )
+    expected_pending = owned or reference != "0" or worker_time >= 200
+    for result in (first, replay):
+        assert result is not None
+        deferred = [
+            row for row in result[2]["deferred"] if row.get("candidateId") == pending["candidateId"]
+        ]
+        assert len(deferred) == int(expected_pending)
+        if deferred:
+            assert deferred[0]["sourceWorkerId"] == "worker-one"
+            assert deferred[0]["reason"] == pending["reason"]
+        assert len(result[1]["findings"]) == 1
+        if owned:
+            assert result[1]["findings"][0]["provenance"]["sourceWorkerId"] == "worker-two"
+        assert (
+            result[1]["findings"][0]["provenance"]["sourceFindings"]
+            == finding["provenance"]["sourceFindings"]
+        )
+    assert all(file.read_bytes() == value for file, value in originals.items())
+
+
+@pytest.mark.parametrize("marker, named_marker", [(True, 1), (False, 0), (True, True)])
+def test_candidate_task_id_reuse_preserves_distinct_json_evidence(
+    tmp_path: Path, workbench_api, marker: object, named_marker: object
+) -> None:
+    scan_id = "candidate-task-content"
+    scan_dir, manifest, _, coverage = saved_parent(tmp_path, scan_id)
+    coverage.update(completeness="partial", surfaces=[], explicitExclusions=[], deferred=[])
+    (scan_dir / "coverage.json").write_text(json.dumps(coverage))
+    (scan_dir / "findings.json").write_text(json.dumps({"scanId": scan_id, "findings": []}))
+    row = {
+        "candidateId": "candidate-one",
+        "sourceWorkerId": "worker-one",
+        "reason": "Candidate review remains.",
+        "candidate": {"marker": marker},
+    }
+    named = {**row, "id": "candidate-task", "candidate": {"marker": named_marker}}
+    worker = scan_dir / "worker"
+    worker.mkdir()
+    write_checkpoint(
+        worker / "checkpoints",
+        {
+            "scanId": scan_id,
+            "complete": False,
+            "findings": [],
+            "coverage": {
+                "completeness": "partial",
+                "surfaces": [],
+                "explicitExclusions": [],
+                "deferred": [row, named],
+            },
+        },
+    )
+    originals = {file: file.read_bytes() for file in scan_dir.rglob("*.json")}
+    workers = [
+        {
+            "id": "worker-one",
+            "kind": "discovery",
+            "status": "failed",
+            "artifact_dir": str(worker),
+            "result_manifest_path": None,
+            "attempt": 1,
+        }
+    ]
+    binding = {
+        "status": "failed",
+        "allowedTargetKinds": ["directory_snapshot"],
+        "target": manifest["scan"]["target"],
+        "scope": manifest["scan"]["scope"],
+        "coverageMode": "deep_repository",
+    }
+    module = workbench_api["saved_results"]
+    warnings: list[str] = []
+    first = module.merge_saved_results(
+        scan_dir,
+        scan_id,
+        binding,
+        workers,
+        warnings,
+        stopped=True,
+        reason="Synthetic interruption.",
+    )
+    assert first is not None
+    replay = module.merge_saved_results(
+        scan_dir,
+        scan_id,
+        binding,
+        workers,
+        warnings,
+        stopped=True,
+        reason="Synthetic interruption.",
+        frozen_source_digests=first[0]["scan"]["preservedSources"],
+    )
+    expected = {json.dumps(value) for value in (marker, named_marker)}
+    for result in (first, replay):
+        assert result is not None
+        rows = [
+            item for item in result[2]["deferred"] if item.get("candidateId") == "candidate-one"
+        ]
+        assert len(rows) == len(expected)
+        assert {json.dumps(item["candidate"]["marker"]) for item in rows} == expected
+    assert warnings == []
+    assert all(file.read_bytes() == value for file, value in originals.items())

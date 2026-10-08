@@ -1291,3 +1291,34 @@ def test_legacy_budget_pending_refresh_keeps_authored_fields(
         assert current["evidence"] in actual["reason"]
     else:
         assert actual[edited_field] == saved_pending[edited_field]
+
+
+@pytest.mark.parametrize("collision", [False, True])
+def test_budget_candidate_allocation_preserves_generic_closure(
+    tmp_path: Path, collision: bool
+) -> None:
+    state_dir, target, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    findings_path = scan_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    findings["findings"] = []
+    findings_path.write_text(json.dumps(findings))
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    closure = {
+        "id": candidate["candidate_id"] if collision else "general-review",
+        "reason": "Independent generic review finished.",
+    }
+    coverage.update(surfaces=[], explicitExclusions=[], deferred=[], resolvedDeferred=[closure])
+    coverage_path.write_text(json.dumps(coverage))
+    complete_budget_scan(state_dir, scan_id)
+    saved = json.loads(coverage_path.read_text())
+    assert saved["resolvedDeferred"] == [closure]
+    pending = [
+        row for row in saved["deferred"] if row.get("candidateId") == candidate["candidate_id"]
+    ]
+    assert len(pending) == 1
+    assert pending[0]["id"] != closure["id"]

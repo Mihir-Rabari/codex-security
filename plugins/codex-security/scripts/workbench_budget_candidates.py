@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -206,11 +207,36 @@ def project_resolved_candidate_rows(
     return retained
 
 
+def retained_source_candidate_key(
+    source: dict[str, Any],
+    registered: dict[tuple[str, str], str],
+    workers: set[str],
+) -> tuple[str | None, str] | None:
+    finding, reference = source.get("finding"), source.get("id")
+    if not isinstance(finding, dict) or not isinstance(reference, str):
+        return None
+    key = finding_candidate_key(finding)
+    if key is None:
+        return None
+    owner = registered.get((reference, key[1]))
+    if owner is not None:
+        return owner, key[1]
+    if key[0] is not None:
+        return key
+    # Older reducers emitted ownerless originals using their known worker:index codec.
+    worker, separator, index = reference.rpartition(":")
+    if separator and worker in workers and re.fullmatch(r"0|[1-9][0-9]*", index):
+        return worker, key[1]
+    return key
+
+
 def archive_resolved_deferred_payloads(
     coverage: dict[str, Any],
     findings: list[dict[str, Any]],
     resolved: dict[Any, str],
     valid_finding: Callable[[dict[str, Any]], bool],
+    source_owners: dict[tuple[str, str], str],
+    worker_ids: set[str],
 ) -> None:
     states = {
         key: ("reported", finding)
@@ -225,14 +251,9 @@ def archive_resolved_deferred_payloads(
             continue
         sources = finding["provenance"].get("sourceFindings", [])
         for source in sources if isinstance(sources, list) else []:
-            if (
-                isinstance(source, dict)
-                and isinstance(source.get("finding"), dict)
-                and isinstance(source.get("id"), str)
-                and ":" in source["id"]
-            ):
-                key = finding_candidate_key(source["finding"], source["id"].rsplit(":", 1)[0])
-                if resolved.get(key) == "reported":
+            if isinstance(source, dict):
+                key = retained_source_candidate_key(source, source_owners, worker_ids)
+                if key is not None and resolved.get(key) == "reported":
                     states.setdefault(key, ("reported", finding))
     for field in ("surfaces", "explicitExclusions"):
         rows = coverage.get(field)
@@ -403,6 +424,14 @@ def preserve_budget_candidates(
         }
         for field in ("surfaces", "deferred")
     }
+
+    closures = coverage.get("resolvedDeferred")
+    if isinstance(closures, list):
+        used_ids["deferred"].update(
+            row["id"]
+            for row in closures
+            if isinstance(row, dict) and isinstance(row.get("id"), str)
+        )
 
     def available_id(prefix: str, field: str) -> str:
         existing = used_ids[field]
@@ -687,6 +716,38 @@ def current_report(
         isinstance(row, dict) and coverage_candidate_key(row, owner) == key
         for row in (deferred if isinstance(deferred, list) else [])
     )
+
+
+def reuse_candidate_task_ids(sources: list[tuple[str, dict[str, Any], str | None]]) -> None:
+    """Reuse a unique saved ID for identical candidate evidence with an omitted task ID."""
+    entries = [
+        (draft["coverage"]["deferred"], owner)
+        for _, draft, owner in sources
+        if isinstance(draft["coverage"].get("deferred"), list)
+    ]
+    named: dict[Any, set[str]] = {}
+    for rows, owner in entries:
+        for row in rows:
+            if (
+                isinstance(row, dict)
+                and isinstance(row.get("id"), str)
+                and row["id"].strip()
+                and (key := coverage_candidate_key(row, owner)) is not None
+            ):
+                content = json.dumps(
+                    {field: value for field, value in row.items() if field != "id"}, sort_keys=True
+                )
+                named.setdefault((key, content), set()).add(row["id"])
+    for rows, owner in entries:
+        for index, row in enumerate(rows):
+            if (
+                isinstance(row, dict)
+                and "id" not in row
+                and (key := coverage_candidate_key(row, owner)) is not None
+            ):
+                identities = named.get((key, json.dumps(row, sort_keys=True)), set())
+                if len(identities) == 1:
+                    rows[index] = {**row, "id": next(iter(identities))}
 
 
 def deferred_identity_collisions(
