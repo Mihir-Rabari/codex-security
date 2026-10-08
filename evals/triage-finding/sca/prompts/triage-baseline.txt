@@ -1,4 +1,4 @@
-Read plugins/codex-security/skills/triage-finding/SKILL.md and use its existing static triage workflow.
+Read skills/triage-finding/SKILL.md and use its existing static triage workflow.
 
 Repository to inspect: {{target_repo}}
 Assess the existing dependency advisory supplied in {{target_repo}}/input.json. Its input_id is {{input_id}}.

@@ -1,6 +1,6 @@
 "use strict";
 
-const { test } = require("node:test");
+const { test, mock } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -20,7 +20,12 @@ const {
   matchRetention,
 } = require("./sca-result.js");
 const { generateTests } = require("./generate-tests.js");
-const { stageRuntime, stageProviderConfig } = require("./run-promptfoo.js");
+const {
+  stageRuntime,
+  stageProviderConfig,
+  main,
+} = require("./run-promptfoo.js");
+const runtimeVars = require("../../scripts/runtime-vars.mts").default;
 const assertion = require("../assertions/sca-evidence.js");
 const { afterEach } = require("../assertions/sca-metrics.js");
 const { buildBaselines } = require("./baselines.js");
@@ -371,7 +376,7 @@ test("Promptfoo metrics include execution failures even when normal assertions d
   assert.equal(updated.result.namedScores.correctly_confirmed, 0);
 });
 
-test("model staging contains source and skill runtime without the gold corpus or scoring scripts", () => {
+test("model staging uses the checkout skill and label-free cases without the gold corpus or scoring scripts", () => {
   const runtime = stageRuntime();
   const previous = process.env.SCA_EVAL_RUNTIME_ROOT;
   try {
@@ -381,12 +386,22 @@ test("model staging contains source and skill runtime without the gold corpus or
     assert.equal(
       fs.existsSync(
         path.join(
-          runtime,
-          "plugins/codex-security/skills/triage-finding/SKILL.md",
+          runtimeVars({}).triage_runtime_root,
+          "skills/triage-finding/SKILL.md",
         ),
       ),
       true,
     );
+    assert.equal(
+      fs.existsSync(
+        path.join(
+          runtimeVars({}).triage_runtime_root,
+          "scripts/launch_codex_security_mcp",
+        ),
+      ),
+      true,
+    );
+    assert.equal(fs.existsSync(path.join(runtime, "plugins")), false);
     assert.equal(fs.existsSync(path.join(runtime, "evals")), false);
     assert.equal(fs.existsSync(path.join(runtime, "cases/corpus.json")), false);
     for (const item of tests) {
@@ -395,6 +410,12 @@ test("model staging contains source and skill runtime without the gold corpus or
         "input_id",
         "target_repo",
       ]);
+      const resolved = runtimeVars(item.vars);
+      assert.equal(resolved.target_repo, item.vars.target_repo);
+      assert.equal(
+        resolved.triage_node_path,
+        fs.realpathSync(process.execPath),
+      );
       const staged = fs.readdirSync(item.vars.target_repo);
       assert.equal(staged.includes("corpus.json"), false);
       assert.equal(staged.includes("input.json"), true);
@@ -431,7 +452,7 @@ test("disables literal inherited integration names while retaining the persisten
      if (process.argv.includes("exec")) {
        fs.writeFileSync(${JSON.stringify(childReceipt)}, JSON.stringify({
          args: process.argv.slice(2), nodeOptions: process.env.NODE_OPTIONS,
-         codexHome: process.env.CODEX_HOME,
+         codexHome: process.env.CODEX_HOME, mcpNodePath: process.env.CODEX_MCP_NODE_PATH,
        }));
        for (const event of [
          { type: "thread.started", thread_id: "synthetic-thread" },
@@ -453,7 +474,7 @@ test("disables literal inherited integration names while retaining the persisten
     assert.deepEqual(JSON.parse(fs.readFileSync(receipt, "utf8")), {
       args: [
         "-C",
-        runtime,
+        runtimeVars({}).triage_runtime_root,
         "-c",
         "features.plugins=false",
         "-c",
@@ -468,6 +489,20 @@ test("disables literal inherited integration names while retaining the persisten
       provider.config.cli_env.CODEX_HOME,
       "{{env.SCA_EVAL_CODEX_HOME}}",
     );
+    assert.equal(
+      provider.config.codex_path_override,
+      runtimeVars({}).triage_node_path,
+    );
+    assert.equal(
+      provider.config.cli_env.CODEX_MCP_NODE_PATH,
+      runtimeVars({}).triage_node_path,
+    );
+    assert.equal(provider.config.working_dir, "{{triage_runtime_root}}");
+    assert.deepEqual(provider.config.additional_directories, [
+      "{{env.SCA_EVAL_RUNTIME_ROOT}}",
+      "{{env.SCA_EVAL_CODEX_RUNTIME_ROOT}}",
+      "{{triage_node_root}}",
+    ]);
     assert.equal(provider.config.cli_config.features.apps, false);
     assert.equal(provider.config.cli_config.web_search, "disabled");
     assert.equal(
@@ -496,15 +531,20 @@ test("disables literal inherited integration names while retaining the persisten
       env: {
         ...process.env,
         CODEX_HOME: codexHome,
+        CODEX_MCP_NODE_PATH: provider.config.cli_env.CODEX_MCP_NODE_PATH,
         NODE_OPTIONS: provider.config.cli_env.NODE_OPTIONS,
       },
     })
-      .startThread({ workingDirectory: runtime, skipGitRepoCheck: true })
+      .startThread({
+        workingDirectory: runtimeVars({}).triage_runtime_root,
+        skipGitRepoCheck: true,
+      })
       .run("synthetic configuration probe");
     assert.equal(turn.finalResponse, "synthetic response");
     const child = JSON.parse(fs.readFileSync(childReceipt, "utf8"));
     assert.equal(child.nodeOptions, "--no-warnings");
     assert.equal(child.codexHome, codexHome);
+    assert.equal(child.mcpNodePath, runtimeVars({}).triage_node_path);
     const argv = child.args;
     assert.equal(argv[2], "exec");
     const configArgs = argv.flatMap((arg, index) =>
@@ -565,6 +605,54 @@ test("disables literal inherited integration names while retaining the persisten
     if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
     else process.env.NODE_OPTIONS = previousNodeOptions;
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runs the installed Promptfoo entrypoint with the selected Node and cleans only staged cases", () => {
+  const childProcess = require("node:child_process");
+  const evalRoot = path.resolve(__dirname, "../..");
+  const promptfooPackage = path.join(
+    evalRoot,
+    "node_modules/promptfoo/package.json",
+  );
+  const { bin } = JSON.parse(fs.readFileSync(promptfooPackage, "utf8"));
+  const args = ["validate", "config", "-c", "./sca/promptfooconfig.yaml"];
+  let staged;
+  const calls = [];
+  const spy = mock.method(
+    childProcess,
+    "execFileSync",
+    (command, argv, options) => {
+      calls.push({ command, argv });
+      assert.equal(command, runtimeVars({}).triage_node_path);
+      if (argv.includes("list")) return "[]";
+      assert.deepEqual(argv, [
+        path.resolve(path.dirname(promptfooPackage), bin.promptfoo),
+        ...args,
+      ]);
+      assert.equal(options.cwd, evalRoot);
+      staged = options.env.SCA_EVAL_RUNTIME_ROOT;
+      assert.equal(fs.existsSync(path.join(staged, "cases")), true);
+      assert.equal(fs.existsSync(path.join(staged, "evals")), false);
+      const provider = JSON.parse(
+        fs.readFileSync(options.env.SCA_EVAL_PROVIDER_CONFIG, "utf8"),
+      );
+      assert.equal(provider.config.cli_env.CODEX_MCP_NODE_PATH, command);
+      assert.equal(
+        options.env.SCA_EVAL_CODEX_HOME,
+        process.env.CODEX_HOME || path.join(os.homedir(), ".codex"),
+      );
+      return "";
+    },
+  );
+  try {
+    main(args);
+    assert.equal(calls.length, 2);
+    assert.equal(fs.existsSync(staged), false);
+    assert.equal(fs.existsSync(runtimeVars({}).triage_runtime_root), true);
+  } finally {
+    spy.mock.restore();
+    if (staged) fs.rmSync(staged, { recursive: true, force: true });
   }
 });
 

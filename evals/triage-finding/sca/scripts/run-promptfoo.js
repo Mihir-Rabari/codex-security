@@ -7,9 +7,7 @@ const os = require("node:os");
 const { createRequire } = require("node:module");
 const { pathToFileURL } = require("node:url");
 const childProcess = require("node:child_process");
-const {
-  stageSkillRuntime,
-} = require("../../sastbench/scripts/run-sastbench-promptfoo.mts");
+const runtimeVars = require("../../scripts/runtime-vars.mts").default;
 const { CORPUS, FIXTURE_ROOT } = require("./sca-result.js");
 
 const EVAL_ROOT = path.resolve(__dirname, "../..");
@@ -40,14 +38,16 @@ function stageProviderConfig(
     "bin/codex.js",
   ),
 ) {
+  const { triage_node_path: nodePath, triage_runtime_root: pluginRoot } =
+    runtimeVars({});
   // Match the SDK's read-only helpers: an empty table does not remove inherited servers.
   const inherited = JSON.parse(
     childProcess.execFileSync(
-      process.execPath,
+      nodePath,
       [
         codexScript,
         "-C",
-        runtime,
+        pluginRoot,
         "-c",
         "features.plugins=false",
         "-c",
@@ -80,7 +80,8 @@ process.argv.splice(1, 1, ${JSON.stringify(codexScript)}, "--config", ${JSON.str
 await import(${JSON.stringify(pathToFileURL(codexScript).href)});
 `,
   );
-  provider.config.codex_path_override = process.execPath;
+  provider.config.codex_path_override = nodePath;
+  provider.config.cli_env.CODEX_MCP_NODE_PATH = nodePath;
   provider.config.cli_env.NODE_OPTIONS = process.env.NODE_OPTIONS
     ? `${process.env.NODE_OPTIONS} ${preload}`
     : preload;
@@ -90,7 +91,7 @@ await import(${JSON.stringify(pathToFileURL(codexScript).href)});
 }
 
 function stageRuntime() {
-  const runtime = stageSkillRuntime();
+  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), "codex-security-sca-"));
   try {
     for (const testCase of CORPUS.cases) {
       fs.cpSync(
@@ -115,9 +116,14 @@ function main(args = process.argv.slice(2)) {
     const codexHome =
       process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
     const providerConfig = stageProviderConfig(runtime, codexHome);
+    const promptfooPackage = path.join(
+      EVAL_ROOT,
+      "node_modules/promptfoo/package.json",
+    );
+    const { bin } = JSON.parse(fs.readFileSync(promptfooPackage, "utf8"));
     childProcess.execFileSync(
-      path.join(EVAL_ROOT, "node_modules/.bin/promptfoo"),
-      args,
+      runtimeVars({}).triage_node_path,
+      [path.resolve(path.dirname(promptfooPackage), bin.promptfoo), ...args],
       {
         cwd: EVAL_ROOT,
         env: {

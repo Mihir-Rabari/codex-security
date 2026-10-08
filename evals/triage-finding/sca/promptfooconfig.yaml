@@ -18,6 +18,8 @@ extensions:
   - file://./assertions/sca-metrics.js:afterEach
 
 defaultTest:
+  options:
+    transformVars: file://../scripts/runtime-vars.mts
   assert:
     - type: contains-json
       value: file://../../../plugins/codex-security/schemas/triage-result.schema.json

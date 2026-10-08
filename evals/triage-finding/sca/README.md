@@ -52,15 +52,15 @@ current static triage skill and a typed-match prompt prototype. This prototype
 isolates prompt behavior; it is **not** an end-to-end benchmark of the SDK's
 `scanDependencies` orchestration. Run SDK process-boundary tests for that.
 
-The runner stages only the skill runtime and label-free case files in a temporary
-directory. The provider uses the same named filesystem-permission pattern as the
-existing SastBench harness, reads only that runtime plus the installed native
-Codex CLI package required to launch sandboxed tools, disables external network
-access for tools, and disables web search, inherited MCP servers, apps, and global
-plugin/memory context. Per-run provider overrides keep these integrations disabled
-while using the existing Codex home for saved logins and token refreshes. Gold
-labels, scoring scripts, and the corpus manifest stay outside the model's readable
-workspace.
+The runner stages only label-free case files and its provider adapter in a temporary
+directory. It uses the checkout's plugin runtime and the selected Node executable,
+including for Promptfoo, Codex, and the security-policy helper. The provider keeps
+the existing named read-only filesystem profile, allowing the plugin, staged cases,
+Node executable directory, and installed native Codex CLI package. Tool network
+access, web search, inherited MCP servers, apps, and plugin/memory context remain
+disabled. Per-run provider overrides retain the existing Codex home for saved
+logins and token refreshes. Gold labels, scoring scripts, and the corpus manifest
+stay outside the model's readable workspace.
 No remote target hydration is needed. Model calls use the configured local Codex
 authentication and can incur cost. Promptfoo `--no-cache --no-share` is set in
 the provided scripts. Existing provider error rows are retained by the `afterEach`
