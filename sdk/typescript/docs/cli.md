@@ -894,7 +894,10 @@ or effort. A successful run also writes `severity-classification.json`, but
 publication reads the database. Original findings and sealed artifacts remain
 unchanged.
 
-Repeat `--finding-id ID` for a subset, such as dedupe's `uniqueFindingIds`.
+Repeat `--finding-id ID` for a subset of findings in the supplied scan.
+Dedupe's `uniqueFindingIds` can include historical representatives from other
+scans, which this command cannot select. Choose scan-local findings explicitly;
+keeping only scan-local representatives omits groups represented outside the scan.
 Linear publication defaults to saved classification selection, omits exclusions,
 and uses assessed severity for title and priority. Descriptions retain original
 severity and add the classification rationale. Publication rejects incomplete or
@@ -928,7 +931,7 @@ const classification = await classifySeverity(findings, {
 await classifyScanSeverity("SCAN_ID", { rubricPath: "/path/to/policy.md" });
 await classifyScanDirectorySeverity(scanDirectory, {
   rubricPath: "/path/to/policy.md",
-  findingIds: dedupeResult.uniqueFindingIds,
+  findingIds: scanLocalFindingIds,
 });
 
 // Or supply an in-memory assessment directly to publication.

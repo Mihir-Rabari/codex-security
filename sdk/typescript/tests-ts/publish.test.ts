@@ -4,6 +4,8 @@ import { cancelInspection } from "./support/workbench-fakes.js";
 import { resolving } from "./support/promises.js";
 import { nodeCommand } from "./support/shell.js";
 import { randomUUID } from "node:crypto";
+import * as filesystem from "node:fs/promises";
+import { CodexSecurityError } from "../src/errors.js";
 import {
   appendFile,
   readFile,
@@ -2672,32 +2674,105 @@ describe("connected Linear publication", () => {
     ).toBe(true);
   });
 
-  test("removes source-bearing handoffs when the Codex executable cannot be spawned", async () => {
-    const publication = preparedPublication();
-    const persisted = mock(copyPublishedIssues);
-    const missingExecutable = join(
-      tmpdir(),
-      `codex-security-missing-executable-${randomUUID()}`,
-    );
-    const injected = dependencies(publication, {
-      resolveCodex: () => ({ command: missingExecutable }),
-      runCodex: undefined,
-      recordPublishedIssues: persisted,
-    });
+  test.each(process.platform === "win32" ? ["ENOENT"] : ["ENOENT", "EACCES"])(
+    "removes source-bearing handoffs when Codex spawn fails with %s",
+    async (code) => {
+      const publication = preparedPublication();
+      const persisted = mock(copyPublishedIssues);
+      const executable = join(await temporaryDirectory(), "unavailable-codex");
+      if (code === "EACCES")
+        await writeFile(executable, "synthetic", { mode: 0o600 });
+      const injected = dependencies(publication, {
+        resolveCodex: () => ({ command: executable }),
+        runCodex: undefined,
+        recordPublishedIssues: persisted,
+      });
+      let failure: unknown;
+      try {
+        await publishScanInternal(publication.scanDirectory, OPTIONS, injected);
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(CodexSecurityError);
+      const cause = (failure as Error).cause as NodeJS.ErrnoException;
+      expect(cause.code).toBe(code);
+      expect((failure as Error).message).toContain(cause.message);
+      expect((failure as Error).message).toContain(executable);
+      const handoffRoot = join(
+        injected.environment!["CODEX_SECURITY_STATE_DIR"]!,
+        "publications",
+        "linear",
+        "handoffs",
+      );
+      expect(await readdir(handoffRoot)).toEqual([]);
+      expect(persisted).not.toHaveBeenCalled();
+    },
+  );
 
-    await expect(
-      publishScanInternal(publication.scanDirectory, OPTIONS, injected),
-    ).rejects.toThrow("Could not start Codex for Linear publication.");
-
-    const handoffRoot = join(
-      injected.environment!["CODEX_SECURITY_STATE_DIR"]!,
-      "publications",
-      "linear",
-      "handoffs",
-    );
-    expect(await readdir(handoffRoot)).toEqual([]);
-    expect(persisted).not.toHaveBeenCalled();
-  });
+  test.each([1, 2])(
+    "preserves recovery evidence when handoff read %d fails",
+    async (failedRead) => {
+      const publication = preparedPublication();
+      const persisted = mock(copyPublishedIssues);
+      const writeReceipt = mock(async () => {});
+      const originalReadFile = filesystem.readFile;
+      const failure = Object.assign(
+        new Error("EACCES: permission denied reading synthetic handoff"),
+        { code: "EACCES" },
+      );
+      let handoffFile = "",
+        reads = 0;
+      let restore = () => {};
+      let rejected: unknown;
+      try {
+        await publishScanInternal(
+          publication.scanDirectory,
+          OPTIONS,
+          dependencies(publication, {
+            runCodex: async (_command, _args, input) => {
+              handoffFile = publicationData(input).handoffFile;
+              await writeHandoff(input, [
+                handoffRecord(publication, publication.issues[0]!, {
+                  identifier: "SEC-RECOVERABLE",
+                }),
+              ]);
+              const read = spyOn(filesystem, "readFile").mockImplementation(
+                (async (...args: Parameters<typeof originalReadFile>) => {
+                  if (args[0] === handoffFile && ++reads === failedRead)
+                    throw failure;
+                  return originalReadFile(...args);
+                }) as typeof originalReadFile,
+              );
+              restore = () => {
+                read.mockRestore();
+              };
+              return { exitCode: 0, stdout: "", stderr: "" };
+            },
+            recordPublishedIssues: persisted,
+            writeReceipt,
+          }),
+        );
+      } catch (error) {
+        rejected = error;
+      } finally {
+        restore();
+      }
+      expect(rejected).toBeInstanceOf(CodexSecurityError);
+      expect((rejected as Error).message).toContain(failure.message);
+      expect((rejected as Error).message).toContain(handoffFile);
+      expect((rejected as Error).message).toContain(
+        "recover it before retrying",
+      );
+      const cause = (rejected as Error).cause;
+      expect(failedRead === 1 ? cause : (cause as Error).cause).toBe(failure);
+      expect(await readFile(handoffFile, "utf8")).toContain("SEC-RECOVERABLE");
+      expect(
+        await readFile(join(dirname(handoffFile), "publication.json"), "utf8"),
+      ).toContain("unsafe(input)");
+      expect(writeReceipt).not.toHaveBeenCalled();
+      expect(persisted).not.toHaveBeenCalled();
+    },
+  );
 
   test("retains handoffs when an injected publisher rejects after a possible mutation", async () => {
     const publication = preparedPublication();
@@ -2710,7 +2785,18 @@ describe("connected Linear publication", () => {
             identifier: "SEC-RECOVERABLE",
           }),
         ]);
-        throw new Error("The publisher failed after a possible mutation.");
+        throw new CodexSecurityError(
+          "The publisher failed after a possible mutation.",
+          {
+            cause: Object.assign(
+              new Error("EACCES: synthetic publisher spawn failed"),
+              {
+                syscall: "spawn synthetic-codex",
+                code: "EACCES",
+              },
+            ),
+          },
+        );
       },
     });
 
@@ -3165,9 +3251,13 @@ describe("connected Linear publication", () => {
     );
   });
 
-  test("does not allow a failing progress observer to stop issue publication", async () => {
+  test.each([
+    ["throws", throwing("The optional progress display failed.")],
+    ["rejects", rejecting("The optional progress display failed.")],
+    ["never settles", () => new Promise<void>(() => {})],
+  ] as const)("ignores optional progress that %s", async (_name, observer) => {
     const publication = preparedPublication();
-    const onProgress = mock(throwing("The optional progress display failed."));
+    const onProgress = mock(observer);
     const result = await publishScanInternal(
       publication.scanDirectory,
       {

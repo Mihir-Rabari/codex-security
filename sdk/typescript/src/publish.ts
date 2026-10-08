@@ -371,7 +371,6 @@ export async function publishScanInternal(
       if (
         dependencies.runCodex === undefined &&
         error instanceof CodexSecurityError &&
-        error.message === "Could not start Codex for Linear publication." &&
         isRecord(cause) &&
         typeof cause["syscall"] === "string" &&
         cause["syscall"].startsWith("spawn ")
@@ -805,7 +804,7 @@ function reportPublicationProgress(
 ): void {
   if (observer === undefined) return;
   try {
-    observer(event);
+    void Promise.resolve(observer(event)).catch(() => {});
   } catch {
     // Optional progress reporting must not stop issue publication.
   }
@@ -908,16 +907,23 @@ async function createPublicationHandoff(
   return { directory, file, publicationFile };
 }
 
+async function readPublicationHandoff(file: string): Promise<string> {
+  try {
+    return await readFile(file, "utf8");
+  } catch (error) {
+    if (isRecord(error) && error["code"] === "ENOENT") return "";
+    throw new CodexSecurityError(
+      `Could not read the publication handoff: ${errorMessage(error)}. The publication handoff remains at ${file}; recover it before retrying to avoid creating duplicate issues.`,
+      { cause: error },
+    );
+  }
+}
+
 async function collectPublicationHandoffEvidence(
   file: string,
   publication: PreparedScanPublication,
 ): Promise<PublicationHandoffEvidence[]> {
-  let content: string;
-  try {
-    content = await readFile(file, "utf8");
-  } catch {
-    return [];
-  }
+  const content = await readPublicationHandoff(file);
 
   const expectedIssues = new Map(publication.issues.map(findingEntry));
   return content
@@ -1343,12 +1349,7 @@ async function preserveVerifiedHandoff(
   publication: PreparedScanPublication,
   issues: readonly PublishedScanIssue[],
 ): Promise<void> {
-  let current: string;
-  try {
-    current = await readFile(file, "utf8");
-  } catch {
-    current = "";
-  }
+  const current = await readPublicationHandoff(file);
   const planned = new Map(publication.issues.map(findingEntry));
   const verified = new Map(issues.map(findingEntry));
   const recorded = new Set<string>();
@@ -1495,7 +1496,7 @@ async function runPublicationCodex(
       cleanup();
       reject(
         new CodexSecurityError(
-          "Could not start Codex for Linear publication.",
+          `Could not start Codex for Linear publication: ${errorMessage(error)}`,
           {
             cause: error,
           },
