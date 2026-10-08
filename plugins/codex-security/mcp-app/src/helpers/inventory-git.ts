@@ -24,7 +24,6 @@ import { decodeUtf8 } from "./utf8";
 import {
   ancestors,
   append,
-  directory,
   executable,
   exists,
   inside,
@@ -364,16 +363,20 @@ export async function directoryPaths(
       if (!matching.get(indexedPrefix)) continue;
     }
     const path = append(target, parts.slice(depth).join(sep));
+    let metadata;
     try {
       if (linkedParent(target, path)) continue;
-      lstat(path);
+      metadata = lstat(path);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === "ENOENT" || code === "ENOTDIR") continue;
       throw error;
     }
     found.add(path);
-    if (directory(path) && !lstat(path).isSymbolicLink()) {
+    if (
+      metadata.isDirectory() &&
+      !("isNameSurrogate" in metadata && metadata.isNameSurrogate())
+    ) {
       const nestedRoot = await git(path, ["rev-parse", "--show-toplevel"]);
       const nested =
         nestedRoot.status === 0 && sameFile(gitLine(nestedRoot.stdout), path)

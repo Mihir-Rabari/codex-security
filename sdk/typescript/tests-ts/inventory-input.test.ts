@@ -919,6 +919,29 @@ test("inventory skips stale tracked entries after deletion and directory replace
   expect(f.rows().map((row) => row.path)).toEqual(["replaced"]);
 });
 
+test.skipIf(process.platform !== "win32")(
+  "tracked files replaced by a junction to the repository are not traversed",
+  () => {
+    const f = fixture();
+    f.write("cycle");
+    f.write("visible.py");
+    git(f.repo, "add", ".");
+    const junction = join(f.repo, "cycle");
+    rmSync(junction);
+    symlinkSync(f.repo, junction, "junction");
+    const scopes = join(f.root, "scopes.json");
+    writeFileSync(scopes, '["."]');
+    try {
+      for (const command of ["make-repo-rank-input", "make-repo-scope-input"])
+        expect(
+          f.rows(command, ["--scopes-file", scopes]).map((row) => row.path),
+        ).toEqual(["visible.py"]);
+    } finally {
+      rmSync(junction, { recursive: true, force: true });
+    }
+  },
+);
+
 test("absolute explicit scopes ignore dot and empty components before the repo", () => {
   const f = fixture();
   f.write("src/source.py");
@@ -1102,6 +1125,40 @@ for (const name of [".gitignore", ".ignore", ".rgignore"])
         expect(readFileSync(f.out, "utf8")).toBe("previous\n");
       },
     );
+
+for (const marker of [".git", ".gitignore"])
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    `missing-tool fallback rejects ${marker} before reading descendants`,
+    () => {
+      const f = fixture();
+      const scope = marker === ".git" ? "." : "scope";
+      const blocked =
+        marker === ".git"
+          ? join(f.repo, ".git", "objects")
+          : join(f.repo, scope, "unreadable");
+      if (marker === ".gitignore") {
+        rmSync(join(f.repo, ".git"), { recursive: true });
+        f.write(".gitignore", "ignored.py\n");
+        f.write("scope/unreadable/source.py");
+      }
+      writeFileSync(f.out, "previous\n");
+      chmodSync(blocked, 0);
+      try {
+        const result = f.run("make-repo-rank-input", ["--scope", scope], {
+          ...process.env,
+          CODEX_SECURITY_GIT: "",
+          PATH: f.root,
+        });
+        expect(result.status).toBe(1);
+        expect(result.stderr.trim()).toBe(
+          "Could not safely enumerate ignored scoped files without Git or ripgrep.",
+        );
+        expect(readFileSync(f.out, "utf8")).toBe("previous\n");
+      } finally {
+        chmodSync(blocked, 0o700);
+      }
+    },
+  );
 
 test("file and Git previews retain empty files and incomplete final UTF-16 units", () => {
   const f = fixture();
