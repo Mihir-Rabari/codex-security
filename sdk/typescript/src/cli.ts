@@ -145,6 +145,7 @@ import {
   formatTokenUsage,
 } from "./cost-model.js";
 import { readRegularInputFile, resolveScanPrompts } from "./prompt-files.js";
+import { readKnowledgeBaseSnapshot } from "./knowledge-base.js";
 import {
   CodexSecurityError,
   AuthenticationRequiredError,
@@ -8681,6 +8682,16 @@ async function executeScan(
         }
       },
     };
+    if (
+      arguments_.validate &&
+      !arguments_.dryRun &&
+      options.knowledgeBasePaths?.length
+    ) {
+      options.knowledgeBaseSnapshot = await readKnowledgeBaseSnapshot(
+        options.knowledgeBasePaths,
+        preparationAbortController.signal,
+      );
+    }
     if (arguments_.dryRun) {
       preflight = await security.preflight(repository, options);
     } else {
@@ -8754,6 +8765,7 @@ async function executeScan(
                   scanId: result.manifest.scan.id,
                   workflowId: arguments_.workflowId,
                   knowledgeBasePaths: options.knowledgeBasePaths,
+                  knowledgeBaseSnapshot: options.knowledgeBaseSnapshot,
                   finding,
                   auth,
                   cyberAccessProgram: arguments_.cyberAccessProgram,

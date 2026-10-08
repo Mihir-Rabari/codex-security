@@ -331,6 +331,10 @@ pass.
 
 With `--workflow-id`, retries reuse completed assessments for unchanged findings,
 source, and validation settings. Earlier reports and evidence remain available.
+When `--knowledge-base` is supplied, the scan and all follow-up assessments use
+one captured copy of those documents. A workflow retry must use the same document
+contents. Use a new workflow ID if they changed or if the workflow was created
+before document snapshots were bound to follow-up validation.
 
 The report is supplemental: its assessments are not applied to the saved
 findings or the `--fail-on-severity` decision. Validation failures exit with

@@ -1,5 +1,6 @@
 import { resolving } from "./support/promises.js";
 import { parseJsonLines } from "./support/json.js";
+import { writeFileSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -42,6 +43,7 @@ import {
   resolveCliPath,
 } from "../src/cli.js";
 import { scanPreflightCodexConfig } from "../src/api.js";
+import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "../src/version.js";
 import {
   DEFAULT_CODEX_CONFIG,
@@ -175,15 +177,22 @@ describe("CLI", () => {
   });
 
   test("validates each finding with the scan client before closing it", async () => {
-    const scanDir = await mkdtemp(join(tmpdir(), "scan-validation-"));
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "scan-validation-")),
+    );
+    const scanDir = join(root, "scan");
+    const repository = join(root, "repository");
+    await mkdir(scanDir);
+    await mkdir(repository);
     try {
       const result = scanResultAt(scanDir, ["high", "low"]);
-      const repository = await realpath(tmpdir());
-      const knowledgePath = join(scanDir, "synthetic-policy.md");
+      const knowledgePath = join(root, "synthetic-policy.md");
       await writeFile(knowledgePath, "Synthetic validation policy.");
       const stdout = capture();
       const lifecycle: string[] = [];
       const validated: unknown[] = [];
+      const documents: string[] = [];
+      let knowledgeSnapshot: ScanOptions["knowledgeBaseSnapshot"];
       let scanSignal: AbortSignal | undefined;
       expect(
         await main(
@@ -207,6 +216,8 @@ describe("CLI", () => {
             onTurn: (_repository, options) => {
               lifecycle.push("scan");
               scanSignal = (options as ScanOptions).signal;
+              knowledgeSnapshot = options.knowledgeBaseSnapshot;
+              writeFileSync(knowledgePath, "Changed during the scan.");
             },
             onValidate: async (options) => {
               lifecycle.push("validate");
@@ -219,6 +230,12 @@ describe("CLI", () => {
                 signal: scanSignal,
               });
               expect(options.outputDir).toBeUndefined();
+              const snapshot =
+                options.knowledgeBaseSnapshot ??
+                (await readKnowledgeBaseSnapshot(options.knowledgeBasePaths!));
+              documents.push(...Object.values(snapshot.documents));
+              expect(options.knowledgeBaseSnapshot).toBe(knowledgeSnapshot);
+              await writeFile(knowledgePath, "Changed between assessments.");
               return {
                 disposition: "suppressed",
                 report: "# Supplemental assessment",
@@ -233,6 +250,13 @@ describe("CLI", () => {
         ),
       ).toBe(1);
       expect(validated).toEqual(result.findings.findings);
+      expect(documents).toEqual([
+        "Synthetic validation policy.",
+        "Synthetic validation policy.",
+      ]);
+      expect(Object.values(knowledgeSnapshot!.documents)).toEqual([
+        "Synthetic validation policy.",
+      ]);
       expect(lifecycle).toEqual(["scan", "validate", "validate", "close"]);
       expect(JSON.parse(stdout.text())).toMatchObject({
         validation: {
@@ -246,7 +270,7 @@ describe("CLI", () => {
       expect(report).toContain(join(repository, "evidence-1"));
       expect(report).toContain(join(repository, "evidence-2"));
     } finally {
-      await rm(scanDir, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
     }
   });
 

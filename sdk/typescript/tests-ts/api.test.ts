@@ -103,6 +103,7 @@ import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { writeSession as writeUsageSession } from "./support/usage-rollout.js";
 import { importScan } from "../src/import-scan.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
+import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
 import { createProviderProfile } from "../src/provider-profile.js";
 import { pythonExecutable, nodeCommand, gitText } from "./support/shell.js";
@@ -141,7 +142,14 @@ async function scanDirectories() {
   return { ...directories, scanDir };
 }
 
-test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
+test.each([
+  "completed",
+  "receipt-lost",
+  "scan-interrupted",
+  "prompt-files",
+  "knowledge-snapshot",
+  "legacy-knowledge",
+])(
   "durable scan workflow resumes after %s without rerunning completed work",
   async (scenario) => {
     const root = await temporaryDirectory();
@@ -159,7 +167,22 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
     const workflowId = "durable-scan";
     const scanPrompt = "Review synthetic authentication boundaries.";
     const promptFile = join(root, "instructions.md");
-    if (scenario === "prompt-files") await writeFile(promptFile, scanPrompt);
+    const knowledge =
+      scenario === "knowledge-snapshot" || scenario === "legacy-knowledge";
+    if (scenario === "prompt-files" || knowledge)
+      await writeFile(promptFile, scanPrompt);
+    const knowledgeOptions = knowledge
+      ? {
+          knowledgeBasePaths: [promptFile],
+          ...(scenario === "knowledge-snapshot"
+            ? {
+                knowledgeBaseSnapshot: await readKnowledgeBaseSnapshot([
+                  promptFile,
+                ]),
+              }
+            : {}),
+        }
+      : {};
     let modelCalls = 0;
     let completed = false;
     let loseReceipt = scenario === "receipt-lost";
@@ -217,10 +240,11 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
     const first = await makeClient(1);
     let original: Record<string, unknown> | undefined;
     try {
-      if (scenario === "completed" || scenario === "prompt-files")
+      if (scenario === "completed" || scenario === "prompt-files" || knowledge)
         original = (
           await first.run(repository, {
             workflowId,
+            ...knowledgeOptions,
             ...(scenario === "prompt-files"
               ? { scanPromptFile: promptFile }
               : {}),
@@ -240,6 +264,14 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
       if (scenario === "prompt-files") await writeFile(replacement, scanPrompt);
       const result = await resumed.run(repository, {
         workflowId,
+        ...knowledgeOptions,
+        ...(scenario === "knowledge-snapshot"
+          ? {
+              knowledgeBaseSnapshot: await readKnowledgeBaseSnapshot([
+                promptFile,
+              ]),
+            }
+          : {}),
         ...(scenario === "prompt-files" ? { scanPromptFile: replacement } : {}),
       });
       expect(result.manifest.scan.id).toBe("scan_example_001");
@@ -255,6 +287,20 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
       await expect(
         resumed.run(repository, { workflowId, mode: "deep" }),
       ).rejects.toThrow("already bound to a different");
+      if (knowledge) {
+        if (scenario === "knowledge-snapshot")
+          await writeFile(promptFile, "Changed synthetic project guidance.");
+        await expect(
+          resumed.run(repository, {
+            workflowId,
+            knowledgeBasePaths: [promptFile],
+            knowledgeBaseSnapshot: await readKnowledgeBaseSnapshot([
+              promptFile,
+            ]),
+          }),
+        ).rejects.toThrow("Use another --workflow-id.");
+        expect(modelCalls).toBe(1);
+      }
     } finally {
       python.mockRestore();
       await resumed.close();
@@ -1075,9 +1121,13 @@ describe("CodexSecurity finding validation", () => {
     },
   );
 
-  test.each([false, true])(
-    "retains supplied knowledge context for workflow validation; changed=%p",
-    async (changed) => {
+  test.each([
+    [false, false],
+    [true, false],
+    [true, true],
+  ])(
+    "retains supplied knowledge context for workflow validation; changed=%p, snapshot=%p",
+    async (changed, snapshot) => {
       const python = await resolvePluginPython();
       let modelCalls = 0;
       const normalizedPaths: string[] = [];
@@ -1111,6 +1161,13 @@ describe("CodexSecurity finding validation", () => {
         outputDir: undefined,
         workflowId: workflow.id,
         knowledgeBasePaths: [document],
+        ...(snapshot
+          ? {
+              knowledgeBaseSnapshot: await readKnowledgeBaseSnapshot([
+                document,
+              ]),
+            }
+          : {}),
       };
       const first = await client.validate(request);
       expect(first.report).toBe("Original synthetic policy.");
@@ -1122,12 +1179,14 @@ describe("CodexSecurity finding validation", () => {
       );
       if (changed) await writeFile(document, "Updated synthetic policy.");
       const second = await client.validate(request);
-      expect(modelCalls).toBe(changed ? 2 : 1);
+      expect(modelCalls).toBe(changed && !snapshot ? 2 : 1);
       expect(second.report).toBe(
-        changed ? "Updated synthetic policy." : first.report,
+        changed && !snapshot ? "Updated synthetic policy." : first.report,
       );
       expect(normalizedPaths.every((path) => !existsSync(path))).toBe(true);
-      expect(await readFile(document, "utf8")).toBe(second.report);
+      expect(await readFile(document, "utf8")).toBe(
+        changed ? "Updated synthetic policy." : first.report,
+      );
     },
   );
 

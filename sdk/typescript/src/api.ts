@@ -296,7 +296,7 @@ const DEEP_SCAN_CONFIG_PATH_ENVIRONMENT =
   "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH";
 
 export interface ScanOptions extends ScanSettings {
-  /** @internal Reuse the knowledge inputs bound to a bulk campaign manifest. */
+  /** @internal Reuse captured knowledge inputs across related operations. */
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   /** @internal Resume a CLI Deep Scan with its saved launch recipe. */
   resumeScanId?: string;
@@ -347,6 +347,7 @@ export interface ValidationOptions extends Pick<
   | "auth"
   | "cyberAccessProgram"
   | "knowledgeBasePaths"
+  | "knowledgeBaseSnapshot"
   | "outputDir"
   | "safetyIdentifier"
   | "signal"
@@ -708,7 +709,7 @@ export class CodexSecurity {
       );
       if (options.knowledgeBasePaths?.length) {
         knowledgeBase = await prepareKnowledgeBase(
-          options.knowledgeBasePaths,
+          options.knowledgeBaseSnapshot ?? options.knowledgeBasePaths,
           signal,
         );
       }
