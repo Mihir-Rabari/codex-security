@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { promises as fs } from "node:fs";
 import { cp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
@@ -110,6 +111,94 @@ for (const malformed of [
       assert.equal(sources.discoveries.length, 1);
       assert.deepEqual(await readFile(f.resultPath), before);
     } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const unreadableHead of [false, true]) {
+  test(`readable retry history survives one head read failure=${unreadableHead}`, async (t) => {
+    const f = await fixture();
+    try {
+      const worker = {
+        root: f.output,
+        repoRoot: f.root,
+        scanId,
+        layout: "worker",
+      };
+      for (const attempt of [1, 2]) {
+        await recordCodexSecurityWorkerScanDraft(
+          worker,
+          workerDraft([], {
+            complete: false,
+            coverage: {
+              completeness: "partial",
+              surfaces: [],
+              explicitExclusions: [],
+              deferred: [
+                {
+                  id: `task-${attempt}`,
+                  reason: `Synthetic proof ${attempt}.`,
+                },
+              ],
+            },
+          }),
+        );
+        await archiveDirectory(
+          f.output,
+          path.join(f.workerRoot, "attempts", `attempt-0${attempt}`),
+        );
+      }
+      const head = path.join(
+        f.workerRoot,
+        "attempts",
+        "attempt-02",
+        "checkpoint-head.json",
+      );
+      const before = await readFile(head);
+      assert.ok((await fs.lstat(head)).isFile());
+      // Direct-file worker results remain accepted after a failed retry checkpoint.
+      await writeFile(
+        f.resultPath,
+        JSON.stringify(workerDraft([], { complete: true })),
+      );
+      const resultBefore = await readFile(f.resultPath);
+      await validateDiscoveryArtifacts(
+        { workersRoot: path.dirname(f.workerRoot) },
+        f.resultPath,
+        scanId,
+      );
+      if (unreadableHead) {
+        const open = fs.open;
+        t.mock.method(fs, "open", async (...args: Parameters<typeof open>) => {
+          if (args[0] === head && args[1] === "r") {
+            throw Object.assign(
+              new Error("Synthetic regular-file read failure."),
+              { code: "EIO" },
+            );
+          }
+          return open(...args);
+        });
+        await assert.rejects(
+          readArchivedWorkerCheckpoints(worker),
+          /cannot be read/,
+        );
+      }
+      const coverage = (await readDeepReductionSources(f.context))
+        .discoveries[0].coverage;
+      assert.deepEqual(
+        new Set(
+          coverage.deferred.map(
+            (row: { provenance: { sourceId: string } }) =>
+              row.provenance.sourceId,
+          ),
+        ),
+        new Set(["task-1", "task-2"]),
+      );
+      assert.deepEqual(await readFile(head), before);
+      assert.deepEqual(await readFile(f.resultPath), resultBefore);
+    } finally {
+      t.mock.restoreAll();
       await rm(f.root, { recursive: true, force: true });
     }
   });

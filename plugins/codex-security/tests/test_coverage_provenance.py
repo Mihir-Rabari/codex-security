@@ -1602,11 +1602,12 @@ def test_dense_retained_projection_keeps_every_linked_record(
     assert result.read_bytes() == original
 
 
+@pytest.mark.parametrize("archived", [False, True], ids=["one-attempt", "two-attempts"])
 @pytest.mark.parametrize("mode", ["idless", "explicit"])
 @pytest.mark.parametrize("missing", [False, True], ids=["full-projection", "partial-projection"])
 @pytest.mark.parametrize("retry", [False, True], ids=["direct", "failed-retry"])
 def test_legacy_occurrences_survive_supported_parent_projection(
-    workbench_api, workbench_db, publication_scan, monkeypatch, mode, missing, retry
+    workbench_api, workbench_db, publication_scan, monkeypatch, mode, missing, retry, archived
 ):
     scan = publication_scan()
     with workbench_db:
@@ -1616,6 +1617,15 @@ def test_legacy_occurrences_survive_supported_parent_projection(
         )
     result = add_worker(workbench_db, scan)
     worker_id = result.parent.name
+    if archived:
+        output = scan.scan_dir / "artifacts/deep_discovery/workers" / worker_id / "output"
+        output.mkdir(parents=True)
+        result = output / "result.json"
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET attempt = 2, artifact_dir = ?, result_manifest_path = ? WHERE id = ?",
+                (str(output), str(result), worker_id),
+            )
     surface = {
         "label": "Synthetic repeated legacy observation",
         "disposition": "needs_follow_up",
@@ -1637,17 +1647,26 @@ def test_legacy_occurrences_survive_supported_parent_projection(
         )
     )
     original = result.read_bytes()
+    originals = {result: original}
+    if archived:
+        archive = result.parent.parent / "attempts/attempt-1/result.json"
+        archive.parent.mkdir(parents=True)
+        prior = json.loads(original)
+        prior["coverage"]["surfaces"] = prior["coverage"]["surfaces"][:1]
+        archive.write_text(json.dumps(prior))
+        originals[archive] = archive.read_bytes()
     surfaces = json.loads(original)["coverage"]["surfaces"]
     assert len(surfaces) == 2
     projected = []
     for index, surface in enumerate(surfaces[:1] if missing else surfaces, 1):
-        provenance = {"workerId": worker_id, "attempt": 1}
+        attempt = index if archived else 1
+        provenance = {"workerId": worker_id, "attempt": attempt}
         if "id" in surface:
             provenance["sourceId"] = surface["id"]
         projected.append(
             {
                 **copy.deepcopy(surface),
-                "id": f"{worker_id}-attempt-1-surface-{index}",
+                "id": f"{worker_id}-attempt-{attempt}-surface-{index}",
                 "provenance": provenance,
             }
         )
@@ -1659,10 +1678,20 @@ def test_legacy_occurrences_survive_supported_parent_projection(
             **scan.coverage,
             "completeness": "partial",
             "surfaces": projected,
-            "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "partial"}],
+            "reviews": [
+                {"workerId": worker_id, "attempt": attempt, "completeness": "partial"}
+                for attempt in ((1, 2) if archived else (1,))
+            ],
         },
     )
     coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
     assert len(coverage["surfaces"]) == 2
-    assert result.read_bytes() == original
     assert coverage["surfaces"][0] == projected[0]
+    assert [row["provenance"]["attempt"] for row in coverage["surfaces"]] == (
+        [1, 2] if archived else [1, 1]
+    )
+    assert coverage["surfaces"][1]["id"] == (
+        f"{worker_id}-attempt-{2 if archived else 1}-surface-2"
+    )
+    for path, saved in originals.items():
+        assert path.read_bytes() == saved

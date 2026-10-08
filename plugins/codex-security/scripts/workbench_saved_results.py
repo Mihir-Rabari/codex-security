@@ -10,7 +10,6 @@ import json
 import os
 import re
 import sqlite3
-import stat
 import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -47,7 +46,7 @@ from workbench_constants import (
     PHASES,
 )
 from workbench_target import committed_diff_snapshot_digest
-from workbench_validation import path_within_scope
+from workbench_validation import _checkpoint_paths, _children, path_within_scope
 
 _RESERVED_ARTIFACT_PATHS = json.loads(
     Path(__file__).with_name("reserved_artifact_paths.json").read_text(encoding="utf-8")
@@ -119,20 +118,6 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(_encoded(value)).hexdigest()
 
 
-def _children(scan_dir: Path, relative: str) -> list[str]:
-    cursor = scan_dir
-    for part in Path(relative).parts:
-        if part in {"..", "."}:
-            return []
-        cursor = cursor / part
-        try:
-            if not stat.S_ISDIR(cursor.lstat().st_mode):
-                return []
-        except FileNotFoundError:
-            return []
-    return sorted(child.name for child in cursor.iterdir())
-
-
 def _latest_successful_reducer(workers: list[Any]) -> Any | None:
     return max(
         (
@@ -145,14 +130,6 @@ def _latest_successful_reducer(workers: list[Any]) -> Any | None:
         key=lambda worker: (worker["completed_at"] or "", worker["id"]),
         default=None,
     )
-
-
-def _checkpoint_paths(scan_dir: Path, directory: str) -> list[str]:
-    return [
-        f"{directory}/{name}"
-        for name in _children(scan_dir, directory)
-        if re.fullmatch(r"[0-9a-f]{64}\.json", name)
-    ]
 
 
 def _worker_outputs(scan_dir: Path, worker: Any) -> list[tuple[str, int]]:
@@ -1352,8 +1329,16 @@ def merge_saved_results(
             digests.append(receipt_digests[ref])
         return digests
 
-    def coverage_attempt(field: str, item: dict[str, Any], worker: Any, relative: str) -> int:
+    def coverage_attempt(
+        field: str, item: dict[str, Any], worker: Any, relative: str, index: int
+    ) -> int:
         attempt = coverage_source_attempt(relative, worker)
+        rows = drafts_by_path[relative]["coverage"].get(field, [])
+        occurrence = (
+            sum(row == item for row in rows[:index])
+            if field == "surfaces" and isinstance(rows, list)
+            else 1
+        )
         value = dict(item)
         for path, draft, owner in sources:
             prior_attempt = coverage_source_attempt(path, worker)
@@ -1362,6 +1347,7 @@ def merge_saved_results(
             records = (
                 deferred_rows[path] if field == "deferred" else draft["coverage"].get(field, [])
             )
+            remaining = occurrence
             for record in records if isinstance(records, list) else []:
                 if field == "openQuestions" and isinstance(record, str):
                     record = {"question": record.strip()}
@@ -1393,6 +1379,9 @@ def merge_saved_results(
                             record, worker, path
                         ):
                             continue
+                    remaining -= 1
+                    if remaining:
+                        continue
                     attempt = prior_attempt
                     break
         return attempt
@@ -1408,7 +1397,7 @@ def merge_saved_results(
         relative: str,
     ) -> dict[str, Any]:
         # Match projectDiscoveryCoverage so recovered holes retain source ownership.
-        attempt = coverage_attempt(field, item, worker, relative)
+        attempt = coverage_attempt(field, item, worker, relative, index)
         prefix = f"{worker['id']}-attempt-{attempt}"
         result = copy.deepcopy(item)
         provenance = result.get("provenance")

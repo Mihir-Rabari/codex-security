@@ -1428,11 +1428,12 @@ export async function readArchivedWorkerCheckpoints(
     const drafts: Array<SavedScanDraft & { result: boolean; name: string }> =
       [];
     const attemptContext = { ...context, root: attemptRoot };
-    const head = await readCheckpointHead(
-      attemptContext,
-      "archived",
-      skipInvalid,
-    );
+    let head: Awaited<ReturnType<typeof readCheckpointHead>>;
+    try {
+      head = await readCheckpointHead(attemptContext, "archived", skipInvalid);
+    } catch (error) {
+      if (!skipInvalid) throw error;
+    }
     let checkpointHead: ScanDraftInput | undefined;
     if (head) {
       try {
