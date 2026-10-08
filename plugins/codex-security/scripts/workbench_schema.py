@@ -224,6 +224,7 @@ def move_pre_release_migration(
 
 def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:
     normalize_mirror_lineage_migrations(connection)
+    move_pre_release_migration(connection, 44, 47, "retain deep scan worker session ownership")
     move_pre_release_migration(connection, 33, 40, "index finding identity and comparison history")
 
     move_pre_release_migration(connection, 25, 26, "persist scan completion warnings")

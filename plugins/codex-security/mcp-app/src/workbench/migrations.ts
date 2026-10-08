@@ -139,6 +139,7 @@ function normalizeExecutionProfiles(database: DatabaseSync): void {
 }
 
 function normalizeHistory(database: DatabaseSync): void {
+  moveMigration(database, 44, 47, "retain deep scan worker session ownership");
   const mirror = database
     .prepare(
       "SELECT version, name FROM schema_migrations WHERE version BETWEEN 29 AND 32 ORDER BY version",
