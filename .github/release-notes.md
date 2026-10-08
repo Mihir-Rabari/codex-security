@@ -95,6 +95,9 @@
 - exclude inherited parent events from saved worker logs ([#1060](https://github.com/openai/codex-security/pull/1060))
 - report worker capacity from merged Codex settings ([#1055](https://github.com/openai/codex-security/pull/1055))
 - simplify action cleanup and stabilize provider isolation tests ([#1421](https://github.com/openai/codex-security/pull/1421))
+- preserve logout across credential imports ([#759](https://github.com/openai/codex-security/pull/759))
+- preserve severity assessments for each scan ([#1058](https://github.com/openai/codex-security/pull/1058))
+- show active reviews and result consolidation during Deep Scan ([#1253](https://github.com/openai/codex-security/pull/1253))
 
 <!-- release-section: highlights:end -->
 
