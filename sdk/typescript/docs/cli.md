@@ -617,6 +617,11 @@ With a limit, completion requires attributable usage for the scan and its
 workers; unavailable or incomplete owned usage fails budget verification.
 Without a limit, usage reporting remains best effort.
 
+Deep Scan interrupts active workers through Codex and waits for native shutdown
+before final accounting. An interrupted request may produce no usage record,
+including an interruption before its first response. Budget verification still
+fails in that case; missing usage is not treated as a zero charge.
+
 When Deep discovery has finished at a cost stop, the scan returns a sealed
 partial report and lists unvalidated candidates as follow-up work.
 
