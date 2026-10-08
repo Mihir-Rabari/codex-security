@@ -255,17 +255,19 @@ test(
   },
 );
 
-for (const previewVersion of [34, 40, 41, 42]) {
+for (const previewVersion of [34, 40, 41, 42, 43]) {
   test(`database-info upgrades source-scope preview ${previewVersion} without losing scan data`, async () => {
     const directory = await temporary.create("workbench-source-preview-");
     const databasePath = join(directory, "workbench.sqlite3");
     const old = new DatabaseSync(databasePath);
     applyMigrations(
       old,
-      migrations.filter((item) => item.version <= 32),
+      migrations.filter(
+        (item) => item.version <= (previewVersion === 43 ? 42 : 32),
+      ),
     );
     insertScan(old);
-    const sourceScope = migrations.find((item) => item.version === 43)!;
+    const sourceScope = migrations.find((item) => item.version === 44)!;
     old.exec(sourceScope.statements.join("\n"));
     old
       .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
@@ -279,11 +281,11 @@ for (const previewVersion of [34, 40, 41, 42]) {
     assert.equal((await databaseInfo(directory)).databasePath, databasePath);
     const upgraded = new DatabaseSync(databasePath);
     try {
-      assertMigrationNames(upgraded, 34, 40, 41, 42, 43);
+      assertMigrationNames(upgraded, 34, 40, 41, 42, 43, 44);
       assert.equal(
         upgraded
           .prepare(
-            "SELECT applied_at FROM schema_migrations WHERE version = 43",
+            "SELECT applied_at FROM schema_migrations WHERE version = 44",
           )
           .get()?.applied_at,
         "original",
@@ -333,7 +335,7 @@ test("database-info retains scan names from installed migration 42", async () =>
   await databaseInfo(directory);
   const upgraded = new DatabaseSync(databasePath);
   try {
-    assertMigrationNames(upgraded, 42, 43);
+    assertMigrationNames(upgraded, 42, 43, 44);
     assert.equal(
       upgraded.prepare("SELECT name FROM scans").get()?.name,
       "Original scan",
@@ -391,36 +393,40 @@ test("database-info repairs recorded scan-name and source-scope columns", async 
   }
 });
 
-test("database-info rejects unsupported source-scope history without changing it", async () => {
-  const directory = await temporary.create("workbench-source-unknown-");
-  const databasePath = join(directory, "workbench.sqlite3");
-  const old = new DatabaseSync(databasePath);
-  applyMigrations(old);
-  old.exec(
-    "UPDATE schema_migrations SET name = 'unknown source history' WHERE version = 43",
-  );
-  const history = old
-    .prepare("SELECT * FROM schema_migrations ORDER BY version")
-    .all();
-  const originalSchema = schema(old);
-  old.close();
-  await assert.rejects(
-    databaseInfo(directory),
-    /unsupported source-scope migration history/u,
-  );
-  const unchanged = new DatabaseSync(databasePath);
-  try {
-    assert.deepEqual(schema(unchanged), originalSchema);
-    assert.deepEqual(
-      unchanged
-        .prepare("SELECT * FROM schema_migrations ORDER BY version")
-        .all(),
-      history,
+for (const version of [43, 44]) {
+  test(`database-info rejects unsupported source-scope history ${version} without changing it`, async () => {
+    const directory = await temporary.create("workbench-source-unknown-");
+    const databasePath = join(directory, "workbench.sqlite3");
+    const old = new DatabaseSync(databasePath);
+    applyMigrations(old);
+    old
+      .prepare(
+        "UPDATE schema_migrations SET name = 'unknown source history' WHERE version = ?",
+      )
+      .run(version);
+    const history = old
+      .prepare("SELECT * FROM schema_migrations ORDER BY version")
+      .all();
+    const originalSchema = schema(old);
+    old.close();
+    await assert.rejects(
+      databaseInfo(directory),
+      /unsupported source-scope migration history/u,
     );
-  } finally {
-    unchanged.close();
-  }
-});
+    const unchanged = new DatabaseSync(databasePath);
+    try {
+      assert.deepEqual(schema(unchanged), originalSchema);
+      assert.deepEqual(
+        unchanged
+          .prepare("SELECT * FROM schema_migrations ORDER BY version")
+          .all(),
+        history,
+      );
+    } finally {
+      unchanged.close();
+    }
+  });
+}
 
 test("preview index history does not skip findings, embedding or checkpoint migrations", (t) => {
   const database = memory(t);

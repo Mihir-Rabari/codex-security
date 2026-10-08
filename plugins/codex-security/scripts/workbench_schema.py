@@ -75,7 +75,7 @@ def apply_migrations(
             elif version == 16:
                 should_backfill_targets = repair_stable_targets_migration(connection)
             elif version in applied:
-                if version in (2, 12, 13, 26, 28, 31, 32, 42, 43):
+                if version in (2, 12, 13, 26, 28, 31, 32, 42, 44):
                     repair_additive_migration(connection, version)
                 elif version == 11:
                     repair_deep_scan_migration(connection)
@@ -224,20 +224,21 @@ def move_pre_release_migration(
 
 def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:
     normalize_mirror_lineage_migrations(connection)
-    for preview_version in (34, 40, 41, 42):
+    for preview_version in (34, 40, 41, 42, 43):
         move_pre_release_migration(
-            connection, preview_version, 43, "persist authorized source excerpt scopes"
+            connection, preview_version, 44, "persist authorized source excerpt scopes"
         )
-    source_scope_migration = connection.execute(
-        "SELECT name FROM schema_migrations WHERE version = 43"
-    ).fetchone()
-    if (
-        source_scope_migration is not None
-        and source_scope_migration["name"] != "persist authorized source excerpt scopes"
+    for version, name in (
+        (43, "preserve severity assessments per scan"),
+        (44, "persist authorized source excerpt scopes"),
     ):
-        raise SystemExit(
-            "The Codex Security database has an unsupported source-scope migration history."
-        )
+        installed = connection.execute(
+            "SELECT name FROM schema_migrations WHERE version = ?", (version,)
+        ).fetchone()
+        if installed is not None and installed["name"] != name:
+            raise SystemExit(
+                "The Codex Security database has an unsupported source-scope migration history."
+            )
     move_pre_release_migration(connection, 33, 40, "index finding identity and comparison history")
 
     move_pre_release_migration(connection, 25, 26, "persist scan completion warnings")

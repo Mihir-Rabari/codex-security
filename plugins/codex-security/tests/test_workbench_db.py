@@ -86,6 +86,7 @@ EXPECTED_TABLES = {
     "finding_workflow_reviews",
     "finding_severity_assessments",
     "scan_severity_classifications",
+    "scan_severity_assessments",
     "finding_workflows",
     "findings",
     "scan_artifacts",
