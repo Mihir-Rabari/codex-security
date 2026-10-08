@@ -22,7 +22,10 @@ export function spawnWindowsProcess(
   binary: string,
   executable: string,
   args: string[],
-  options: SpawnOptions & { stdio: ["ignore" | "pipe", "pipe", "pipe"] },
+  options: SpawnOptions & {
+    cwd?: string;
+    stdio: ["ignore" | "pipe", "pipe", "pipe"];
+  },
   environment: Record<string, string> = {},
 ) {
   const wide = (value: string) =>

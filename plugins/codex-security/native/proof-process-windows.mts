@@ -13,92 +13,100 @@ export async function processProof(
     files = windowsFileSystem(native);
   const cwd = join(root, "process-\ud800");
   files.mkdir(widePath(cwd));
-  const arguments_ = [
-    "high-\ud800",
-    "low-\udfff",
-    "replacement-�",
-    'quote"and\\',
-    "",
-    "東京 😀",
-  ];
-  const script = `const fs=require('node:fs'), native=require(${JSON.stringify(binaryPath)}); const args=native.windowsArguments().slice(3).map(value=>value.toString('utf16le')); const cwd=native.windowsAbsolutePath(Buffer.from('.', 'utf16le')).value.toString('utf16le'); process.stderr.write(JSON.stringify({args,cwd,setting:process.env.INVENTORY_PROCESS_FIXTURE,rawSetting:native.windowsEnvironment(Buffer.from("INVENTORY_PROCESS_RAW", "utf16le")).toString("utf16le")})); process.stdout.write(fs.readFileSync(0)); process.exitCode=23;`;
-  const child = spawnWindowsProcess(
-    binaryPath,
-    process.execPath,
-    ["-e", script, ...arguments_],
-    {
-      cwd,
-      env: { ...process.env, INVENTORY_PROCESS_FIXTURE: "inherited" },
-      stdio: ["pipe", "pipe", "pipe"],
-    },
-    { INVENTORY_PROCESS_RAW: "raw-\udfff" },
-  );
-  const stdout: Buffer[] = [],
-    stderr: Buffer[] = [];
-  child.stdout!.on("data", (data: Buffer) => stdout.push(data));
-  child.stderr!.on("data", (data: Buffer) => stderr.push(data));
-  const done = once(child, "close");
-  const bytes = Buffer.concat([
-    Buffer.from([0, 255, 128]),
-    Buffer.alloc(256 * 1024, 17),
-  ]);
-  child.stdin!.end(bytes);
-  assert.deepEqual(await done, [23, null]);
-  assert.deepEqual(Buffer.concat(stdout), bytes);
-  const result = JSON.parse(Buffer.concat(stderr).toString("utf8"));
-  assert.deepEqual(result.args, arguments_);
-  assert.equal(result.cwd.toLowerCase(), cwd.toLowerCase());
-  assert.equal(result.setting, "inherited");
-  assert.equal(result.rawSetting, "raw-\udfff");
-
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const quick = spawnWindowsProcess(
+  try {
+    const arguments_ = [
+      "high-\ud800",
+      "low-\udfff",
+      "replacement-�",
+      'quote"and\\',
+      "",
+      "東京 😀",
+    ];
+    const script = `const fs=require('node:fs'), native=require(${JSON.stringify(binaryPath)}); const args=native.windowsArguments().slice(3).map(value=>value.toString('utf16le')); const cwd=native.windowsAbsolutePath(Buffer.from('.', 'utf16le')).value.toString('utf16le'); process.stderr.write(JSON.stringify({args,cwd,setting:process.env.INVENTORY_PROCESS_FIXTURE,rawSetting:native.windowsEnvironment(Buffer.from("INVENTORY_PROCESS_RAW", "utf16le")).toString("utf16le")})); process.stdout.write(fs.readFileSync(0)); process.exitCode=23;`;
+    const child = spawnWindowsProcess(
       binaryPath,
       process.execPath,
-      ["-e", "process.exit(19)"],
+      ["-e", script, ...arguments_],
+      {
+        cwd,
+        env: { ...process.env, INVENTORY_PROCESS_FIXTURE: "inherited" },
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+      { INVENTORY_PROCESS_RAW: "raw-\udfff" },
+    );
+    const stdout: Buffer[] = [],
+      stderr: Buffer[] = [];
+    child.stdout!.on("data", (data: Buffer) => stdout.push(data));
+    child.stderr!.on("data", (data: Buffer) => stderr.push(data));
+    const done = once(child, "close");
+    const bytes = Buffer.concat([
+      Buffer.from([0, 255, 128]),
+      Buffer.alloc(256 * 1024, 17),
+    ]);
+    child.stdin!.end(bytes);
+    assert.deepEqual(await done, [23, null]);
+    assert.deepEqual(Buffer.concat(stdout), bytes);
+    const result = JSON.parse(Buffer.concat(stderr).toString("utf8"));
+    assert.deepEqual(result.args, arguments_);
+    assert.equal(result.cwd.toLowerCase(), cwd.toLowerCase());
+    assert.equal(result.setting, "inherited");
+    assert.equal(result.rawSetting, "raw-\udfff");
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const quick = spawnWindowsProcess(
+        binaryPath,
+        process.execPath,
+        ["-e", "process.exit(19)"],
+        { stdio: ["ignore", "pipe", "pipe"] },
+      );
+      assert.deepEqual(await once(quick, "close"), [19, null]);
+    }
+    for (const malformed of [Buffer.from([1]), widePath("bad\0value")])
+      assert.throws(() =>
+        native.runWindowsProcess(widePath(process.execPath), [malformed]),
+      );
+    const missing = spawnWindowsProcess(
+      binaryPath,
+      join(cwd, "absent-\udfff.exe"),
+      [],
       { stdio: ["ignore", "pipe", "pipe"] },
     );
-    assert.deepEqual(await once(quick, "close"), [19, null]);
-  }
-  for (const malformed of [Buffer.from([1]), widePath("bad\0value")])
-    assert.throws(() =>
-      native.runWindowsProcess(widePath(process.execPath), [malformed]),
+    const errors: Error[] = [];
+    missing.on("error", (error) => errors.push(error));
+    await new Promise<void>((resolve) =>
+      missing.once("close", () => resolve()),
     );
-  const missing = spawnWindowsProcess(
-    binaryPath,
-    join(cwd, "absent-\udfff.exe"),
-    [],
-    { stdio: ["ignore", "pipe", "pipe"] },
-  );
-  const errors: Error[] = [];
-  missing.on("error", (error) => errors.push(error));
-  await new Promise<void>((resolve) => missing.once("close", () => resolve()));
-  assert.equal(errors.length, 1);
-  assert(errors[0]!.message.length > 0);
+    assert.equal(errors.length, 1);
+    assert(errors[0]!.message.length > 0);
 
-  // Readiness proves the real child is running; closing the shim must close inherited pipes.
-  const hanging = spawnWindowsProcess(
-    binaryPath,
-    process.execPath,
-    [
-      "-e",
-      "process.stdout.write('ready'); setInterval(()=>{},1000)",
-      "raw-\ud800",
-    ],
-    { stdio: ["ignore", "pipe", "pipe"] },
-  );
-  const closed = once(hanging, "close", {
-    signal: AbortSignal.timeout(10_000),
-  });
-  await once(hanging.stdout!, "data", { signal: AbortSignal.timeout(10_000) });
-  assert.equal(hanging.kill(), true);
-  await closed;
-  assert(hanging.stdout!.readableEnded);
-  assert(hanging.stderr!.readableEnded);
-  return {
-    wideArgumentsAndCwd: true,
-    inheritedSettingsAndBinaryStreams: true,
-    exitAndSpawnErrors: true,
-    killingShimClosesChildStreams: true,
-  };
+    // Readiness proves the real child is running; closing the shim must close inherited pipes.
+    const hanging = spawnWindowsProcess(
+      binaryPath,
+      process.execPath,
+      [
+        "-e",
+        "process.stdout.write('ready'); setInterval(()=>{},1000)",
+        "raw-\ud800",
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const closed = once(hanging, "close", {
+      signal: AbortSignal.timeout(10_000),
+    });
+    await once(hanging.stdout!, "data", {
+      signal: AbortSignal.timeout(10_000),
+    });
+    assert.equal(hanging.kill(), true);
+    await closed;
+    assert(hanging.stdout!.readableEnded);
+    assert(hanging.stderr!.readableEnded);
+    return {
+      wideArgumentsAndCwd: true,
+      inheritedSettingsAndBinaryStreams: true,
+      exitAndSpawnErrors: true,
+      killingShimClosesChildStreams: true,
+    };
+  } finally {
+    files.unlink(widePath(cwd));
+  }
 }
