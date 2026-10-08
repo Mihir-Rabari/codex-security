@@ -6869,12 +6869,16 @@ for (const linked of [false, true]) {
       paths.input,
       `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
     );
-    await runMultiscan(
-      options(paths, client(rejecting("Interrupted")), { maxAttempts: 1 }),
-    );
     const outsideParent = join(paths.root, "outside-recovery-parent");
-    await mkdir(outsideParent, { mode: 0o700 });
     const outsideCheckout = join(outsideParent, "attempt-2");
+    const config = { pythonPath: join(outsideCheckout, "missing-python.exe") };
+    await runMultiscan(
+      options(paths, client(rejecting("Interrupted")), {
+        maxAttempts: 1,
+        config,
+      }),
+    );
+    await mkdir(outsideParent, { mode: 0o700 });
     git(paths.root, "clone", "--quiet", source.path, outsideCheckout);
     const runs = mock(
       async (
@@ -6884,7 +6888,7 @@ for (const linked of [false, true]) {
     );
     const campaign = options(paths, client(runs), {
       recoverScan: async () => undefined,
-      config: { pythonPath: join(outsideCheckout, "missing-python.exe") },
+      config,
     });
     expect(await runMultiscan(campaign)).toMatchObject({
       completed: 1,
