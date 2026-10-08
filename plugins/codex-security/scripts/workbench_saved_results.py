@@ -41,22 +41,14 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
     write_threat_model_projection_if_possible,
 )
-from workbench_constants import PHASES
+from workbench_constants import (
+    _PUBLICATION_FOLLOW_UP_WARNING,
+    _PUBLISHED_OUTPUTS,
+    PHASES,
+)
 from workbench_target import committed_diff_snapshot_digest
 from workbench_validation import path_within_scope
 
-_PUBLISHED_OUTPUTS = (
-    "findings.json",
-    "coverage.json",
-    "scan-manifest.json",
-    "report.md",
-    "threatmodel.md",
-    "report.html",
-    "exports/results.sarif",
-)
-_PUBLICATION_FOLLOW_UP_WARNING = (
-    "Saved scan evidence remains on disk; result publication needs follow-up:"
-)
 _RESERVED_ARTIFACT_PATHS = json.loads(
     Path(__file__).with_name("reserved_artifact_paths.json").read_text(encoding="utf-8")
 )
@@ -1212,8 +1204,8 @@ def merge_saved_results(
 
     retained_surface_ids: dict[tuple[str, str, int], dict[str, Any]] = {}
     # Each saved occurrence gets one projection; repeated lookups reuse its assignment.
-    retained_surface_records: dict[tuple[str, str, int], dict[str, Any] | None] = {}
-    matched_surface_records: dict[tuple[str, str], set[str | int]] = {}
+    retained_surfaces: dict[tuple[str, str, int], dict[str, Any] | None] = {}
+    matched_surfaces: dict[tuple[str, str], set[str | int]] = {}
 
     def retained_coverage_record(
         field: str, item: Any, worker: Any, relative: str
@@ -1222,8 +1214,8 @@ def merge_saved_results(
             return None
         surface_key = (worker["id"], relative, id(item))
         if field == "surfaces":
-            if surface_key in retained_surface_records:
-                return retained_surface_records[surface_key]
+            if surface_key in retained_surfaces:
+                return retained_surfaces[surface_key]
             rows = drafts_by_path.get(relative, {}).get("coverage", {}).get("surfaces", [])
             if isinstance(rows, list) and any(row is item for row in rows):
                 for row in rows:
@@ -1302,19 +1294,17 @@ def merge_saved_results(
                             value["question"] = value["question"].strip()
                 if original == source:
                     if field == "surfaces":
-                        matched = matched_surface_records.setdefault(
-                            (worker["id"], relative), set()
-                        )
+                        matched = matched_surfaces.setdefault((worker["id"], relative), set())
                         identity = record.get("id")
                         if not isinstance(identity, str):
                             identity = id(record)
                         if identity in matched:
                             continue
                         matched.add(identity)
-                        retained_surface_records[surface_key] = record
+                        retained_surfaces[surface_key] = record
                     return record
         if field == "surfaces":
-            retained_surface_records[surface_key] = None
+            retained_surfaces[surface_key] = None
         return None
 
     def coverage_source_attempt(relative: str, worker: Any) -> int:
