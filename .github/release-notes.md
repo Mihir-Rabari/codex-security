@@ -88,6 +88,7 @@
 - show file scope until scan review progress begins ([#464](https://github.com/openai/codex-security/pull/464))
 - preserve per-scan endpoints in Deep Scan workers ([#1326](https://github.com/openai/codex-security/pull/1326))
 - hide expected answers and test the checkout's skill ([#1054](https://github.com/openai/codex-security/pull/1054))
+- preserve saved results when scans stop or restart ([#1269](https://github.com/openai/codex-security/pull/1269))
 
 <!-- release-section: highlights:end -->
 
