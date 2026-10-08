@@ -606,7 +606,10 @@ export async function preserveScanDraft(
 
   for (const source of sources) {
     const deferred = result.coverage.deferred as JsonObject[];
-    const dispositions = (result.coverage.surfaces as JsonObject[]).filter(
+    const dispositions = [
+      ...(result.coverage.surfaces as JsonObject[]),
+      ...(result.coverage.explicitExclusions as JsonObject[]),
+    ].filter(
       (surface) =>
         (surface.disposition === "rejected" ||
           surface.disposition === "not_applicable") &&
@@ -755,7 +758,10 @@ function completedCandidateIds(
       const id = findingCandidateId(finding);
       if (id !== undefined) completed.add(id);
     }
-    const dispositions = (source.coverage.surfaces as JsonObject[]).filter(
+    const dispositions = [
+      ...(source.coverage.surfaces as JsonObject[]),
+      ...(source.coverage.explicitExclusions as JsonObject[]),
+    ].filter(
       (surface) =>
         surface.disposition === "rejected" ||
         surface.disposition === "not_applicable",

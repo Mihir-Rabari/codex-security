@@ -167,12 +167,14 @@ export async function readDeepReductionSources(
         const normalizedCurrent = structuredClone(result);
         normalizeSavedScanCoverage([normalizedCurrent]);
         for (const { input } of archived) {
+          const matchedCurrentSurfaces = new Set<number>();
           for (const surface of input.coverage.surfaces as JsonObject[]) {
             if (surface.id !== undefined) continue;
             const currentIndex = (
               originalCoverage.surfaces as JsonObject[]
             ).findIndex(
-              (current) =>
+              (current, index) =>
+                !matchedCurrentSurfaces.has(index) &&
                 current.id === undefined &&
                 matchesSavedCoverageSource(
                   "surfaces",
@@ -182,10 +184,12 @@ export async function readDeepReductionSources(
                   receiptDigests,
                 ),
             );
-            if (currentIndex !== -1)
+            if (currentIndex !== -1) {
+              matchedCurrentSurfaces.add(currentIndex);
               surface.id = (
                 normalizedCurrent.coverage.surfaces as JsonObject[]
               )[currentIndex]!.id;
+            }
           }
         }
         normalizeSavedScanCoverage([

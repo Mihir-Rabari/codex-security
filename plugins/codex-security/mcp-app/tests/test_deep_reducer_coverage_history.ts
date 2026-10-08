@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { importSource } from "./import-module.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
-import { workerDraft, scanId } from "./scan-draft-fixture.ts";
+import { workerDraft, scanId, finding } from "./scan-draft-fixture.ts";
 
 const source = fileURLToPath(new URL("../src", import.meta.url));
 const {
@@ -789,3 +789,198 @@ test(
     }
   },
 );
+
+for (const direct of [false, true]) {
+  for (const outcome of [
+    "rejected",
+    "not_applicable",
+    "independent",
+    "generic",
+  ] as const) {
+    test(`${direct ? "accepted direct-file" : "typed writer"} retry exclusion ${outcome} preserves the accepted candidate decision`, async () => {
+      const f = await fixture();
+      try {
+        const archivedFinding = {
+          ...finding("archived-exclusion", "src/synthetic.ts"),
+          provenance: { source: "local_plugin", candidateId: "candidate-1" },
+        };
+        await recordCodexSecurityWorkerScanDraft(
+          f.workerContext,
+          workerDraft([archivedFinding], {
+            complete: true,
+            coverage: {
+              completeness: "partial",
+              surfaces: [],
+              explicitExclusions: [],
+              deferred: [
+                {
+                  id: "generic-review",
+                  reason: "Synthetic independent proof remains.",
+                },
+              ],
+            },
+          }),
+        );
+        const archive = path.join(f.workerRoot, "attempts/attempt-01");
+        await archiveDirectory(f.output, archive);
+        const historical = await readFile(path.join(archive, "result.json"));
+        await mkdir(f.output, { recursive: true });
+        const terminal = outcome === "rejected" || outcome === "not_applicable";
+        const exclusion = {
+          pattern: "src/synthetic.ts",
+          reason: "Synthetic accepted exclusion decision.",
+          ...(outcome === "generic"
+            ? {}
+            : {
+                candidateId:
+                  outcome === "independent" ? "candidate-2" : "candidate-1",
+                disposition: terminal ? outcome : "rejected",
+              }),
+        };
+        const submitted = workerDraft([], {
+          complete: true,
+          coverage: {
+            completeness: "complete",
+            surfaces: [],
+            explicitExclusions: [exclusion],
+            deferred: [],
+          },
+        });
+        if (direct) await writeFile(f.resultPath, JSON.stringify(submitted));
+        else
+          await recordCodexSecurityWorkerScanDraft(f.workerContext, submitted);
+        await validateDiscoveryArtifacts(
+          { workersRoot: path.dirname(f.workerRoot) },
+          f.resultPath,
+          scanId,
+        );
+        const current = await readFile(f.resultPath);
+        const inputs = await readDeepReductionSources(f.context);
+        const accepted = inputs.discoveries[0];
+        assert.equal(accepted.result.findings.length, terminal ? 0 : 1);
+        assert.equal(accepted.coverage.deferred.length, 1);
+        assert.equal(
+          accepted.coverage.deferred[0].reason,
+          "Synthetic independent proof remains.",
+        );
+        const publishedExclusion = accepted.coverage.explicitExclusions[0];
+        assert.equal(publishedExclusion.reason, exclusion.reason);
+        if (terminal)
+          assert.equal(publishedExclusion.finding.title, archivedFinding.title);
+        await recordCodexSecurityDeepReduction(f.context, {
+          scanId,
+          complete: true,
+          findings: accepted.result.findings,
+        });
+        const reduced = JSON.parse(
+          await readFile(path.join(f.reducerRoot, "result.json"), "utf8"),
+        );
+        assert.equal(reduced.findings.length, terminal ? 0 : 1);
+        assert.equal(reduced.sourceCoverage.explicitExclusions.length, 1);
+        assert.equal(reduced.sourceCoverage.deferred.length, 1);
+        assert.deepEqual(await readFile(f.resultPath), current);
+        assert.deepEqual(
+          await readFile(path.join(archive, "result.json")),
+          historical,
+        );
+      } finally {
+        await rm(f.root, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
+for (const mode of ["idless", "explicit", "mixed"] as const) {
+  test(`accepted historical ${mode} worker surfaces keep distinct observations through reduction`, async () => {
+    const f = await fixture();
+    try {
+      // The public worker writer at 42a60ff4732a persisted surface IDs as supplied.
+      // These fixtures model its accepted results before surface normalization.
+      const surface = {
+        label: "Synthetic repeated legacy observation",
+        disposition: "needs_follow_up",
+        receiptRefs: [],
+      };
+      const historicalSurfaces =
+        mode === "explicit"
+          ? [
+              { ...surface, id: "legacy-first" },
+              { ...surface, id: "legacy-second" },
+            ]
+          : mode === "mixed"
+            ? [surface, { ...surface, id: "legacy-explicit" }]
+            : [surface, { ...surface }];
+      const legacy = (surfaces: Record<string, unknown>[]) =>
+        workerDraft([], {
+          complete: true,
+          coverage: {
+            completeness: "partial",
+            surfaces,
+            explicitExclusions: [],
+            deferred: [],
+          },
+        });
+      await writeFile(f.resultPath, JSON.stringify(legacy(historicalSurfaces)));
+      await validateDiscoveryArtifacts(
+        { workersRoot: path.dirname(f.workerRoot) },
+        f.resultPath,
+        scanId,
+      );
+      const archive = path.join(f.workerRoot, "attempts/attempt-01");
+      await archiveDirectory(f.output, archive);
+      const historical = await readFile(path.join(archive, "result.json"));
+      await mkdir(f.output, { recursive: true });
+      // The old writer retained both explicit IDs; repeated ID-less rows were equal.
+      const currentSurfaces =
+        mode === "explicit" ? historicalSurfaces : [surface];
+      await writeFile(f.resultPath, JSON.stringify(legacy(currentSurfaces)));
+      await validateDiscoveryArtifacts(
+        { workersRoot: path.dirname(f.workerRoot) },
+        f.resultPath,
+        scanId,
+      );
+      const current = await readFile(f.resultPath);
+      const inputs = await readDeepReductionSources(f.context);
+      const surfaces = inputs.discoveries[0].coverage.surfaces;
+      assert.equal(surfaces.length, 2);
+      assert.equal(
+        new Set(surfaces.map((row: { id: string }) => row.id)).size,
+        2,
+      );
+      assert(
+        surfaces.every((row: { label: string }) => row.label === surface.label),
+      );
+      assert(
+        surfaces.every(
+          (row: { disposition: string }) =>
+            row.disposition === surface.disposition,
+        ),
+      );
+      assert.equal(inputs.discoveries[0].result.findings.length, 0);
+      await recordCodexSecurityDeepReduction(f.context, {
+        scanId,
+        complete: true,
+        findings: [],
+      });
+      const persisted = JSON.parse(
+        await readFile(path.join(f.reducerRoot, "result.json"), "utf8"),
+      );
+      assert.equal(persisted.sourceCoverage.surfaces.length, 2);
+      assert.equal(
+        new Set(
+          persisted.sourceCoverage.surfaces.map(
+            (row: { id: string }) => row.id,
+          ),
+        ).size,
+        2,
+      );
+      assert.deepEqual(await readFile(f.resultPath), current);
+      assert.deepEqual(
+        await readFile(path.join(archive, "result.json")),
+        historical,
+      );
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+}
