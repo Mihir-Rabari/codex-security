@@ -28,16 +28,27 @@ function isRetryable(error: unknown): boolean {
   return error instanceof TypeError || error instanceof SyntaxError;
 }
 
+export function findingsBaseUrl(value: string): URL {
+  const url = new URL(value);
+  if (!url.pathname.endsWith("/")) url.pathname += "/";
+  url.search = "";
+  url.hash = "";
+  return url;
+}
+
 export class FindingsClient {
+  private readonly url: URL;
   constructor(
-    private readonly url: string,
+    url: string,
     private readonly signal?: AbortSignal,
     private readonly request: FindingsRequest = fetch,
     private readonly retries: {
       wait?: typeof waitForRetry;
       random?: () => number;
     } = {},
-  ) {}
+  ) {
+    this.url = findingsBaseUrl(url);
+  }
 
   async potentialDuplicates(
     findingId: string,
@@ -52,7 +63,7 @@ export class FindingsClient {
     return await this.retry(async () => {
       const response = await this.request(url, { signal: this.signal });
       if (!response.ok) {
-        await response.body?.cancel().catch(() => undefined);
+        void response.body?.cancel().catch(() => undefined);
         throw new FindingsHttpError(
           `Potential-duplicates lookup for ${findingId} failed (HTTP ${response.status}).${
             response.status === 404
@@ -117,7 +128,7 @@ export class FindingsClient {
   }
 
   private endpoint(path: string): URL {
-    return new URL(path, this.url.endsWith("/") ? this.url : `${this.url}/`);
+    return new URL(path, this.url);
   }
 
   private async post(path: string, body: unknown): Promise<unknown> {
@@ -128,7 +139,7 @@ export class FindingsClient {
       signal: this.signal,
     });
     if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
+      void response.body?.cancel().catch(() => undefined);
       throw new FindingsHttpError(
         `Findings API POST /${path} failed (HTTP ${response.status}).`,
         response.status,

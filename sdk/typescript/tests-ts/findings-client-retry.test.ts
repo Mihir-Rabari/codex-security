@@ -1,5 +1,6 @@
 import { responding } from "./support/responses.js";
 import { expect, test, mock } from "bun:test";
+import { workflowDestination } from "../src/finding-workflow.js";
 import { FindingsClient } from "../src/findings-client.js";
 import { rejecting } from "./support/errors.js";
 
@@ -165,3 +166,54 @@ test("Retry-After accepts an HTTP date", async () => {
   await client.potentialDuplicates("synthetic", scope);
   expect(sleep.mock.lastCall?.[0] ?? 0).toBeGreaterThan(24 * 60 * 60 * 1000);
 });
+
+test.each(["lookup", "publish", "groups"] as const)(
+  "%s delivers HTTP failures without waiting for response cleanup",
+  async (operation) => {
+    const cancel = mock(() => new Promise<void>(() => {}));
+    const client = new FindingsClient(
+      "http://synthetic.test",
+      undefined,
+      async () => new Response(new ReadableStream({ cancel }), { status: 503 }),
+      { wait: async () => {} },
+    );
+    const result =
+      operation === "lookup"
+        ? client.potentialDuplicates("synthetic", scope)
+        : operation === "publish"
+          ? client.publish([], scope.repositoryId)
+          : client.storeDedupeGroups([["synthetic-a", "synthetic-b"]]);
+    await expect(result).rejects.toThrow("HTTP 503");
+    expect(cancel).toHaveBeenCalledTimes(operation === "publish" ? 1 : 3);
+  },
+);
+
+test.each([
+  "/service",
+  "/service/",
+  "/service?source=example",
+  "/service#example",
+  "/service/?source=example",
+  "/service ",
+])(
+  "preserves base pathname %s across requests and workflow identity",
+  async (path) => {
+    const urls: string[] = [];
+    const base = `http://synthetic:password@synthetic.test${path}`;
+    const client = new FindingsClient(base, undefined, async (url) => {
+      urls.push(url.href);
+      return Response.json(
+        url.pathname.endsWith("bulk/findings") ? [] : neighborhood,
+      );
+    });
+    await client.publish([], scope.repositoryId);
+    await client.potentialDuplicates("a/b", scope);
+    await client.storeDedupeGroups([["a", "b"]]);
+    expect(urls).toEqual([
+      "http://synthetic:password@synthetic.test/service/v1/bulk/findings",
+      "http://synthetic:password@synthetic.test/service/v1/finding/a%2Fb/potential-duplicates?repositoryId=synthetic-repository",
+      "http://synthetic:password@synthetic.test/service/v1/dedupe-groups",
+    ]);
+    expect(workflowDestination(base)).toBe("http://synthetic.test/service/");
+  },
+);
