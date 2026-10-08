@@ -43,7 +43,9 @@ import {
 import {
   blobSamples,
   changedPaths,
+  decodeGitPath,
   directoryPaths,
+  encodeGitPath,
   git,
   runTool,
 } from "./inventory-git";
@@ -326,12 +328,12 @@ export async function generateInventory(
       if (tracked.status === 0) {
         const prefix =
           requested === "." || requested.startsWith("./") ? "./" : "";
-        const paths = decodePosixBytes(tracked.stdout)
+        const paths = decodeGitPath(tracked.stdout)
           .split("\0")
           .filter((path) => path && regular(append(repo, path)));
         bytes = Buffer.concat([
           bytes,
-          encodePosixPath(paths.map((path) => prefix + path + "\0").join("")),
+          encodeGitPath(paths.map((path) => prefix + path + "\0").join("")),
         ]);
       }
     }

@@ -5,8 +5,43 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { importSource } from "./import-module.ts";
-import { windowsFileSystem } from "../../native/windows-files.mjs";
 import type { WindowsBinding } from "../../native/windows-binding.mjs";
+
+const { windowsFileSystem } = (await importSource(
+  "../native/windows-files.mts",
+)) as typeof import("../../native/windows-files.mjs");
+
+for (const platform of ["linux", "win32"]) {
+  test(`Git paths retain platform byte encoding on ${platform}`, async () => {
+    const { decodeGitPath, encodeGitPath } = await importSource(
+      "src/helpers/inventory-git.ts",
+      {
+        define: {
+          "process.platform": JSON.stringify(platform),
+          "import.meta.url": JSON.stringify(
+            new URL(
+              "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
+              import.meta.url,
+            ).href,
+          ),
+        },
+      },
+    );
+    const bytes = Buffer.concat([
+      Buffer.from("résumé/😀/high-"),
+      Buffer.from([0xed, 0xa0, 0x80]),
+      Buffer.from("/low-"),
+      Buffer.from([0xed, 0xbf, 0xbf]),
+      Buffer.from("\0ordinary\0"),
+    ]);
+    const text =
+      platform === "win32"
+        ? "résumé/😀/high-\ud800/low-\udfff\0ordinary\0"
+        : "résumé/😀/high-\udced\udca0\udc80/low-\udced\udcbf\udcbf\0ordinary\0";
+    assert.equal(decodeGitPath(bytes), text);
+    assert.deepEqual(encodeGitPath(text), bytes);
+  });
+}
 
 const { sampleFile, createSourceSampler, PREVIEW_READ_BYTES } =
   await importSource("src/helpers/source-preview.ts", {

@@ -16,9 +16,14 @@ import { createTemporaryDirectoriesSync } from "./support/temporary-directories.
 import { nodeCommand } from "./support/shell.js";
 import { git } from "./git-fixture.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { resolveCodexCommand } from "../src/runtime.js";
+import { bundledCodexSdkEnvironment } from "../src/codex-sdk-environment.js";
 
 const temporary = createTemporaryDirectoriesSync(true);
 const node = nodeCommand().command;
+// APFS requires valid UTF-8 names; Linux also permits undecodable bytes.
+const pathNameBytes =
+  process.platform === "darwin" ? Buffer.from("雪") : Buffer.from([0xff]);
 afterEach(temporary.cleanup);
 
 function fixture() {
@@ -27,13 +32,25 @@ function fixture() {
     out = join(root, "output");
   mkdirSync(repo);
   git(repo, "init", "-q");
+  const toolEnvironment = bundledCodexSdkEnvironment(
+    resolveCodexCommand({}).command,
+    Object.fromEntries(
+      Object.entries(process.env).filter(
+        (entry): entry is [string, string] => entry[1] !== undefined,
+      ),
+    ),
+  );
   const write = (path: string, data: string | Buffer = "value = 1\n") => {
     const file = join(repo, path);
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, data);
     return file;
   };
-  const run = (command: string, args: string[] = [], env = process.env) =>
+  const run = (
+    command: string,
+    args: string[] = [],
+    env: NodeJS.ProcessEnv = toolEnvironment,
+  ) =>
     spawnSync(
       node,
       [
@@ -65,7 +82,17 @@ function fixture() {
     git(repo, "commit", "-qm", "Fixture revision");
     return git(repo, "rev-parse", "HEAD");
   };
-  return { root, repo, out, write, run, success, rows, commit };
+  return {
+    root,
+    repo,
+    out,
+    write,
+    run,
+    success,
+    rows,
+    commit,
+    toolEnvironment,
+  };
 }
 
 for (const scope of [".", "src", "./src", "src/résumé.py"]) {
@@ -92,7 +119,8 @@ for (const scope of [".", "src", "./src", "src/résumé.py"]) {
       "--",
       scope,
     ];
-    const rg = spawnSync("rg", args, { cwd: f.repo });
+    const rg = spawnSync("rg", args, { cwd: f.repo, env: f.toolEnvironment });
+    expect(rg.status, rg.error?.message ?? rg.stderr?.toString()).toBe(0);
     const expected = rg.stdout.toString().split("\0").filter(Boolean);
     if (scope === ".") expected.push("./ignored/tracked.py");
     expect(f.success("generate-in-scope-files", ["--scope", scope])).toBe(
@@ -343,6 +371,8 @@ test.skipIf(process.platform === "win32")(
       expect(readFileSync(f.out, "utf8")).toBe("previous\n");
       rmSync(join(f.repo, name));
     }
+    // APFS cannot create the invalid-UTF8 filename below.
+    if (process.platform === "darwin") return;
     const path = Buffer.concat([
       Buffer.from(f.repo + "/"),
       Buffer.from([0xff]),
@@ -414,7 +444,7 @@ test.skipIf(process.platform === "win32")(
 
 for (const ending of ["\n", "\r"])
   test.skipIf(process.platform === "win32")(
-    `launchers preserve undecodable POSIX roots ending ${JSON.stringify(ending)} and scoped names through Git and ripgrep`,
+    `launchers preserve POSIX roots ending ${JSON.stringify(ending)} and scoped names through Git and ripgrep`,
     () => {
       const f = fixture();
       f.write("source", "selected revision\n");
@@ -423,13 +453,13 @@ for (const ending of ["\n", "\r"])
       f.commit();
       const rawRoot = Buffer.concat([
         Buffer.from(f.root + "/raw-"),
-        Buffer.from([0xff]),
+        pathNameBytes,
         Buffer.from("'`$" + ending),
       ]);
       renameSync(f.repo, rawRoot);
       const rawScope = Buffer.concat([
         Buffer.from("scope-"),
-        Buffer.from([0xfe]),
+        pathNameBytes,
         Buffer.from("'`$"),
       ]);
       mkdirSync(Buffer.concat([rawRoot, Buffer.from("/"), rawScope]));
@@ -467,7 +497,7 @@ for (const ending of ["\n", "\r"])
             f.out,
             base,
           ],
-          { encoding: "utf8" },
+          { encoding: "utf8", env: f.toolEnvironment },
         );
       const diff = run("make-diff-rank-input", false);
       expect(diff.status, diff.stderr).toBe(0);
@@ -571,12 +601,9 @@ for (const rawExecutable of [false, true])
       f.write("hidden.py");
       const home = Buffer.concat([
         Buffer.from(f.root + "/home-"),
-        Buffer.from([0xff]),
+        pathNameBytes,
       ]);
-      const bin = Buffer.concat([
-        Buffer.from(f.root + "/bin-"),
-        Buffer.from([0xfe]),
-      ]);
+      const bin = Buffer.concat([Buffer.from(f.root + "/bin-"), pathNameBytes]);
       mkdirSync(home);
       mkdirSync(bin);
       writeFileSync(
@@ -594,7 +621,7 @@ for (const rawExecutable of [false, true])
       );
       const gitPath = Buffer.concat([
         Buffer.from(f.root + "/git-"),
-        rawExecutable ? Buffer.from([0xfd]) : Buffer.from("wrapper"),
+        rawExecutable ? pathNameBytes : Buffer.from("wrapper"),
       ]);
       const hostGit = Bun.which("git")!;
       const quote = (value: string) =>
@@ -654,14 +681,8 @@ test.skipIf(process.platform === "win32")(
   () => {
     const f = fixture();
     f.write("visible.py");
-    const home = Buffer.concat([
-      Buffer.from(f.root + "/home-"),
-      Buffer.from([0xff]),
-    ]);
-    const bin = Buffer.concat([
-      Buffer.from(f.root + "/bin-"),
-      Buffer.from([0xfe]),
-    ]);
+    const home = Buffer.concat([Buffer.from(f.root + "/home-"), pathNameBytes]);
+    const bin = Buffer.concat([Buffer.from(f.root + "/bin-"), pathNameBytes]);
     mkdirSync(home);
     mkdirSync(bin);
     writeFileSync(Buffer.concat([home, Buffer.from("/marker")]), "raw-home\n");
@@ -739,7 +760,7 @@ for (const setting of [
       f.write("hidden.py");
       const rawPath = Buffer.concat([
         Buffer.from(f.root + "/configuration-"),
-        Buffer.from([0xff]),
+        pathNameBytes,
       ]);
       const ignore = join(f.root, "ignore");
       writeFileSync(ignore, "hidden.py\n");
@@ -792,7 +813,7 @@ for (const setting of [
         {
           encoding: "utf8",
           env: {
-            ...process.env,
+            ...f.toolEnvironment,
             ...(setting === "RIPGREP_CONFIG_PATH" ? {} : { HOME: f.root }),
             CODEX_SECURITY_GIT: Bun.which("git")!,
             GIT_CONFIG_GLOBAL:
@@ -947,7 +968,7 @@ test.skipIf(process.platform === "win32")(
       mode: 0o700,
     });
     const result = f.run("make-repo-rank-input", [], {
-      ...process.env,
+      ...f.toolEnvironment,
       CODEX_SECURITY_GIT: selectedGit,
     });
     expect(result.status, result.stderr).toBe(0);
@@ -974,6 +995,87 @@ test("inventory preserves scoped names beneath dotted-I repository names", () =>
       expect(rows[0]).toMatchObject({ area: "scope", preview: "kept" });
   }
 });
+
+test.skipIf(process.platform !== "win32")(
+  "Windows Git inventories and revision previews retain indexed lone UTF-16 names",
+  () => {
+    const f = fixture();
+    f.write("base.py");
+    const base = f.commit();
+    const names = ["high-\ud800.py", "low-\udfff.py"];
+    f.write(".gitignore", "high-*\nlow-*\n");
+    git(f.repo, "add", ".gitignore");
+    try {
+      const blob = spawnSync(
+        "git",
+        ["-C", f.repo, "hash-object", "-w", "--stdin"],
+        { input: "kept\n", encoding: "utf8" },
+      );
+      expect(blob.status, blob.stderr).toBe(0);
+      const rawNames = [
+        Buffer.concat([
+          Buffer.from("high-"),
+          Buffer.from([0xed, 0xa0, 0x80]),
+          Buffer.from(".py"),
+        ]),
+        Buffer.concat([
+          Buffer.from("low-"),
+          Buffer.from([0xed, 0xbf, 0xbf]),
+          Buffer.from(".py"),
+        ]),
+      ];
+      const index = Buffer.concat(
+        rawNames.map((name) =>
+          Buffer.concat([
+            Buffer.from(`100644 ${blob.stdout.trim()}\t`),
+            name,
+            Buffer.from([0]),
+          ]),
+        ),
+      );
+      const updated = spawnSync(
+        "git",
+        ["-C", f.repo, "update-index", "-z", "--index-info"],
+        { input: index },
+      );
+      expect(updated.status, updated.stderr.toString()).toBe(0);
+      git(f.repo, "checkout-index", "--all", "--force");
+      git(f.repo, "commit", "-qm", "Indexed path fixture");
+      const inventory = f.run("generate-in-scope-files", ["--scope", "."]);
+      expect(inventory.status, inventory.stderr).toBe(0);
+      for (const name of rawNames)
+        expect(
+          readFileSync(f.out).includes(
+            Buffer.concat([Buffer.from("./"), name, Buffer.from("\n")]),
+          ),
+        ).toBe(true);
+      const scopes = join(f.root, "scopes.json");
+      writeFileSync(scopes, '["."]');
+      for (const command of [
+        "make-repo-rank-input",
+        "make-repo-scope-input",
+        "make-diff-rank-input",
+      ]) {
+        const rows = f.rows(
+          command,
+          command === "make-diff-rank-input"
+            ? ["--base", base]
+            : ["--scopes-file", scopes],
+        );
+        expect(
+          rows
+            .filter((row) => /^(high|low)-/u.test(row.path))
+            .map((row) => row.path),
+        ).toEqual(names);
+        if (command !== "make-repo-scope-input")
+          for (const name of names)
+            expect(rows.find((row) => row.path === name)?.preview).toBe("kept");
+      }
+    } finally {
+      git(f.repo, "reset", "--hard", base);
+    }
+  },
+);
 
 for (const name of [".gitignore", ".ignore", ".rgignore"])
   for (const location of ["ancestor", "descendant"])

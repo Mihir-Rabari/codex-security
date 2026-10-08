@@ -6385,12 +6385,14 @@ describe("CodexSecurity orchestration", () => {
     );
     if (process.platform === "win32") {
       const driveRoot = win32.parse(repository).root;
+      const absoluteScopes = join(root, "absolute-scopes.json");
       await writeFile(
-        capturedTargetPathsFile,
+        absoluteScopes,
         JSON.stringify(paths.map((value) => join(repository, value))),
       );
       runScopedHelper(makeScopeCommand, {
         CODEX_SECURITY_REPOSITORY: driveRoot,
+        CODEX_SECURITY_TARGET_PATHS_FILE: absoluteScopes,
       });
       expect(
         (await readFile(scopedSourceInput, "utf8"))

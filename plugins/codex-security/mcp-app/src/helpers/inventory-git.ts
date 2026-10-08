@@ -20,6 +20,7 @@ import { createRequire } from "node:module";
 import { spawnWindowsProcess } from "../../../native/windows-process.mjs";
 import { nativeTarget } from "../../../native/platform.mjs";
 import { decodePosixBytes, encodePosixPath } from "./posix-path";
+import { decodeUtf8 } from "./utf8";
 import {
   ancestors,
   append,
@@ -264,12 +265,45 @@ export async function git(repo: string, args: string[]) {
   return { status: 127, signal: null, stdout: Buffer.alloc(0), stderr: "" };
 }
 
+export function decodeGitPath(data: Buffer): string {
+  if (!windows) return decodePosixBytes(data);
+  // Git index paths can contain UTF-8-encoded lone UTF-16 code units on Windows.
+  return data
+    .toString("latin1")
+    .split(/(\xed[\xa0-\xbf][\x80-\xbf])/u)
+    .map((part) =>
+      /^\xed[\xa0-\xbf][\x80-\xbf]$/u.test(part)
+        ? String.fromCharCode(
+            0xd000 |
+              ((part.charCodeAt(1) & 0x3f) << 6) |
+              (part.charCodeAt(2) & 0x3f),
+          )
+        : decodeUtf8(Buffer.from(part, "latin1")),
+    )
+    .join("");
+}
+
+export function encodeGitPath(value: string): Buffer {
+  if (!windows) return encodePosixPath(value);
+  return Buffer.concat(
+    value.split(/([\ud800-\udfff])/u).map((part) => {
+      if (!/^[\ud800-\udfff]$/u.test(part)) return Buffer.from(part);
+      const unit = part.charCodeAt(0);
+      return Buffer.from([
+        0xe0 | (unit >> 12),
+        0x80 | ((unit >> 6) & 0x3f),
+        0x80 | (unit & 0x3f),
+      ]);
+    }),
+  );
+}
+
 function gitLine(data: Buffer): string {
-  return decodePosixBytes(data).replace(windows ? /\r?\n$/u : /\n$/u, "");
+  return decodeGitPath(data).replace(windows ? /\r?\n$/u : /\n$/u, "");
 }
 
 function paths(data: Buffer): string[] {
-  return decodePosixBytes(data).split("\0").filter(Boolean);
+  return decodeGitPath(data).split("\0").filter(Boolean);
 }
 function requireSuccess(result: ToolResult): Buffer {
   if (result.status !== 0)
@@ -288,7 +322,7 @@ export async function directoryPaths(
   const root = await git(target, ["rev-parse", "--show-toplevel"]);
   if (root.status !== 0 || !root.stdout.length) return undefined;
   const repository = canonical(gitLine(root.stdout));
-  const prefix = decodePosixBytes(
+  const prefix = decodeGitPath(
     requireSuccess(await git(target, ["rev-parse", "--show-prefix"])),
   )
     .replace(/\n$/u, "")
@@ -419,7 +453,7 @@ export async function blobSamples(
   });
   child.stderr.resume();
   child.stdin.on("error", () => {});
-  child.stdin.end(encodePosixPath(names.join("\0") + "\0"));
+  child.stdin.end(encodeGitPath(names.join("\0") + "\0"));
   const result: ([Buffer, boolean] | undefined)[] = [];
   let pending = Buffer.alloc(0),
     remaining: number | undefined,
