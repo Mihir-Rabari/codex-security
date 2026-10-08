@@ -85,6 +85,8 @@
 - move findings and dashboard helpers to Node ([#1408](https://github.com/openai/codex-security/pull/1408))
 - avoid saving interrupted pnpm caches ([#1419](https://github.com/openai/codex-security/pull/1419))
 - preserve Deep Scan worker context limits ([#1417](https://github.com/openai/codex-security/pull/1417))
+- show file scope until scan review progress begins ([#464](https://github.com/openai/codex-security/pull/464))
+- preserve per-scan endpoints in Deep Scan workers ([#1326](https://github.com/openai/codex-security/pull/1326))
 
 <!-- release-section: highlights:end -->
 
