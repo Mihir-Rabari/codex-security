@@ -347,7 +347,7 @@ describe("read-only publication history", () => {
     databaseRows(
       fixture,
       "DELETE FROM schema_migrations WHERE version >= ?",
-      [43],
+      [44],
     );
     const database = join(fixture.stateDirectory, "workbench.sqlite3");
     const before = await readFile(database);
@@ -366,7 +366,7 @@ describe("read-only publication history", () => {
       databaseRows(
         fixture,
         "SELECT version FROM schema_migrations WHERE version >= ?",
-        [43],
+        [44],
       ),
     ).toEqual([]);
     expect(
