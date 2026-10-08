@@ -5893,7 +5893,7 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(await readdir(root)).toEqual(["scan"]);
   });
 
-  test("reports an unwritable SQLite state directory without a Python traceback", async () => {
+  test("preserves an unwritable SQLite failure and its Python traceback", async () => {
     const root = await temporaryDirectory();
     const pluginRoot = join(root, "plugin");
     const stateDirectory = join(root, "persistent-state");
@@ -5928,11 +5928,34 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(failure).toBeInstanceOf(Error);
     const message = (failure as Error).message;
     expect(message).toContain("Could not save the Codex Security scan");
-    expect(message).toContain(join(stateDirectory, "workbench.sqlite3"));
-    expect(message).toContain("SQLite journal files are writable");
-    expect(message).toContain("CODEX_SECURITY_STATE_DIR");
-    expect(message).not.toContain("Traceback");
+    expect(message).toContain(
+      "sqlite3.OperationalError: unable to open database file",
+    );
+    expect(message).toContain("Traceback");
+    expect((failure as Error).cause).toBeInstanceOf(Error);
   });
+
+  test.each(["plain-missing-target", "readonly database", "disk i/o error"])(
+    "preserves missing-target diagnostics containing %s",
+    async (name) => {
+      const root = await temporaryDirectory();
+      const target = join(root, name);
+      await expect(
+        runWorkbench(
+          {
+            pluginRoot: PLUGIN_ROOT,
+            environment: {
+              ...process.env,
+              CODEX_SECURITY_STATE_DIR: join(root, "state"),
+            },
+          },
+          ["inspect-target", "--target-path", target],
+        ),
+      ).rejects.toThrow(
+        `Scan target is not a readable local directory: ${target}`,
+      );
+    },
+  );
 
   testPosix("rejects private output directories owned by another user", () => {
     expect(() =>

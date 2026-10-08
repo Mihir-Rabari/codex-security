@@ -129,13 +129,7 @@ export interface CodexWorkerResult {
   diagnostics?: CodexWorkerDiagnostic[];
 }
 
-/**
- * Sanitized SDK evidence that is safe to persist in SQLite and manifests.
- *
- * Never add raw command text, command output, prompts, or repository paths
- * here. The coordinator only needs stable classifications that explain why a
- * worker could not satisfy its artifact contract.
- */
+/** SDK failure diagnostics retained alongside artifact-validation failures. */
 export interface CodexWorkerDiagnostic {
   code:
     | "sandbox_namespace_exhausted"

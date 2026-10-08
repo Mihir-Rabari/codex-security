@@ -19,8 +19,11 @@ void launch().then(
   (exitCode) => {
     process.exitCode = exitCode;
   },
-  () => {
-    process.stderr.write("codex-security: Failed to start Codex Security.\n");
+  (error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(
+      `codex-security: Failed to start Codex Security: ${message}\n`,
+    );
     process.exitCode = 2;
   },
 );

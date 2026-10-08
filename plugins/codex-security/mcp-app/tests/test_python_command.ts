@@ -237,10 +237,18 @@ try {
 }
 
 const pythonCommand = "/selected/python";
-for (const code of ["ENOENT", "EACCES", "ENOEXEC", "UNKNOWN"]) {
-  assert.match(
-    missingPythonHelperMessage({ code, path: pythonCommand }, pythonCommand)!,
-    /could not start its Python 3 helper/,
+const launchError = Object.assign(new Error(`spawn ${pythonCommand} ENOENT`), {
+  code: "ENOENT",
+  path: pythonCommand,
+});
+assert.match(
+  missingPythonHelperMessage(launchError, pythonCommand)!,
+  /spawn \/selected\/python ENOENT\n.*could not start its Python 3 helper/,
+);
+for (const code of ["EACCES", "ENOEXEC", "UNKNOWN"]) {
+  assert.equal(
+    missingPythonHelperMessage({ code, path: pythonCommand }, pythonCommand),
+    undefined,
   );
 }
 assert.equal(

@@ -1254,27 +1254,26 @@ process.stdout.write(JSON.stringify({
     expect(stderr.text()).toBe("");
   });
 
-  test("summarizes skill failures without echoing credentials or private paths", () => {
-    const cases = [
-      ["401 sk-proj-SYNTHETIC_SECRET", "Authentication failed"],
-      [
-        "403 model access denied /private/repository",
-        "selected model is unavailable",
-      ],
-      ["429 tokens per minute sk-proj-SYNTHETIC_SECRET", "rate limited"],
-      [
-        "models cache supports_reasoning_summaries /private/home",
-        "model metadata",
-      ],
-      ["ENOTFOUND /private/repository", "could not connect"],
-      ["unknown sk-proj-SYNTHETIC_SECRET /private/repository", "exit code 7"],
-    ];
-    for (const [detail, expected] of cases) {
-      const message = skillCommandFailure("validate", 7, detail!);
-      expect(message).toContain(expected!);
-      expect(message).not.toContain("SYNTHETIC_SECRET");
-      expect(message).not.toContain("/private");
-    }
+  test("preserves skill failures and adds authentication advice without replacing details", () => {
+    for (const detail of [
+      "403 model access denied /synthetic/repository",
+      "429 tokens per minute sk-proj-SYNTHETIC_SECRET",
+      "models cache supports_reasoning_summaries /synthetic/home",
+      "ENOTFOUND /synthetic/repository",
+      "EACCES: permission denied, open /synthetic/output/report.json",
+      "Unsupported provider setting: synthetic_option",
+    ])
+      expect(skillCommandFailure("validate", 7, detail)).toBe(detail);
+    const authentication = "401 sk-proj-SYNTHETIC_SECRET";
+    expect(skillCommandFailure("validate", 7, authentication)).toContain(
+      authentication,
+    );
+    expect(skillCommandFailure("validate", 7, authentication)).toContain(
+      "Authentication failed",
+    );
+    expect(skillCommandFailure("validate", 7, "")).toBe(
+      "validate failed with exit code 7.",
+    );
   });
 
   test("keeps unknown credential failures neutral", () => {
@@ -1325,8 +1324,28 @@ process.stdout.write(JSON.stringify({
           "process.exitCode=7",
         status: 7,
         stdout: "",
-        stderr: "Authentication failed",
+        stderr: "401 sk-proj-SYNTHETIC_SECRET",
       },
+      {
+        source:
+          'process.stderr.write("EACCES: synthetic permission denial\\n" + "é🔒".repeat(25000));process.exitCode=7;',
+        status: 7,
+        stdout: "",
+        stderr: "EACCES: synthetic permission denial\n" + "é🔒".repeat(25000),
+      },
+      ...["stderr", "turn.failed"].map((transport) => {
+        const detail =
+          "EACCES: permission denied, open /synthetic/output/report.json";
+        return {
+          source:
+            transport === "stderr"
+              ? `process.stderr.write(${JSON.stringify(detail)}); process.exitCode=7;`
+              : `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n"); process.exitCode=7;`,
+          status: 7,
+          stdout: "",
+          stderr: detail,
+        };
+      }),
       {
         source:
           'process.stdout.write(JSON.stringify({type:"turn.completed"})+"\\n")',
@@ -1352,8 +1371,6 @@ process.stdout.write(JSON.stringify({
       } else {
         expect(stderr.text()).toContain(scenario.stderr);
       }
-      expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
-      expect(stderr.text()).not.toContain("/private");
     }
   });
 
@@ -1605,8 +1622,9 @@ lines.on("line", (line) => {
     ).resolves.toBe(1);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("Authentication failed");
-    expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
-    expect(stderr.text()).not.toContain("/private");
+    expect(stderr.text()).toContain(
+      "401 sk-proj-SYNTHETIC_SECRET /private/repository",
+    );
   });
 
   test.skipIf(process.platform === "win32")(

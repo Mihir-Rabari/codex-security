@@ -2255,6 +2255,28 @@ try {
     },
   );
 
+  if (process.platform !== "win32") {
+    const beforePermissionFailure = await snapshotScanDraft(root);
+    for (const [file, mode, message] of [
+      [hardeningDirectory, 0o600, /artifact path cannot be inspected.*EACCES/],
+      [hardeningPortfolio, 0o000, /requested artifact cannot be read.*EACCES/],
+    ] as const) {
+      try {
+        await fsPromises.chmod(file, mode);
+        await rejectsDraft(input, message);
+        assert.deepEqual(
+          await snapshotScanDraft(root),
+          beforePermissionFailure,
+        );
+      } finally {
+        await fsPromises.chmod(
+          file,
+          file === hardeningDirectory ? 0o700 : 0o600,
+        );
+      }
+    }
+  }
+
   await rm(hardeningPortfolio);
   await recordFreshScanDraft(context, input);
   assert.equal(

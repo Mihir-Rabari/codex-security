@@ -1646,10 +1646,8 @@ export async function runCodexSkillCommand(
     process.on("SIGTERM", onTerminate);
     try {
       let diagnostic = "";
-      invocation.stderr?.on("data", (chunk: Buffer) => {
-        diagnostic = `${diagnostic}${chunk.toString("utf8")}`.slice(
-          -64 * 1_024,
-        );
+      invocation.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
+        diagnostic += chunk;
       });
       const captured =
         output === undefined || invocation.stdout === null
@@ -1697,7 +1695,7 @@ export async function runCodexSkillCommand(
       if (events?.sandboxUnavailable && requestedSignal === null) {
         throw new PatchCommandError(
           "SANDBOX_UNAVAILABLE",
-          SANDBOX_UNAVAILABLE_MESSAGE,
+          `${SANDBOX_UNAVAILABLE_MESSAGE}${events.error ? `\n${events.error}` : ""}`,
         );
       }
       if (status === 0 && output?.appServer !== undefined && events?.error) {
@@ -7899,10 +7897,14 @@ export async function readSkillCommandOutput(
           }
           startTurn();
         } else if (value["id"] === 5) {
-          const result = value["result"] as { exitCode: number };
+          const result = value["result"] as {
+            exitCode: number;
+            stdout: string;
+            stderr: string;
+          };
           if (result.exitCode !== 0) {
             sandboxUnavailable = true;
-            error = SANDBOX_UNAVAILABLE_MESSAGE;
+            error = result.stderr || result.stdout;
             appServer.input.end();
             continue;
           }
@@ -7995,25 +7997,9 @@ export function skillCommandFailure(
       detail,
     )
   ) {
-    return authenticationFailureMessage(authentication);
+    return `${detail}\n${authenticationFailureMessage(authentication)}`;
   }
-  if (
-    /403|model.not.found|model.*access|access.*model|permission/iu.test(detail)
-  ) {
-    return "The selected model is unavailable for the current credentials.";
-  }
-  if (/429|rate.limit|tokens.per.minute/iu.test(detail)) {
-    return "The request was rate limited. Wait and retry.";
-  }
-  if (
-    /models?.cache|cache.*schema|supports_reasoning_summaries/iu.test(detail)
-  ) {
-    return "Codex could not load its model metadata. Update Codex or refresh its model cache.";
-  }
-  if (/econn|enotfound|network|timed.out|timeout/iu.test(detail)) {
-    return "Codex could not connect to the model service. Check the network and retry.";
-  }
-  return `${command} failed with exit code ${status}.`;
+  return detail || `${command} failed with exit code ${status}.`;
 }
 
 function incurErrorMessage(output: string): string {
