@@ -102,6 +102,9 @@
 - reject plaintext remote login URLs ([#1331](https://github.com/openai/codex-security/pull/1331))
 - keep unusable DOCX numeric references as literal text ([#123](https://github.com/openai/codex-security/pull/123))
 - finish cancellation when preflight ignores termination ([#1049](https://github.com/openai/codex-security/pull/1049))
+- install MCP dependencies before plugin build ([#1285](https://github.com/openai/codex-security/pull/1285))
+- preserve closed stdin when launching helpers ([#1329](https://github.com/openai/codex-security/pull/1329))
+- retain recovery guidance on canceled uploads ([#680](https://github.com/openai/codex-security/pull/680))
 
 <!-- release-section: highlights:end -->
 
