@@ -456,9 +456,10 @@ export function matchesSavedCoverageSource(
       !(original.receiptRefs as string[]).every((ref, index) => {
         const digest = receiptDigests.get(ref);
         return (
-          digest !== undefined &&
-          digest ===
-            receiptDigests.get((normalized.receiptRefs as string[])[index]!)
+          ref === (normalized.receiptRefs as string[])[index] ||
+          (digest !== undefined &&
+            digest ===
+              receiptDigests.get((normalized.receiptRefs as string[])[index]!))
         );
       })
     )
