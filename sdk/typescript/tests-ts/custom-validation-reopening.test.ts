@@ -3,7 +3,6 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "bun:test";
-import { build } from "esbuild";
 import { runCustomValidation } from "../src/custom-validation.js";
 import type { CoverageDocument, FindingsDocument } from "../src/models.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -24,33 +23,19 @@ for (const disposition of [
 ] as const) {
   test(`custom validation of a reopened candidate survives public stopped recovery: ${disposition}`, async () => {
     const directory = await temporaryDirectory("custom-validation-reopening-");
-    const modules = join(directory, "modules");
-    await build({
-      bundle: true,
-      entryPoints: [
-        "artifact-context",
-        "artifact-scan-draft",
-        "artifact-discovery",
-      ].map((name) => join(sourcePlugin, "mcp-app/src", `${name}.ts`)),
-      outdir: modules,
-      outExtension: { ".js": ".mjs" },
-      format: "esm",
-      platform: "node",
-      banner: {
-        js: 'import { createRequire } from "node:module";const require = createRequire(import.meta.url);',
-      },
-    });
     const { createScanArtifactContext } = await import(
-      pathToFileURL(join(modules, "artifact-context.mjs")).href
+      pathToFileURL(join(sourcePlugin, "mcp-app/src/artifact-context.ts")).href
     );
     const { recordCodexSecurityScanDraftViaWorkbench } = await import(
-      pathToFileURL(join(modules, "artifact-scan-draft.mjs")).href
+      pathToFileURL(join(sourcePlugin, "mcp-app/src/artifact-scan-draft.ts"))
+        .href
     );
     const {
       recordCodexSecurityDiscoveryCandidates,
       listCodexSecurityCandidates,
     } = await import(
-      pathToFileURL(join(modules, "artifact-discovery.mjs")).href
+      pathToFileURL(join(sourcePlugin, "mcp-app/src/artifact-discovery.ts"))
+        .href
     );
     const repository = join(directory, "repository");
     const home = join(directory, "home");

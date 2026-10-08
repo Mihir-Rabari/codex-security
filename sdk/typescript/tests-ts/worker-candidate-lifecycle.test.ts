@@ -3,7 +3,6 @@ import { mkdir, readFile, readdir, writeFile, unlink } from "node:fs/promises";
 import { join, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "bun:test";
-import { build } from "esbuild";
 import { loadContract } from "../src/contract.js";
 import { ScanResult } from "../src/result.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -18,41 +17,16 @@ type Row = Record<string, any>;
 
 async function fixture(diff = false) {
   const directory = await temporaryDirectory("worker-candidate-lifecycle-");
-  const modules = join(directory, "modules");
-  await build({
-    bundle: true,
-    entryPoints: Object.fromEntries(
-      Object.entries({
-        context: "artifact-context",
-        draft: "artifact-scan-draft",
-        reducer: "artifact-deep-reducer",
-        validation: "deep-scan/artifact-validation",
-        artifacts: "deep-scan/artifacts",
-        discovery: "artifact-discovery",
-        validate: "artifact-validation-phase",
-      }).map(([name, file]) => [
-        name,
-        join(sourcePlugin, "mcp-app/src", `${file}.ts`),
-      ]),
-    ),
-    outdir: modules,
-    outExtension: { ".js": ".mjs" },
-    format: "esm",
-    platform: "node",
-    banner: {
-      js: 'import { createRequire } from "node:module";const require = createRequire(import.meta.url);',
-    },
-  });
   const load = (name: string) =>
-    import(pathToFileURL(join(modules, `${name}.mjs`)).href);
+    import(pathToFileURL(join(sourcePlugin, "mcp-app/src", `${name}.ts`)).href);
   const api = {
-    context: await load("context"),
-    draft: await load("draft"),
-    reducer: await load("reducer"),
-    validation: await load("validation"),
-    artifacts: await load("artifacts"),
-    discovery: await load("discovery"),
-    validate: await load("validate"),
+    context: await load("artifact-context"),
+    draft: await load("artifact-scan-draft"),
+    reducer: await load("artifact-deep-reducer"),
+    validation: await load("deep-scan/artifact-validation"),
+    artifacts: await load("deep-scan/artifacts"),
+    discovery: await load("artifact-discovery"),
+    validate: await load("artifact-validation-phase"),
   };
   const repoRoot = join(directory, "repository"),
     home = join(directory, "home");

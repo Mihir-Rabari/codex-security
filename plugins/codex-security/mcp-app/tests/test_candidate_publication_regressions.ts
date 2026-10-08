@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { importSource } from "./import-module.ts";
@@ -45,6 +45,17 @@ for (const mode of ["standard", "diff", "worker"] as const) {
             f.draft({ [field]: [{ ...row, sourceWorkerId: "legacy-worker" }] }),
           );
           if (source === "checkpoint") {
+            // Model a later checkpoint without relying on filesystem clock precision.
+            const previous = [
+              path.join(
+                f.root,
+                mode === "worker" ? "result.json" : "coverage.json",
+              ),
+              ...(await readdir(path.join(f.root, "checkpoints"))).map((name) =>
+                path.join(f.root, "checkpoints", name),
+              ),
+            ];
+            await Promise.all(previous.map((file) => utimes(file, 1, 1)));
             await draftApi.saveScanDraftCheckpoint(
               f.context,
               f.draft(legacyCoverage),
