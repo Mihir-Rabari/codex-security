@@ -2,9 +2,23 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { importSource } from "./import-module.ts";
 import { windowsFileSystem } from "../../native/windows-files.mjs";
 import type { WindowsBinding } from "../../native/windows-binding.mjs";
+
+const { sampleFile, createSourceSampler, PREVIEW_READ_BYTES } =
+  await importSource("src/helpers/source-preview.ts", {
+    define: {
+      "import.meta.url": JSON.stringify(
+        new URL(
+          "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
+          import.meta.url,
+        ).href,
+      ),
+    },
+  });
 
 for (const [name, reparseTag, surrogate] of [
   ["cloud directory", 0x9000001a, false],
@@ -59,4 +73,102 @@ test("POSIX file identities retain all 64 inode bits", async () => {
     fs.statSync = original;
     syncBuiltinESMExports();
   }
+});
+
+test(
+  "short file reads preserve the complete preview prefix and UTF-16 units",
+  { skip: process.platform === "win32" },
+  () => {
+    const root = fs.mkdtempSync(join(tmpdir(), "inventory-short-read-"));
+    const file = join(root, "source");
+    const original = fs.readSync;
+    let calls = 0;
+    fs.readSync = ((descriptor, buffer, offset, length, position) =>
+      original(
+        descriptor,
+        buffer,
+        offset,
+        Math.min(length, [1, 3, 5, 4096][calls++ % 4]!),
+        position,
+      )) as typeof fs.readSync;
+    syncBuiltinESMExports();
+    try {
+      const utf16 = Buffer.concat([
+        Buffer.from([0xff, 0xfe]),
+        Buffer.from("Ā source\n".repeat(8000), "utf16le"),
+      ]);
+      for (const data of [
+        Buffer.alloc(0),
+        Buffer.from([0xff]),
+        Buffer.from([0xff, 0xfe]),
+        Buffer.from([0xff, 0xfe, 0]),
+        Buffer.from([0xfe, 0xff, 0]),
+        Buffer.from("source\n".repeat(12000)),
+        utf16,
+        Buffer.from(utf16).swap16(),
+      ]) {
+        fs.writeFileSync(file, data);
+        calls = 0;
+        const [sample, binary] = sampleFile(file);
+        assert.equal(binary, false);
+        assert.deepEqual(sample, data.subarray(0, PREVIEW_READ_BYTES));
+        fs.writeFileSync(file, Buffer.concat([data, Buffer.from([0, 0])]));
+        calls = 0;
+        assert.equal(sampleFile(file)[1], true);
+      }
+    } finally {
+      fs.readSync = original;
+      syncBuiltinESMExports();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test("Windows short file reads preserve previews across split BOMs and units", () => {
+  const text = Buffer.concat([
+    Buffer.from([0xff, 0xfe]),
+    Buffer.from("Ā source\n".repeat(8000), "utf16le"),
+  ]);
+  for (const source of [Buffer.alloc(0), Buffer.from([0xff, 0xfe, 0]), text])
+    for (const binary of [false, true]) {
+      const data = binary
+        ? Buffer.concat([source, Buffer.from([0, 0])])
+        : source;
+      let cursor = 0,
+        calls = 0,
+        closes = 0;
+      const native = {
+        windowsAbsolutePath: (value: Buffer) => ({ error: 0, value }),
+        openWindowsFile: () => ({
+          error: 0,
+          handle: {
+            read: (buffer: Buffer, offset: number, length: number) => {
+              const count = Math.min(
+                length,
+                data.length - cursor,
+                [1, 3, 5, 4096][calls++ % 4]!,
+              );
+              data.copy(buffer, offset, cursor, cursor + count);
+              cursor += count;
+              return { error: 0, value: count };
+            },
+            close: () => {
+              closes++;
+              return 0;
+            },
+          },
+        }),
+      } as unknown as WindowsBinding;
+      const sampler = createSourceSampler();
+      assert.equal(sampler.consume(Buffer.alloc(0)), true);
+      windowsFileSystem(native).readChunks(
+        Buffer.from("C:\\fixture", "utf16le"),
+        sampler.consume,
+      );
+      assert.deepEqual(sampler.finish(), [
+        binary ? Buffer.alloc(0) : source.subarray(0, PREVIEW_READ_BYTES),
+        binary,
+      ]);
+      assert.equal(closes, 1);
+    }
 });

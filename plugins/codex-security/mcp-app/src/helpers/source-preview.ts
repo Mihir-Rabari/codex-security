@@ -104,27 +104,51 @@ export function* fileChunks(path: string): Iterable<Buffer> {
   }
 }
 
+/** Share bounded preview and binary classification across file and Git reads. */
+export function createSourceSampler() {
+  let sample = Buffer.alloc(0),
+    binary = false,
+    bom = Buffer.alloc(0),
+    unitTail = Buffer.alloc(0);
+  return {
+    consume(data: Buffer): boolean {
+      if (sample.length < PREVIEW_READ_BYTES)
+        sample = Buffer.concat([
+          sample,
+          data.subarray(0, PREVIEW_READ_BYTES - sample.length),
+        ]);
+      const classified = Buffer.concat([unitTail, data]);
+      if (!bom.length && sample.length >= 2 && bomEncoding(sample) !== "utf-8")
+        bom = sample.subarray(0, 2);
+      // Hold one byte until encoding can be identified, and preserve UTF-16 unit alignment.
+      const classifyLength =
+        classified.length -
+        (bom.length || sample.length < 2 ? classified.length % 2 : 0);
+      if (classifyLength)
+        binary ||= bom.length
+          ? isBinarySample(
+              Buffer.concat([bom, classified.subarray(0, classifyLength)]),
+            )
+          : classified.subarray(0, classifyLength).includes(0);
+      unitTail = classified.subarray(classifyLength);
+      return !binary;
+    },
+    finish(): [Buffer, boolean] {
+      if (!bom.length && unitTail.length) binary ||= unitTail.includes(0);
+      return [binary ? Buffer.alloc(0) : sample, binary];
+    },
+  };
+}
+
 /** Retain a bounded preview while checking every byte for binary content. */
 export function sampleFile(path: string): [Buffer, boolean] {
   try {
-    let sample: Buffer = Buffer.alloc(0),
-      first = true,
-      binary = false;
-    const consume = (chunk: Buffer) => {
-      if (first) {
-        sample = chunk;
-        first = false;
-      }
-      binary =
-        bomEncoding(sample) === "utf-8"
-          ? chunk.includes(0)
-          : isBinarySample(Buffer.concat([sample.subarray(0, 2), chunk]));
-      return !binary;
-    };
+    const sampler = createSourceSampler();
     if (process.platform === "win32")
-      windowsFiles().readChunks(Buffer.from(path, "utf16le"), consume);
-    else for (const chunk of fileChunks(path)) if (!consume(chunk)) break;
-    return [binary ? Buffer.alloc(0) : sample, binary];
+      windowsFiles().readChunks(Buffer.from(path, "utf16le"), sampler.consume);
+    else
+      for (const chunk of fileChunks(path)) if (!sampler.consume(chunk)) break;
+    return sampler.finish();
   } catch {
     return [Buffer.alloc(0), true];
   }

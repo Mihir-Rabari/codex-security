@@ -1,5 +1,6 @@
 import {
   environmentValue,
+  isMissingPathError,
   normalizePath,
   resolvedPathText as canonical,
 } from "./helper-files";
@@ -35,6 +36,7 @@ import {
   lstat,
   regular,
   rejectStreams,
+  stat,
   walk,
   windows,
 } from "./inventory-paths";
@@ -139,21 +141,29 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
     );
   } catch {
     const ignoreNames = [".gitignore", ".ignore", ".rgignore"];
+    const isIgnoreFile = (path: string) => {
+      try {
+        return stat(path).isFile();
+      } catch (error) {
+        if (isMissingPathError(error)) return false;
+        throw error;
+      }
+    };
     const files = [...walk(scope)];
     const ignored =
       [...ancestors(repo)].some((path) => exists(append(path, ".git"))) ||
       [...ancestors(scope)].some((path) => {
         try {
           inside(repo, path);
-          return ignoreNames.some((name) => regular(append(path, name)));
         } catch {
           return false;
         }
+        return ignoreNames.some((name) => isIgnoreFile(append(path, name)));
       }) ||
       files.some(
         (path) =>
           ignoreNames.some((name) => path.endsWith(sep + name)) &&
-          regular(path),
+          isIgnoreFile(path),
       );
     if (ignored)
       throw new Error(

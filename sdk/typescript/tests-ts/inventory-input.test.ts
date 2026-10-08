@@ -974,3 +974,45 @@ test("inventory preserves scoped names beneath dotted-I repository names", () =>
       expect(rows[0]).toMatchObject({ area: "scope", preview: "kept" });
   }
 });
+
+for (const name of [".gitignore", ".ignore", ".rgignore"])
+  for (const location of ["ancestor", "descendant"])
+    test.skipIf(process.platform === "win32")(
+      `missing-tool fallback notices ${location} symlinked ${name}`,
+      () => {
+        const f = fixture();
+        rmSync(join(f.repo, ".git"), { recursive: true });
+        f.write("scope/nested/source.py");
+        const rules = join(f.root, "ignore-rules");
+        writeFileSync(rules, "source.py\n");
+        symlinkSync(
+          rules,
+          join(f.repo, location === "ancestor" ? name : `scope/nested/${name}`),
+        );
+        writeFileSync(f.out, "previous\n");
+        const result = f.run("make-repo-rank-input", ["--scope", "scope"], {
+          ...process.env,
+          CODEX_SECURITY_GIT: "",
+          PATH: f.root,
+        });
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("without Git or ripgrep");
+        expect(readFileSync(f.out, "utf8")).toBe("previous\n");
+      },
+    );
+
+test("file and Git previews retain empty files and incomplete final UTF-16 units", () => {
+  const f = fixture();
+  f.write("base.py");
+  const base = f.commit();
+  f.write("empty.py", "");
+  f.write("utf16.py", Buffer.from([0xff, 0xfe, 0]));
+  f.commit();
+  for (const rows of [
+    f.rows(),
+    f.rows("make-diff-rank-input", ["--base", base]),
+  ]) {
+    expect(rows.find((row) => row.path === "empty.py")?.preview).toBe("");
+    expect(rows.find((row) => row.path === "utf16.py")?.preview).toBe("");
+  }
+});

@@ -34,7 +34,7 @@ import {
   walk,
   windows,
 } from "./inventory-paths";
-import { isBinarySample, PREVIEW_READ_BYTES } from "./source-preview";
+import { createSourceSampler } from "./source-preview";
 
 const repositoryEnvironment = [
   "GIT_ALTERNATE_OBJECT_DIRECTORIES",
@@ -418,10 +418,7 @@ export async function blobSamples(
   const result: ([Buffer, boolean] | undefined)[] = [];
   let pending = Buffer.alloc(0),
     remaining: number | undefined,
-    sample = Buffer.alloc(0),
-    binary = false,
-    bom = Buffer.alloc(0),
-    unitTail = Buffer.alloc(0);
+    sampler = createSourceSampler();
   try {
     for await (const chunk of child.stdout) {
       pending = Buffer.concat([pending, chunk as Buffer]);
@@ -436,38 +433,12 @@ export async function blobSamples(
             continue;
           }
           remaining = Number(header.at(-1));
-          sample = Buffer.alloc(0);
-          binary = false;
-          bom = Buffer.alloc(0);
-          unitTail = Buffer.alloc(0);
+          sampler = createSourceSampler();
         }
         if (remaining > 0) {
           const length = Math.min(remaining, pending.length),
             data = pending.subarray(0, length);
-          if (sample.length < PREVIEW_READ_BYTES)
-            sample = Buffer.concat([
-              sample,
-              data.subarray(0, PREVIEW_READ_BYTES - sample.length),
-            ]);
-          const classified = Buffer.concat([unitTail, data]);
-          if (
-            !bom.length &&
-            sample.length >= 2 &&
-            ((sample[0] === 0xff && sample[1] === 0xfe) ||
-              (sample[0] === 0xfe && sample[1] === 0xff))
-          )
-            bom = sample.subarray(0, 2);
-          // Hold one byte until encoding can be identified, and preserve UTF-16 unit alignment.
-          const classifyLength =
-            classified.length -
-            (bom.length || sample.length < 2 ? classified.length % 2 : 0);
-          if (classifyLength)
-            binary ||= bom.length
-              ? isBinarySample(
-                  Buffer.concat([bom, classified.subarray(0, classifyLength)]),
-                )
-              : classified.subarray(0, classifyLength).includes(0);
-          unitTail = classified.subarray(classifyLength);
+          sampler.consume(data);
           remaining -= length;
           pending = pending.subarray(length);
           if (remaining) break;
@@ -475,8 +446,7 @@ export async function blobSamples(
         if (!pending.length) break;
         if (pending[0] !== 0) throw new Error("Invalid Git blob framing");
         pending = pending.subarray(1);
-        if (!bom.length && unitTail.length) binary ||= unitTail.includes(0);
-        result.push([binary ? Buffer.alloc(0) : sample, binary]);
+        result.push(sampler.finish());
         remaining = undefined;
       }
     }

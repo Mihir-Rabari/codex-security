@@ -1,5 +1,6 @@
 import { pythonExecutable } from "./support/python.js";
 import { nodeCommand } from "./support/shell.js";
+import { windowsHelperFixture } from "./windows-helper-command.js";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { git } from "./git-fixture.js";
 import { spawnSync } from "node:child_process";
@@ -284,3 +285,54 @@ testPosix(
     expect(existsSync(marker)).toBe(false);
   },
 );
+
+for (const mode of ["revisions", "local-patch"] as const)
+  test.skipIf(process.platform !== "win32")(
+    `documented Windows ${mode} ranking command preserves literal paths and refs`,
+    async () => {
+      const root = temporaryRoots.create("codex-security-diff-docs-");
+      const repository = join(root, "repository %USERNAME% !EXPAND! 雪's");
+      const discovery = join(root, "discovery %USERNAME% !EXPAND! 雪's");
+      mkdirSync(repository);
+      mkdirSync(discovery);
+      git(repository, "init", "-q");
+      const source = join(repository, "source.py");
+      writeFileSync(source, "before\n");
+      git(repository, "add", ".");
+      git(repository, "commit", "-qm", "Fixture base");
+      const base = "fixture-%USERNAME%-!EXPAND!-é's";
+      git(repository, "branch", base);
+      writeFileSync(source, "after\n");
+      if (mode === "revisions") {
+        git(repository, "add", ".");
+        git(repository, "commit", "-qm", "Fixture head");
+      }
+      const launcher = windowsHelperFixture(root, {
+        CODEX_SECURITY_GIT: Bun.which("git")!,
+      });
+      for (const powershell of launcher.powershells) {
+        const result = await launcher.run(
+          powershell,
+          "skills/security-scan/references/scan-artifacts-and-ledger.md",
+          {
+            "<plugin_dir>": launcher.plugin,
+            "<repo_root>": repository,
+            "<discovery_dir>": discovery,
+            "<base>": base,
+            "<head>": "HEAD",
+          },
+          undefined,
+          root,
+          undefined,
+          mode === "revisions" ? 1 : 2,
+        );
+        expect(result.status, result.diagnostics).toBe(0);
+        expect(result.stdout, result.diagnostics).not.toContain(
+          "expanded-plugin-used",
+        );
+        expect(
+          JSON.parse(readFileSync(join(discovery, "rank_input.jsonl"), "utf8")),
+        ).toMatchObject({ path: "source.py", preview: "after" });
+      }
+    },
+  );
