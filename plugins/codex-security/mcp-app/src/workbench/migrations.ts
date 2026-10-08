@@ -141,6 +141,7 @@ function normalizeExecutionProfiles(database: DatabaseSync): void {
 function normalizeHistory(database: DatabaseSync): void {
   for (const [from, to] of [
     [42, 50],
+    [43, 50],
     [43, 51],
     [44, 52],
     [45, 53],

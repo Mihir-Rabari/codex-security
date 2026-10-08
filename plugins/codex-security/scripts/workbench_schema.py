@@ -346,6 +346,7 @@ def move_pre_release_migration(
 def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:
     normalize_mirror_lineage_migrations(connection)
     move_pre_release_migration(connection, 42, 50, "preserve severity assessments per scan")
+    move_pre_release_migration(connection, 43, 50, "preserve severity assessments per scan")
     move_pre_release_migration(connection, 43, 51, "persist composition child membership")
     move_pre_release_migration(connection, 44, 52, "reuse scan severity assessments")
     move_pre_release_migration(connection, 45, 53, "persist scan execution sessions")

@@ -14,8 +14,11 @@ import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
 import { expandHome } from "./runtime.js";
-import { gitMarkerRoot } from "./targets.js";
-import { isGitMetadataDirectory, nullIfMissingFile } from "./targets.js";
+import {
+  gitMarkerRoot,
+  isGitMetadataDirectory,
+  nullIfMissingFile,
+} from "./targets.js";
 
 const DOCUMENT_EXTENSIONS = new Set([
   ".md",

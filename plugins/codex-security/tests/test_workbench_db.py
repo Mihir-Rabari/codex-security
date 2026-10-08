@@ -2028,12 +2028,12 @@ def test_workbench_warns_after_working_tree_changes(tmp_path: Path) -> None:
         scan_dir,
         scan_id,
         target,
+        relative_path="README.md",
         target_kind="git_diff",
         diff_base_revision=revision,
         diff_head_revision=revision,
         snapshot_digest=snapshot_digest,
         coverage_mode="working_tree",
-        relative_path="README.md",
     )
     (target / "new-file.txt").write_text("changed during scan\n")
     completed = scan_command(state_dir, "complete-scan", scan_id)

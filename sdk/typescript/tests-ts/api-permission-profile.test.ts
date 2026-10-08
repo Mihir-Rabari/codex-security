@@ -8,6 +8,7 @@ import { CodexSecurity, type ScanOptions } from "../src/api.js";
 import type { JsonObject } from "../src/config.js";
 import { DEEP_SCAN_CHECKPOINT } from "../src/deep-scan.js";
 import { ScanInterruptedError } from "../src/errors.js";
+import { prepareKnowledgeBase } from "../src/knowledge-base.js";
 import { createPermissionCheckedCodex } from "../src/permission-profile.js";
 import {
   bootstrapPlugin,
@@ -88,6 +89,15 @@ async function fixture(
     mkdir(scanDir, { mode: 0o700 }),
   ]);
   await writeFile(join(repository, "app.py"), "print('synthetic fixture')\n");
+  const knowledgeDocument = join(root, "architecture.md");
+  const knowledgeContents = `Captured knowledge for ${role}, resumed=${resumed}, surface=${surface}.`;
+  await writeFile(knowledgeDocument, knowledgeContents);
+  const knowledge = await prepareKnowledgeBase(
+    [knowledgeDocument],
+    undefined,
+    root,
+  );
+  await knowledge.cleanup();
 
   await writeFile(capture, "");
   await writeFile(
@@ -142,7 +152,9 @@ async function fixture(
       "  };",
       '  if (args.includes("--profile")) merge(config, parse(fs.readFileSync(require("node:path").join(process.env.CODEX_HOME, args[args.indexOf("--profile") + 1] + ".config.toml"), "utf8")));',
       '  for (let index = 0; index < args.length; index++) if (["-c", "--config"].includes(args[index])) merge(config, parse(args[++index]));',
-      'record({ kind: args.includes("mcp") ? "mcp" : args.includes("app-server") ? "preflight" : "exec", args, cwd: process.cwd(), surface: process.env.CODEX_SECURITY_SURFACE, profile: config.default_permissions, permissions: config.permissions, mcpServers: config.mcp_servers, literalSetting: config["synthetic.setting"], projects: config.projects, context: process.env.SYNTHETIC_EXECUTION_CONTEXT, workerLimit: config.features?.multi_agent_v2?.max_concurrent_threads_per_session, snapshotLimit: process.env.CODEX_SECURITY_CONFIG_PATH ? parse(fs.readFileSync(process.env.CODEX_SECURITY_CONFIG_PATH, "utf8")).features?.multi_agent_v2?.max_concurrent_threads_per_session : null, selectedProfile: config.profile ?? null, modelProvider: config.model_provider, endpoint: config.openai_base_url, modelProviders: config.model_providers, model: config.model, effort: config.model_reasoning_effort, modelContextWindow: config.model_context_window, autoCompactTokenLimit: config.model_auto_compact_token_limit, forcedLogin: config.forced_login_method ?? null, forcedWorkspace: config.forced_chatgpt_workspace_id ?? null, apiKey: process.env.CODEX_API_KEY });',
+      "const knowledgeDirectory = process.env.CODEX_SECURITY_KNOWLEDGE_BASE;",
+      'const knowledge = knowledgeDirectory ? Object.fromEntries(fs.readdirSync(knowledgeDirectory).map(name => [name, fs.readFileSync(require("node:path").join(knowledgeDirectory, name), "utf8")])) : null;',
+      'record({ knowledgeDirectory, knowledge, kind: args.includes("mcp") ? "mcp" : args.includes("app-server") ? "preflight" : "exec", args, cwd: process.cwd(), surface: process.env.CODEX_SECURITY_SURFACE, profile: config.default_permissions, permissions: config.permissions, mcpServers: config.mcp_servers, literalSetting: config["synthetic.setting"], projects: config.projects, context: process.env.SYNTHETIC_EXECUTION_CONTEXT, workerLimit: config.features?.multi_agent_v2?.max_concurrent_threads_per_session, snapshotLimit: process.env.CODEX_SECURITY_CONFIG_PATH ? parse(fs.readFileSync(process.env.CODEX_SECURITY_CONFIG_PATH, "utf8")).features?.multi_agent_v2?.max_concurrent_threads_per_session : null, selectedProfile: config.profile ?? null, modelProvider: config.model_provider, endpoint: config.openai_base_url, modelProviders: config.model_providers, model: config.model, effort: config.model_reasoning_effort, modelContextWindow: config.model_context_window, autoCompactTokenLimit: config.model_auto_compact_token_limit, forcedLogin: config.forced_login_method ?? null, forcedWorkspace: config.forced_chatgpt_workspace_id ?? null, apiKey: process.env.CODEX_API_KEY });',
       ...(replaceSelectedPlugin
         ? [
             'const servers = JSON.parse(require("node:child_process").execFileSync(' +
@@ -345,7 +357,11 @@ async function fixture(
     targetId: "target_sha256_example",
     targetRevision: "unversioned",
     threadId: resumed && !composedDiscovery ? threadId : null,
-    recipe: { repository, target: { kind: "repository", paths: [] } },
+    recipe: {
+      repository,
+      target: { kind: "repository", paths: [] },
+      knowledgeBaseSha256: knowledge.sha256,
+    },
     contract: {
       target: {
         allowedKinds: ["directory_snapshot"],
@@ -613,6 +629,7 @@ async function fixture(
   const options: ScanOptions = {
     mode: role === "merge" || composedDiscovery ? "deep" : "standard",
     outputDir: scanDir,
+    knowledgeBasePaths: [knowledgeDocument],
     ...(role === "comparison" || role === "followup"
       ? { inheritedPermissions }
       : {}),
@@ -639,6 +656,7 @@ async function fixture(
   };
   return {
     runtimeEnvironment,
+    knowledgeContents,
     async runProtocol() {
       const sdk = createPermissionCheckedCodex({
         codexPathOverride: executablePathForSpawn(executable),
@@ -809,6 +827,10 @@ test.each(["sdk", "cli"] as const)(
                 launch.permissions[launch.profile].filesystem,
               ).not.toHaveProperty(":workspace_roots");
               expect(launch.context).toBe("selected-scan");
+              expect(launch.knowledgeDirectory).toBeString();
+              expect(launch.knowledge).toEqual({
+                "0-architecture.md.txt": h.knowledgeContents,
+              });
               expect(launch.apiKey).toBe("synthetic-fixture-key");
               expect(launch.projects).toEqual(h.projects);
               expect(
@@ -1198,6 +1220,8 @@ test("selected profile launch survives shared-home settings for fresh and resume
         expect(observations).toHaveLength(2);
         for (const launch of observations)
           expect(launch).toMatchObject({
+            knowledgeDirectory: expect.any(String),
+            knowledge: { "0-architecture.md.txt": h.knowledgeContents },
             literalSetting: "literal-top-level-value",
             modelProvider: "synthetic.selected",
             endpoint:

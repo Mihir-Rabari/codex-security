@@ -38,6 +38,7 @@ def assessments(
     parameters = (
         (json.dumps(finding_ids),) if scan_id is None else (json.dumps(finding_ids), scan_id)
     )
+    # Keep selected IDs first so each assessment is a primary-key lookup.
     rows = connection.execute(
         f"""SELECT assessment.* FROM json_each(?) AS selected
         CROSS JOIN {table} AS assessment ON assessment.finding_id = selected.value

@@ -993,3 +993,27 @@ test("pre-release composition history moves without shadowing editable scan name
       .some((column) => column.name === "name"),
   );
 });
+
+for (const version of [43, 50])
+  test(`released severity history ${version} opens without replaying its table migration`, (t) => {
+    const database = memory(t, 50);
+    database
+      .prepare("UPDATE schema_migrations SET version = ? WHERE version = 50")
+      .run(version);
+    const schema = () =>
+      database
+        .prepare(
+          "SELECT sql FROM sqlite_master WHERE name = 'scan_severity_assessments'",
+        )
+        .get();
+    const before = schema();
+    applyMigrations(database);
+    applyMigrations(database);
+    assert.deepEqual(schema(), before);
+    assertMigrationNames(database, 42, 50, 51, 52, 53, 54, 55, 56);
+    assert.equal(
+      database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()!
+        .count,
+      migrations.length,
+    );
+  });
