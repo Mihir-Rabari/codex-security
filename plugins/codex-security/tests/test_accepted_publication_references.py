@@ -82,7 +82,8 @@ def test_stopped_recovery_uses_accepted_bytes_after_replaceable_output_disappear
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
     contents = accepted.read_bytes()
 
-    stopped = workbench_api["fail_scan"](
+    stopped = workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
     )["scan"]

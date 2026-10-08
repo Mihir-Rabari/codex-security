@@ -2119,6 +2119,8 @@ def merge_saved_results(
         for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions", "reviews"):
             if superseded and field not in {"surfaces", "explicitExclusions", "deferred"}:
                 continue
+            if field == "reviews" and field not in draft["coverage"]:
+                continue
             items = draft["coverage"].get(field, [])
             if field == "deferred":
                 items = deferred_rows[relative]

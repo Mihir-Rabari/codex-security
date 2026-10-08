@@ -239,7 +239,7 @@ def test_publication_renders_each_source_remediation(
         coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
         for field in ("documentType", "schemaVersion", "scanId"):
             coverage.pop(field)
-        assert coverage == {**scan.coverage, "reviews": []}
+        assert coverage == scan.coverage
     else:
         assert_published_aggregate(scan)
     report = (scan.scan_dir / "report.md").read_text()
@@ -525,11 +525,11 @@ def test_standard_publication_preserves_deliberately_partial_coverage(
     scan = publication_scan(mode="standard")
     scan.coverage["completeness"] = "partial"
     scan.coverage["deferred"] = [{"id": "remaining-review", "reason": "Another surface remains."}]
+    scan.coverage["reviews"] = []
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
 
     complete(workbench_api, workbench_db, scan)
 
-    scan.coverage["reviews"] = []
     assert_published_aggregate(scan)
 
 
