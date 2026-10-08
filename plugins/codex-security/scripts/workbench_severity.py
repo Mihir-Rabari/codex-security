@@ -1,4 +1,4 @@
-"""Per-finding severity checkpoints and the selection requested for each scan."""
+"""Reusable severity checkpoints and the assessments saved for each scan."""
 
 import argparse
 import json
@@ -31,32 +31,21 @@ FIELDS = {
 
 
 def assessments(
-    connection: sqlite3.Connection, finding_ids: list[str], scan_id: str
+    connection: sqlite3.Connection, finding_ids: list[str], scan_id: str | None = None
 ) -> list[dict[str, Any]]:
-    rows = connection.execute(
-        """SELECT assessment.* FROM json_each(?) AS selected
-        JOIN finding_severity_assessments AS assessment ON assessment.finding_id = selected.value
-        ORDER BY selected.key""",
-        (json.dumps(finding_ids),),
+    table = "finding_severity_assessments" if scan_id is None else "scan_severity_assessments"
+    scope = "" if scan_id is None else "WHERE assessment.scan_id = ?"
+    parameters = (
+        (json.dumps(finding_ids),) if scan_id is None else (json.dumps(finding_ids), scan_id)
     )
-    # Retain surviving pre-migration checkpoints; their input hashes determine reuse.
-    selected = {
-        row["finding_id"]: {key: row[column] for key, column in FIELDS.items()} for row in rows
-    }
-    if (
-        connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scan_finding_severity_assessments'"
-        ).fetchone()
-        is not None
-    ):
-        for row in connection.execute(
-            """SELECT assessment.* FROM json_each(?) AS selected
-            JOIN scan_finding_severity_assessments AS assessment
-            ON assessment.finding_id = selected.value AND assessment.scan_id = ?""",
-            (json.dumps(finding_ids), scan_id),
-        ):
-            selected[row["finding_id"]] = {key: row[column] for key, column in FIELDS.items()}
-    return [selected[finding_id] for finding_id in finding_ids if finding_id in selected]
+    # Keep selected IDs first so each assessment is a primary-key lookup.
+    rows = connection.execute(
+        f"""SELECT assessment.* FROM json_each(?) AS selected
+        CROSS JOIN {table} AS assessment ON assessment.finding_id = selected.value
+        {scope} ORDER BY selected.key""",
+        parameters,
+    )
+    return [{key: row[column] for key, column in FIELDS.items()} for row in rows]
 
 
 def checkpoint(
@@ -81,6 +70,17 @@ def checkpoint(
                     payload["knowledgeBaseSha256"],
                 ),
             )
+            # Cache hits are not saved again by the classifier. Copy them once,
+            # without replacing assessments this scan already owns.
+            connection.execute(
+                """INSERT INTO scan_severity_assessments
+                SELECT ?, assessment.* FROM json_each(?) AS selected
+                JOIN finding_severity_assessments AS assessment
+                    ON assessment.finding_id = selected.value
+                WHERE true
+                ON CONFLICT(scan_id, finding_id) DO NOTHING""",
+                (payload["scanId"], json.dumps(payload["findingIds"])),
+            )
             return {
                 "assessments": assessments(connection, payload["findingIds"], payload["scanId"])
             }
@@ -97,16 +97,23 @@ def checkpoint(
             is None
         ):
             upsert_finding(connection, finding, timestamp)
-        columns = ", ".join(FIELDS.values())
-        parameters = ", ".join("?" for _ in FIELDS)
-        updates = ", ".join(f"{column} = excluded.{column}" for column in FIELDS.values())
-        connection.execute(
-            f"""INSERT INTO scan_finding_severity_assessments (scan_id, {columns})
-            VALUES (?, {parameters})
-            ON CONFLICT(scan_id, finding_id) DO UPDATE SET
-            {updates}""",
-            (payload["scanId"], *(assessment[key] for key in FIELDS)),
-        )
+        values = {column: assessment[key] for key, column in FIELDS.items()}
+        for table, key, row in (
+            ("finding_severity_assessments", "finding_id", values),
+            (
+                "scan_severity_assessments",
+                "scan_id, finding_id",
+                {"scan_id": payload["scanId"], **values},
+            ),
+        ):
+            columns = ", ".join(row)
+            parameters = ", ".join("?" for _ in row)
+            updates = ", ".join(f"{column} = excluded.{column}" for column in row)
+            connection.execute(
+                f"""INSERT INTO {table} ({columns}) VALUES ({parameters})
+                ON CONFLICT({key}) DO UPDATE SET {updates}""",
+                tuple(row.values()),
+            )
     return {}
 
 
@@ -129,13 +136,21 @@ def read_classification(database: Path, scan_id: str) -> dict[str, Any]:
         if row is None:
             return {}
         finding_ids = json.loads(row["finding_ids_json"])
+        has_scan_assessments = (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scan_severity_assessments'"
+            ).fetchone()
+            is not None
+        )
         return {
             "scanId": scan_id,
             "findingIds": finding_ids,
             "assessedAt": row["assessed_at"],
             "rubricSha256": row["rubric_sha256"],
             "knowledgeBaseSha256": row["knowledge_base_sha256"],
-            "assessments": assessments(connection, finding_ids, scan_id),
+            "assessments": assessments(
+                connection, finding_ids, scan_id if has_scan_assessments else None
+            ),
         }
 
 

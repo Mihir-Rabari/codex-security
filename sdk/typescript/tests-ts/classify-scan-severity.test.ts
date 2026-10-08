@@ -20,8 +20,6 @@ import { prepareScanPublication } from "../src/publication.js";
 import { publishScanInternal } from "../src/publish.js";
 import { resolvePluginPython } from "../src/runtime.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
-import { FindingDeduplicator } from "../src/deduplication/deduplication.js";
-import { screeningPairSlot } from "../src/deduplication/deduplication-reviewer.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
@@ -31,7 +29,7 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 const destination = { destination: "linear", teamId: "team-example" } as const;
 afterEach(cleanup);
 
-async function fixture() {
+async function fixture(scanId?: string) {
   const root = await temporaryDirectory();
   const scanDirectory = join(root, "scan");
   await copyCompletedScanFixture(scanDirectory);
@@ -46,6 +44,16 @@ async function fixture() {
   other.identity.instance = "second-instance";
   setFindingIdentity(manifest.scan, other);
   document.findings.push(other);
+  if (scanId) {
+    manifest.scan.id = scanId;
+    document.scanId = scanId;
+    for (const finding of document.findings)
+      setFindingIdentity(manifest.scan, finding);
+    const coveragePath = join(scanDirectory, "coverage.json");
+    const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
+    coverage.scanId = scanId;
+    await writeFile(coveragePath, JSON.stringify(coverage));
+  }
   await writeFile(
     join(scanDirectory, "findings.json"),
     JSON.stringify(document),
@@ -141,7 +149,7 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
     (
       await query(
         environment,
-        "SELECT finding_id FROM scan_finding_severity_assessments",
+        "SELECT finding_id FROM scan_severity_assessments",
       )
     ).map((row) => row["finding_id"]),
   ).toEqual([findings[0]!.findingId]);
@@ -165,7 +173,7 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
   ).toEqual(assessment);
   const rows = await query(
     environment,
-    "SELECT * FROM scan_finding_severity_assessments ORDER BY finding_id",
+    "SELECT * FROM scan_severity_assessments ORDER BY finding_id",
   );
   calls.length = 0;
   expect(
@@ -175,7 +183,7 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
   expect(
     await query(
       environment,
-      "SELECT * FROM scan_finding_severity_assessments ORDER BY finding_id",
+      "SELECT * FROM scan_severity_assessments ORDER BY finding_id",
     ),
   ).toEqual(rows);
 
@@ -190,7 +198,7 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
   expect(revised.assessments[0]!.decision).toBe("excluded");
   const revisedRows = await query(
     environment,
-    "SELECT * FROM scan_finding_severity_assessments ORDER BY finding_id",
+    "SELECT * FROM scan_severity_assessments ORDER BY finding_id",
   );
   expect(revisedRows).toHaveLength(2);
   expect(
@@ -218,9 +226,124 @@ test("checkpoints each finding, resumes missing work, and reprocesses only the s
   expect(
     await query(
       environment,
-      "SELECT * FROM scan_finding_severity_assessments ORDER BY finding_id",
+      "SELECT * FROM scan_severity_assessments ORDER BY finding_id",
     ),
   ).toEqual(revisedRows);
+});
+
+test.each(["same", "different"])(
+  "preserves concurrent scan assessments with %s rubrics",
+  async (rubric) => {
+    const first = await fixture();
+    const second = await fixture("scan_example_002");
+    const environment = first.environment;
+    if (rubric === "different")
+      await writeFile(second.rubricPath, "Exclude administrative findings.");
+    const firstModel = recordingClassifier();
+    const secondModel = recordingClassifier();
+    secondModel.control.excluded = true;
+    const [firstResult, secondResult] = await Promise.all([
+      classifyScanDirectorySeverity(first.scanDirectory, {
+        environment,
+        rubricPath: first.rubricPath,
+        codex: firstModel.codex,
+      }),
+      classifyScanDirectorySeverity(second.scanDirectory, {
+        environment,
+        rubricPath: second.rubricPath,
+        codex: secondModel.codex,
+      }),
+    ]);
+    for (const [scan, result] of [
+      [first, firstResult],
+      [second, secondResult],
+    ] as const) {
+      const { scanId, ...classification } = result;
+      expect(
+        await readScanSeverityClassification(
+          scan.scanDirectory,
+          scanId,
+          scan.findings,
+          undefined,
+          environment,
+        ),
+      ).toEqual(classification);
+    }
+    expect(
+      (
+        await prepareScanPublication(first.scanDirectory, {
+          ...destination,
+          environment,
+        })
+      ).issues.map((issue) => issue.priority),
+    ).toEqual([3, 3]);
+    expect(
+      (
+        await prepareScanPublication(second.scanDirectory, {
+          ...destination,
+          environment,
+        })
+      ).issues,
+    ).toEqual([]);
+    firstModel.calls.length = 0;
+    expect(
+      (
+        await classifyScanDirectorySeverity(first.scanDirectory, {
+          environment,
+          rubricPath: first.rubricPath,
+          codex: firstModel.codex,
+        })
+      ).assessments,
+    ).toEqual(firstResult.assessments);
+    expect(firstModel.calls).toEqual([]);
+  },
+);
+
+test("migration leaves unindexed legacy assessments incomplete until reclassified", async () => {
+  const first = await fixture();
+  const second = await fixture("scan_example_002");
+  const environment = first.environment;
+  const { scanId, ...classification } = await classifyScanDirectorySeverity(
+    first.scanDirectory,
+    { environment },
+  );
+  await query(environment, "DROP TABLE scan_severity_assessments");
+  await query(environment, "DELETE FROM schema_migrations WHERE version = 43");
+  expect(
+    await readScanSeverityClassification(
+      first.scanDirectory,
+      scanId,
+      first.findings,
+      undefined,
+      environment,
+    ),
+  ).toEqual(classification);
+  expect(
+    await query(
+      environment,
+      "SELECT version FROM schema_migrations WHERE version = 43",
+    ),
+  ).toEqual([]);
+  await classifyScanDirectorySeverity(second.scanDirectory, { environment });
+  await expect(
+    readScanSeverityClassification(
+      first.scanDirectory,
+      scanId,
+      first.findings,
+      undefined,
+      environment,
+    ),
+  ).rejects.toThrow("incomplete");
+  expect(
+    (await classifyScanDirectorySeverity(first.scanDirectory, { environment }))
+      .assessments,
+  ).toEqual(classification.assessments);
+  expect(
+    await query(
+      environment,
+      "SELECT version FROM schema_migrations WHERE version = 43",
+    ),
+  ).toEqual([{ version: 43 }]);
 });
 
 test("changed rubric, context, or evidence invalidates matching checkpoints", async () => {
@@ -515,9 +638,13 @@ test("migrates existing databases without changing findings and reads older stat
     environment,
     "SELECT * FROM findings ORDER BY id",
   );
+  await query(environment, "DROP TABLE scan_severity_assessments");
   await query(environment, "DROP TABLE finding_severity_assessments");
   await query(environment, "DROP TABLE scan_severity_classifications");
-  await query(environment, "DELETE FROM schema_migrations WHERE version = 41");
+  await query(
+    environment,
+    "DELETE FROM schema_migrations WHERE version IN (41, 43)",
+  );
   expect(
     (
       await prepareScanPublication(scanDirectory, {
@@ -587,15 +714,12 @@ for (const legacy of [false, true]) {
         .join(", ");
       await query(
         first.environment,
-        `INSERT INTO finding_severity_assessments (${columns}) SELECT ${columns} FROM scan_finding_severity_assessments`,
+        `INSERT OR REPLACE INTO finding_severity_assessments (${columns}) SELECT ${columns} FROM scan_severity_assessments`,
       );
+      await query(first.environment, "DROP TABLE scan_severity_assessments");
       await query(
         first.environment,
-        "DROP TABLE scan_finding_severity_assessments",
-      );
-      await query(
-        first.environment,
-        "DELETE FROM schema_migrations WHERE name = 'scope severity checkpoints to each scan'",
+        "DELETE FROM schema_migrations WHERE name = 'preserve severity assessments per scan'",
       );
       expect(
         (
@@ -623,76 +747,3 @@ for (const legacy of [false, true]) {
     expect(calls).toEqual([]);
   });
 }
-
-test("classifies an in-scan member when dedupe chooses an outside-scan representative", async () => {
-  const scan = await fixture();
-  const current = scan.findings[0]!;
-  const outside = {
-    ...structuredClone(current),
-    findingId: `csf_${"f".repeat(24)}`,
-    severity: { ...current.severity, level: "critical" as const },
-  };
-  const deduper = new FindingDeduplicator(
-    {
-      potentialDuplicates: async (id) => ({
-        finding: scan.findings.find((finding) => finding.findingId === id)!,
-        potentialDuplicates: id === current.findingId ? [outside] : [],
-      }),
-    },
-    {
-      screen: async (findings) => ({
-        decisions: Object.fromEntries(
-          findings
-            .slice(1)
-            .map((_finding, index) => [
-              screeningPairSlot(index),
-              { decision: "SAME" as const, rationale: "One shared control." },
-            ]),
-        ),
-      }),
-      reviewPair: async () => ({
-        decision: "SAME",
-        canonicalFindingId: outside.findingId,
-        mergedFinding: outside,
-        rationale: "One shared control.",
-      }),
-    },
-  );
-  const result = await deduper.run(
-    scan.findings.map((finding) => finding.findingId),
-  );
-  expect(result.uniqueFindingIds).toContain(outside.findingId);
-  const { codex, calls } = recordingClassifier();
-  const options = {
-    environment: scan.environment,
-    rubricPath: scan.rubricPath,
-    codex,
-  };
-  await expect(
-    classifyScanDirectorySeverity(scan.scanDirectory, {
-      ...options,
-      findingIds: result.uniqueFindingIds,
-    }),
-  ).rejects.toThrow("Selected finding IDs must belong to the supplied scan");
-  const scanFindingIds = new Set(
-    scan.findings.map((finding) => finding.findingId),
-  );
-  const selectedIds = result.uniqueFindingIds.map((representative) => {
-    if (scanFindingIds.has(representative)) return representative;
-    return result.duplicateGroups
-      .find((group) => group.includes(representative))!
-      .find((member) => scanFindingIds.has(member))!;
-  });
-  await classifyScanDirectorySeverity(scan.scanDirectory, {
-    ...options,
-    findingIds: selectedIds,
-  });
-  expect(new Set(calls)).toEqual(scanFindingIds);
-  const publication = await prepareScanPublication(scan.scanDirectory, {
-    ...destination,
-    environment: scan.environment,
-  });
-  expect(new Set(publication.issues.map((issue) => issue.findingId))).toEqual(
-    scanFindingIds,
-  );
-});

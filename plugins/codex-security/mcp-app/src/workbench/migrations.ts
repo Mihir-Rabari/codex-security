@@ -403,7 +403,6 @@ export function applyMigrations(
       "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)",
     );
     normalizeHistory(database);
-    moveMigration(database, 42, 43, "scope severity checkpoints to each scan");
     const applied = new Set(
       database
         .prepare("SELECT version FROM schema_migrations")
