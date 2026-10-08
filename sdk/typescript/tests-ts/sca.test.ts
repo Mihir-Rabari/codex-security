@@ -38,7 +38,7 @@ import {
   resolveCodexCommand,
   resolvePluginPython,
   runCodexCommand,
-  type WorkbenchCommandOptions,
+  type runWorkbench,
 } from "../src/runtime.js";
 import { TestClient } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
@@ -272,7 +272,7 @@ process.exit(child.status ?? 1);
     prompt: string;
     evidence: ScaResult;
   }[] = [];
-  const sourceCalls: WorkbenchCommandOptions[] = [];
+  const sourceCalls: Parameters<typeof runWorkbench>[0][] = [];
   const pythonResolutions: Parameters<typeof resolvePluginPython>[0][] = [];
   const selectedUserHome = join(root, "selected-user-home");
   const environment = {
@@ -336,7 +336,7 @@ process.exit(child.status ?? 1);
       ...(options.workbenchSnapshot
         ? {
             runWorkbench: async (
-              workbenchOptions: WorkbenchCommandOptions,
+              workbenchOptions: Parameters<typeof runWorkbench>[0],
               args: readonly string[],
               input?: string,
             ) => {
