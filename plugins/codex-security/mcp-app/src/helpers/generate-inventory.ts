@@ -1,5 +1,6 @@
 import {
   environmentValue,
+  normalizePath,
   resolvedPathText as canonical,
 } from "./helper-files";
 import { randomBytes } from "node:crypto";
@@ -70,7 +71,7 @@ function scopePath(
   explicit: boolean,
   rejectLinks: boolean,
 ): string {
-  const requested = explicit ? scope : expandHome(scope, home);
+  const requested = normalizePath(explicit ? scope : expandHome(scope, home));
   rejectStreams(requested);
   const requestedRoot = parse(requested).root;
   const path = windows
@@ -335,7 +336,7 @@ export async function generateInventory(
     if (
       inventory &&
       ![".", "./"].includes(
-        isAbsolute(scope)
+        isAbsolute(expandHome(scope, home))
           ? inside(repo, scopePath(repo, scope, home, false, false))
           : scope,
       )

@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -381,7 +382,11 @@ test("scope inventory rejects symbolic-link components before lexical parent tra
   f.write("src/source");
   symlinkSync(join(f.repo, "src"), join(f.repo, "alias"), "junction");
   const scopes = join(f.root, "scopes.json");
-  for (const scope of ["alias/source", "alias/../src/source"]) {
+  for (const scope of [
+    "alias/source",
+    "alias/../src/source",
+    `${f.root}${sep}.${sep}repository${sep}alias${sep}..${sep}src${sep}source`,
+  ]) {
     writeFileSync(scopes, JSON.stringify([scope]));
     const result = f.run("make-repo-scope-input", ["--scopes-file", scopes]);
     expect(result.status).toBe(1);
@@ -857,4 +862,77 @@ test("preview trimming handles a full sample of leading blank lines", () => {
   const f = fixture();
   f.write("source.py", "\n".repeat(64_000) + "kept\n");
   expect(f.rows()[0]!.preview).toBe("kept");
+});
+
+for (const command of ["make-repo-rank-input", "make-repo-scope-input"])
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    `${command} reports unreadable tracked directories without replacing output`,
+    () => {
+      const f = fixture();
+      f.write("private/source.py");
+      git(f.repo, "add", ".");
+      const scopes = join(f.root, "scopes.json");
+      writeFileSync(scopes, JSON.stringify(["."]));
+      writeFileSync(f.out, "previous\n");
+      const directory = join(f.repo, "private");
+      chmodSync(directory, 0);
+      try {
+        const result = f.run(command, ["--scopes-file", scopes]);
+        expect(result.status).toBe(1);
+        expect(result.stderr).toMatch(/EACCES|permission denied/iu);
+        expect(readFileSync(f.out, "utf8")).toBe("previous\n");
+      } finally {
+        chmodSync(directory, 0o700);
+      }
+    },
+  );
+
+test("inventory skips stale tracked entries after deletion and directory replacement", () => {
+  const f = fixture();
+  f.write("deleted.py");
+  f.write("replaced/source.py");
+  git(f.repo, "add", ".");
+  rmSync(join(f.repo, "deleted.py"));
+  rmSync(join(f.repo, "replaced"), { recursive: true });
+  f.write("replaced");
+  expect(f.rows().map((row) => row.path)).toEqual(["replaced"]);
+});
+
+test("absolute explicit scopes ignore dot and empty components before the repo", () => {
+  const f = fixture();
+  f.write("src/source.py");
+  const scopes = join(f.root, "scopes.json");
+  writeFileSync(
+    scopes,
+    JSON.stringify([
+      `${f.root}${sep}.${sep}repository${sep}src${sep}source.py`,
+      `${f.root}${sep}${sep}repository${sep}src${sep}source.py`,
+    ]),
+  );
+  expect(
+    f
+      .rows("make-repo-scope-input", ["--scopes-file", scopes])
+      .map((row) => row.path),
+  ).toEqual(["src/source.py"]);
+});
+
+test("diff inventory expands a home-relative repository scope", () => {
+  const f = fixture();
+  f.write("source.py", "before\n");
+  const base = f.commit();
+  f.write("source.py", "after\n");
+  const result = f.run(
+    "generate-in-scope-files",
+    [
+      "--scope",
+      "~/repository",
+      "--diff-base",
+      base,
+      "--diff-mode",
+      "local-patch",
+    ],
+    { ...process.env, HOME: f.root, USERPROFILE: f.root },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  expect(readFileSync(f.out, "utf8")).toBe("source.py\n");
 });

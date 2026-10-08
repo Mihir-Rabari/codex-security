@@ -322,8 +322,10 @@ export async function directoryPaths(
     try {
       if (linkedParent(target, path)) continue;
       lstat(path);
-    } catch {
-      continue;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") continue;
+      throw error;
     }
     found.add(path);
     if (directory(path) && !lstat(path).isSymbolicLink()) {
