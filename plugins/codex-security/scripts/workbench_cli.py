@@ -372,13 +372,7 @@ def parse_args(description: str) -> argparse.Namespace:
     export_findings.add_argument("--format", choices=(*EXPORT_FORMATS, "md"))
     export_findings.add_argument("--validate-only", action="store_true")
 
-    for command in (
-        "inspect-linear-publication",
-        "prepare-linear-publication",
-        "record-linear-publications",
-    ):
-        publication = subparsers.add_parser(command)
-        publication.add_argument("--input-file", required=True)
+    subparsers.add_parser("finding-issues")
 
     subparsers.add_parser("database-info")
     subparsers.add_parser("finding-workflow")

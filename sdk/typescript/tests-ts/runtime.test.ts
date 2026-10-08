@@ -2349,7 +2349,7 @@ ${directNode ? "}" : ""}
         ),
         "utf8",
       ),
-    ).toContain('"inspect-linear-publication"');
+    ).toContain('"finding-issues"');
   });
 
   test("rejects plugin installs without the selected path and version", async () => {

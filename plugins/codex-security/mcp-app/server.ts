@@ -24,6 +24,7 @@ import {
   type HandoffWorkspaceState as WorkspaceState,
 } from "./src/server/handoff-tools.js";
 import { registerCompactArtifactTools } from "./src/server/compact-artifact-tools.js";
+import { registerFindingIssueTools } from "./src/server/finding-issue-tools.js";
 import { createScanArtifactContext } from "./src/artifact-context.js";
 import { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.js";
 import {
@@ -2035,6 +2036,7 @@ export function createCodexSecurityServer(): McpServer {
       ),
   );
 
+  registerFindingIssueTools(server, runWorkbench);
   registerCompactArtifactTools(server, {
     runWorkbench,
     pluginRoot: PLUGIN_ROOT,
@@ -2461,7 +2463,15 @@ async function executeWorkbenchWithStateSelection(
         undefined,
         input,
       );
-      persistentWorkbenchStateSucceeded = true;
+      // A lookup without a database must not pin the store; existing history must.
+      if (
+        args[0] !== "finding-issues" ||
+        input === undefined ||
+        JSON.parse(input.toString()).action !== "inspect" ||
+        result.storeExists !== false
+      ) {
+        persistentWorkbenchStateSucceeded = true;
+      }
       return result;
     } catch (error) {
       if (!isUnwritableSqliteOpenError(error)) throw error;

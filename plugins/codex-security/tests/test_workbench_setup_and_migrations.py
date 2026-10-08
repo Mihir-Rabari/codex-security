@@ -82,6 +82,7 @@ EXPECTED_MIGRATIONS = [
     (40, "index finding identity and comparison history"),
     (41, "checkpoint finding severity assessments"),
     (42, "editable scan names"),
+    (43, "share finding issue receipts across trackers"),
 ]
 
 
@@ -617,7 +618,9 @@ def test_workbench_serializes_concurrent_migrations(tmp_path: Path, upgrade: boo
         {"databasePath": str(state_dir / "workbench.sqlite3")},
     ]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (42,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (
+            len(SCHEMA.MIGRATIONS),
+        )
 
 
 def test_workbench_retries_writer_admission_and_legacy_backfill(tmp_path: Path) -> None:
@@ -1031,7 +1034,7 @@ def test_workbench_reconciles_monorepo_migration_lineage() -> None:
     ]
     assert (
         connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'finding_publications'"
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'finding_issue_receipts'"
         ).fetchone()
         is not None
     )
@@ -1039,13 +1042,10 @@ def test_workbench_reconciles_monorepo_migration_lineage() -> None:
         row[0]
         for row in connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'index' "
-            "AND tbl_name = 'finding_publications'"
+            "AND tbl_name = 'finding_issue_receipts'"
         )
     } >= {
-        "finding_publications_by_scan",
-        "finding_publications_by_finding",
-        "finding_publications_team_only_occurrence",
-        "finding_publications_team_only_external_issue",
+        "finding_issue_receipts_by_finding",
     }
     assert [
         row["name"]
@@ -1169,7 +1169,9 @@ def test_workbench_upgrades_preexisting_database(tmp_path: Path) -> None:
         connection.execute("ALTER TABLE scans DROP COLUMN handoff_claim_token")
     run_workbench(state_dir, "database-info")
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (42,)
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (
+            len(SCHEMA.MIGRATIONS),
+        )
         assert {row[1] for row in connection.execute("PRAGMA table_info(scans)")} >= {
             "handoff_claimed_at",
             "handoff_claim_token",

@@ -385,6 +385,117 @@ async function testWorkbenchStateFallback() {
       await inspectionFirstServer.stop();
     }
 
+    const scanDirectory = path.join(pluginRoot, "examples", "completed-scan");
+    const { findingId, occurrenceId } = JSON.parse(
+      await readFile(path.join(scanDirectory, "findings.json"), "utf8"),
+    ).findings[0];
+    const issueInput = {
+      scanDirectory,
+      destination: { type: "linear", teamId: "example-team" },
+    };
+    const issueReceipt = {
+      findingId,
+      occurrenceId,
+      issueIdentifier: "APP-1",
+      operation: "create",
+    };
+    for (const existingStore of ["missing", "empty", "populated"]) {
+      await writeFile(invocationLog, "");
+      const issueScanRoot = path.join(
+        fixtureRoot,
+        `issue-${existingStore}-scans`,
+      );
+      const issueHome = path.join(fixtureRoot, `issue-${existingStore}-home`);
+      const issueState = path.join(
+        issueHome,
+        "state",
+        "plugins",
+        "codex-security",
+      );
+      const receipts = existingStore === "populated" ? [issueReceipt] : [];
+      if (existingStore !== "missing") {
+        execFileSync(
+          realPython,
+          [
+            path.join(pluginRoot, "scripts", "workbench_db.py"),
+            "finding-issues",
+          ],
+          {
+            env: { ...process.env, CODEX_SECURITY_STATE_DIR: issueState },
+            input: JSON.stringify({
+              ...issueInput,
+              action: "record",
+              receipts,
+            }),
+          },
+        );
+      }
+      const issueServer = startServer(serverBundlePath, {
+        CODEX_HOME: issueHome,
+        CODEX_SECURITY_SCAN_ROOT: issueScanRoot,
+        CODEX_SECURITY_STATE_DIR: undefined,
+        FAKE_PYTHON_ALWAYS_FAIL: undefined,
+        FAKE_PYTHON_FAILURE:
+          "sqlite3.OperationalError: unable to open database file",
+        FAKE_PYTHON_LOG: invocationLog,
+        FAKE_PYTHON_PERSISTENT_SUCCESSES: "1",
+        FAKE_REAL_PYTHON: realPython,
+        PYTHON: fakePythonPath,
+      });
+      try {
+        await initialize(issueServer, 1);
+        const inspected = await issueServer.request(2, "tools/call", {
+          name: "get_codex_security_finding_issues",
+          arguments: issueInput,
+        });
+        assertNoError(inspected);
+        assert.equal(
+          inspected.result.structuredContent.storeExists,
+          existingStore !== "missing",
+        );
+        assert.equal(
+          inspected.result.structuredContent.receipts.length,
+          receipts.length,
+        );
+        const recorded = await issueServer.request(3, "tools/call", {
+          name: "record_codex_security_finding_issues",
+          arguments: { ...issueInput, receipts: [issueReceipt] },
+        });
+        const fallbackStateDir = path.join(issueScanRoot, "workbench-state");
+        if (existingStore === "missing") {
+          assertNoError(recorded);
+          const saved = await issueServer.request(4, "tools/call", {
+            name: "get_codex_security_finding_issues",
+            arguments: issueInput,
+          });
+          assertNoError(saved);
+          assert.equal(
+            saved.result.structuredContent.receipts[0].issueIdentifier,
+            "APP-1",
+          );
+          assert.deepEqual(
+            (await readJsonLines(invocationLog)).map((entry) => entry.stateDir),
+            [null, null, fallbackStateDir, fallbackStateDir],
+          );
+        } else {
+          assertToolError(recorded, /unable to open database file/);
+          assert.deepEqual(
+            (await readJsonLines(invocationLog)).map((entry) => entry.stateDir),
+            [null, null],
+          );
+          assert.equal(await pathExists(fallbackStateDir), false);
+        }
+        assert.equal(
+          issueServer
+            .stderrEvents()
+            .filter((event) => event.event === "state_fallback_pinned").length,
+          existingStore === "missing" ? 1 : 0,
+        );
+      } finally {
+        await issueServer.stop();
+      }
+    }
+
     await writeFile(invocationLog, "");
     const provenScanRoot = path.join(fixtureRoot, "proven-scans");
     const provenServer = startServer(serverBundlePath, {

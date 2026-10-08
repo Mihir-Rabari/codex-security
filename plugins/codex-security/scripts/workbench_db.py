@@ -3266,8 +3266,8 @@ def main() -> None:
         result = severity.read_classification(database_path(), args.scan_id)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
-    if args.command == "inspect-linear-publication":
-        result = publication.inspect_linear_publication(_WORKBENCH_PUBLICATION_CONTEXT, args)
+    if args.command == "finding-issues":
+        result = publication.finding_issues(_WORKBENCH_PUBLICATION_CONTEXT, json.load(sys.stdin))
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     with closing(
@@ -3419,14 +3419,6 @@ def main() -> None:
             )
         elif args.command == "set-finding-remediation":
             result = set_finding_remediation(connection, args)
-        elif args.command == "prepare-linear-publication":
-            result = publication.prepare_linear_publication(
-                _WORKBENCH_PUBLICATION_CONTEXT, connection, args
-            )
-        elif args.command == "record-linear-publications":
-            result = publication.record_linear_publications(
-                _WORKBENCH_PUBLICATION_CONTEXT, connection, args
-            )
         elif args.command == "export-findings":
             result = publication.export_findings(_WORKBENCH_PUBLICATION_CONTEXT, connection, args)
         elif args.command == "database-info":
