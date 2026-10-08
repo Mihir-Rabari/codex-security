@@ -120,12 +120,42 @@ export async function recordCodexSecurityScanDraft(
       "scan draft: terminal Deep drafts cannot resolve child deferred work.",
     );
   }
+  let submitted: ScanDraftInput | undefined;
   for (;;) {
     const candidates = await readDiffCandidates(context);
+    if (submitted === undefined) {
+      // Bind authored proof gaps once; publication retries may observe a newer phase.
+      const ledger = new Map(
+        candidates?.map((candidate) => [
+          candidateKey(candidate.candidate_id)!,
+          candidate,
+        ]),
+      );
+      const findingKeys = new Set(
+        parsed.findings.map((finding) => findingCandidateKey(finding)),
+      );
+      submitted = {
+        ...parsed,
+        coverage: {
+          ...parsed.coverage,
+          deferred: (parsed.coverage.deferred as JsonObject[]).map(
+            (pending) => {
+              const key = coverageCandidateKey(pending);
+              const candidate = ledger.get(key ?? "");
+              return pending.candidate === undefined &&
+                candidate &&
+                !findingKeys.has(key)
+                ? { ...pending, candidate: structuredClone(candidate) }
+                : pending;
+            },
+          ),
+        },
+      };
+    }
     const checkpoint = preserveUnresolvedDiffCandidates(
-      preserveDiffCandidateDecisions(parsed, candidates),
+      preserveDiffCandidateDecisions(submitted, candidates),
       candidates,
-      parsed,
+      submitted,
     );
     if (!publishDraft && resolvedDeferred(checkpoint.coverage).length === 0)
       await saveScanDraftCheckpoint(context, checkpoint, false);
@@ -135,16 +165,16 @@ export async function recordCodexSecurityScanDraft(
       ? await preserveDeepThreatModel(context, checkpoint)
       : await preserveScanDraft(
           context,
-          { ...parsed, findings: checkpoint.findings },
-          !publishDraft && resolvedDeferred(parsed.coverage).length > 0,
+          { ...submitted, findings: checkpoint.findings },
+          !publishDraft && resolvedDeferred(submitted.coverage).length > 0,
           scanDraftCheckpointName(checkpoint),
           candidates,
-          parsed.findings,
+          submitted.findings,
         );
     const reconciled = preserveUnresolvedDiffCandidates(
       preserved.input,
       candidates,
-      parsed,
+      submitted,
     );
     if (!publishDraft) await saveScanDraftCheckpoint(context, reconciled);
     const contract = requireObject(

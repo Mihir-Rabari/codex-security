@@ -3926,3 +3926,45 @@ for (const initial of ["suppressed", "not_applicable"] as const) {
     });
   }
 }
+
+test("authored Diff proof gap keeps its original phase through a publication conflict", async (t) => {
+  const original = candidate("conflicting-proof", "suppressed");
+  const context = await fixture(t, [original]);
+  const input = draft([
+    {
+      candidateId: original.candidate_id,
+      reason: "New proof requires review.",
+    },
+  ]);
+  input.coverage.completeness = "partial";
+  const next = {
+    ...original,
+    validation: {
+      disposition: "not_applicable",
+      evidence: "A concurrent validation resolved the proof gap.",
+    },
+  };
+  let attempts = 0;
+  const result = await recordCodexSecurityScanDraft(
+    context,
+    input,
+    async (published: FixtureObject) => {
+      attempts++;
+      if (attempts === 1) {
+        assert.deepEqual(published.coverage.deferred[0].candidate, original);
+        await writeLedger(context, [next]);
+        throw Object.assign(new Error("Synthetic concurrent publication"), {
+          code: "scan_draft_conflict",
+        });
+      }
+      assert.equal(published.coverage.deferred.length, 0);
+      assert.equal(
+        published.coverage.surfaces[0].disposition,
+        "not_applicable",
+      );
+    },
+  );
+  assert.equal(attempts, 2);
+  assert.equal(result.coverage.deferred.length, 0);
+  assert.equal(input.coverage.deferred[0].candidate, undefined);
+});
