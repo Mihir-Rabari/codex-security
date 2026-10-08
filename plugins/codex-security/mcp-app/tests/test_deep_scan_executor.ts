@@ -1960,7 +1960,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             assert.equal(
               preflight.cwd,
-              workerDirectories[workerConfigurations.indexOf(selectedProvider)],
+              await realpath(
+                workerDirectories[
+                  workerConfigurations.indexOf(selectedProvider)
+                ],
+              ),
             );
             assert.deepEqual(
               preflight.providerHeaders,
