@@ -1341,7 +1341,8 @@ async function testWorkerRuntimeSettings() {
       await mkdir(codexHome);
       await writeFile(
         path.join(codexHome, "config.toml"),
-        `model = "fixture-inherited-model"
+        `openai_base_url = "https://ambient.example.test/v1"
+model = "fixture-inherited-model"
 model_reasoning_effort = "medium"
 model_provider = "synthetic"
 [model_providers.synthetic]
@@ -1373,6 +1374,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             string,
             Record<string, unknown>
           >;
+          const endpoint =
+            index === 1
+              ? undefined
+              : `https://synthetic-user:synthetic-password@worker-${index}.example.test/v1?token=synthetic-${index}-token`;
           const serviceTier =
             index === 0 ? undefined : index === 3 ? "flex" : "fast";
           const instructionsFile =
@@ -1462,6 +1467,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                     SYNTHETIC_GATEWAY_KEY: providerKeys[index],
                     SYNTHETIC_HEADER_VALUE: providerHeaders[index],
                   },
+            endpoint,
             serviceTier,
             instructionsFile,
             verbosity,
@@ -1501,8 +1507,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             writeFile(
               entry.deepPath,
               stringifyToml({
-                worker_runtime:
-                  entry.provider === undefined
+                worker_runtime: {
+                  ...(entry.endpoint === undefined
+                    ? {}
+                    : { openai_base_url: entry.endpoint }),
+                  ...(entry.provider === undefined
                     ? {}
                     : {
                         model_instructions_file: entry.instructionsFile,
@@ -1516,7 +1525,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                         environment: entry.environment,
                         windows: { sandbox: entry.windowsSandbox },
                         features: entry.features,
-                      },
+                      }),
+                },
               }),
             ),
             ...(entry.profilePath === undefined
@@ -1707,6 +1717,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.equal(process.env.SYNTHETIC_GATEWAY_KEY, undefined);
             assert.equal(process.env.SYNTHETIC_HEADER_VALUE, undefined);
             assertConfigOverrides(invocation.argv, {
+              openai_base_url: workerConfigurations[index].endpoint,
               model_reasoning_summary: expected,
               service_tier: workerConfigurations[index].serviceTier,
               model_instructions_file:
@@ -1853,6 +1864,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               selectedProvider.environment?.SYNTHETIC_HEADER_VALUE,
             );
             assertConfigOverrides(preflight.argv, {
+              openai_base_url: selectedProvider.endpoint,
               model_instructions_file: selectedProvider.instructionsFile,
               model_verbosity: selectedProvider.verbosity,
               model_context_window: selectedProvider.modelContextWindow,
@@ -1937,7 +1949,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ),
                 writeFile(
                   entry.deepPath,
-                  '[worker_runtime.features]\nshell_tool = true\nunified_exec = true\nview_image = true\n[worker_runtime]\nweb_search = "live"\nmodel_provider = "changed"\nnative_profile = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\nmodel_context_window = 999000\nmodel_auto_compact_token_limit = 888000\n[worker_runtime.windows]\nsandbox = "changed"\n[worker_runtime.environment]\nSYNTHETIC_GATEWAY_KEY = "changed"\nSYNTHETIC_HEADER_VALUE = "changed"\n',
+                  '[worker_runtime.features]\nshell_tool = true\nunified_exec = true\nview_image = true\n[worker_runtime]\nopenai_base_url = "https://changed-snapshot.example.test/v1"\nweb_search = "live"\nmodel_provider = "changed"\nnative_profile = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\nmodel_context_window = 999000\nmodel_auto_compact_token_limit = 888000\n[worker_runtime.windows]\nsandbox = "changed"\n[worker_runtime.environment]\nSYNTHETIC_GATEWAY_KEY = "changed"\nSYNTHETIC_HEADER_VALUE = "changed"\n',
                 ),
               ]),
             ),
