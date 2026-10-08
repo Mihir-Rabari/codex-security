@@ -945,7 +945,7 @@ with ExitStack() as stack:
             def parent(database, scan_id):
                 events.append(["parent", database.in_transaction])
                 return {"target_id": "requested", "repository_generation": "other" if case == "parent-refused" else "current"}
-            def archive_scan(database, *args):
+            def archive_scan(database, *args, **kwargs):
                 events.append(["archive", database.in_transaction])
                 raise ReadyToInsert()
             with ExitStack() as mocks:
@@ -965,7 +965,7 @@ with ExitStack() as stack:
                 mocks.enter_context(patch.object(Path, "iterdir", entries))
                 try:
                     workbench.register_cli_scan(connection, argparse.Namespace(
-                        repository=str(target), scan_dir=str(scan_dir), recipe_json="{}", parent_scan_id="parent", registration_json_stdin=False, recipe_json_stdin=False,
+                        repository=str(target), scan_dir=str(scan_dir), recipe_json="{}", parent_scan_id="parent", registration_json_stdin=False, recipe_json_stdin=False, archive_existing=False, archived_scan_dir=None,
                     ))
                 except ReadyToInsert:
                     accepted = True
