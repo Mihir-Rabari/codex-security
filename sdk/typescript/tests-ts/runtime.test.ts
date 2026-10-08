@@ -41,7 +41,6 @@ import { createInterface } from "node:readline";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import { build } from "esbuild";
@@ -94,7 +93,7 @@ import {
   streamWindowsCredentialAclDescriptors,
 } from "../src/runtime.js";
 import { inspectTrustedExecutable } from "../src/trusted-executable.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import {
   lowerUuid7Turn,
@@ -148,6 +147,20 @@ function windowsTestCommand(
     },
   );
 }
+
+function windowsUserSid() {
+  const identity = windowsTestCommand("whoami.exe", [
+    "/user",
+    "/fo",
+    "csv",
+    "/nh",
+  ]);
+  expect(identity.status).toBe(0);
+  const sid = /"(S-1-(?:\d+-)*\d+)"\s*$/u.exec(identity.stdout)?.[1];
+  expect(sid).toBeDefined();
+  return sid;
+}
+
 function inspectWindowsTestAcl(
   statements: string[],
   environment: NodeJS.ProcessEnv,
@@ -342,12 +355,7 @@ describe("plugin runtime preparation", () => {
   });
 
   test("derives distinct finding identities from canonical candidate IDs", async () => {
-    const parts = await Promise.all(
-      ["000", "001"].map((part) =>
-        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
-      ),
-    );
-    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
+    const runtime = await loadBundledRuntime();
     const source =
       /function buildFindings\(findings, mode\) \{[\s\S]*?\n\}/u.exec(
         runtime,
@@ -4645,15 +4653,7 @@ describe("runtime directories and plugin Python boundary", () => {
       const root = await temporaryDirectory();
       const state = join(root, "state");
       await mkdir(state);
-      const user = windowsTestCommand("whoami.exe", [
-        "/user",
-        "/fo",
-        "csv",
-        "/nh",
-      ]);
-      expect(user.status).toBe(0);
-      const sid = /"(S-1-(?:\d+-)*\d+)"\s*$/u.exec(user.stdout)?.[1];
-      expect(sid).toBeDefined();
+      const sid = windowsUserSid();
       const configured = windowsTestCommand("icacls.exe", [
         state,
         "/inheritance:r",
@@ -4780,15 +4780,7 @@ describe("runtime directories and plugin Python boundary", () => {
       const root = await temporaryDirectory();
       const state = join(root, "state");
       await mkdir(state);
-      const identity = windowsTestCommand("whoami.exe", [
-        "/user",
-        "/fo",
-        "csv",
-        "/nh",
-      ]);
-      expect(identity.status).toBe(0);
-      const sid = /"(S-1-(?:\d+-)*\d+)"\s*$/u.exec(identity.stdout)?.[1];
-      expect(sid).toBeDefined();
+      const sid = windowsUserSid();
       for (const ancestor of [root, state]) {
         const owned = windowsTestCommand("icacls.exe", [
           ancestor,
@@ -4840,15 +4832,7 @@ describe("runtime directories and plugin Python boundary", () => {
       await writeFile(auth, '{"token":"synthetic-root"}\n');
       await writeFile(nestedAuth, '{"token":"synthetic-nested"}\n');
 
-      const identity = windowsTestCommand("whoami.exe", [
-        "/user",
-        "/fo",
-        "csv",
-        "/nh",
-      ]);
-      expect(identity.status).toBe(0);
-      const sid = /"(S-1-(?:\d+-)*\d+)"\s*$/u.exec(identity.stdout)?.[1];
-      expect(sid).toBeDefined();
+      const sid = windowsUserSid();
 
       for (const credential of [auth, nestedAuth]) {
         const unsafe = windowsTestCommand("icacls.exe", [
