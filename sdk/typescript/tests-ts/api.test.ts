@@ -18,7 +18,7 @@ import * as fsPromises from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import * as childProcess from "node:child_process";
 import { hash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, writeSync } from "node:fs";
 import { basename, delimiter, dirname, join, relative, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -27,7 +27,14 @@ import {
   type ThreadEvent,
   type ThreadOptions,
 } from "@openai/codex-sdk";
-import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
+import {
+  afterEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test as bunTest,
+} from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import {
   AuthenticationRequiredError,
@@ -99,6 +106,37 @@ const REPOSITORY_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
+
+// Temporary Windows diagnostics identify the active test when the shard stalls.
+const test = process.platform === "win32" ? traceApiTests(bunTest) : bunTest;
+
+function traceApiTests<T extends (...args: never[]) => unknown>(
+  registration: T,
+): T {
+  return new Proxy(registration, {
+    apply(target, receiver, args) {
+      const callbackIndex = args.findIndex(
+        (value) => typeof value === "function",
+      );
+      if (callbackIndex === -1) return Reflect.apply(target, receiver, args);
+      const traced = [...args];
+      const callback = args[callbackIndex];
+      const wrapper = function (this: unknown, ...callbackArgs: unknown[]) {
+        writeSync(2, `[api-test-start] ${String(args[0])}\n`);
+        return Reflect.apply(callback, this, callbackArgs);
+      };
+      Object.defineProperty(wrapper, "length", { value: callback.length });
+      traced[callbackIndex] = wrapper;
+      return Reflect.apply(target, receiver, traced);
+    },
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (property !== "each" && property !== "skipIf") return value;
+      return (...args: unknown[]) =>
+        traceApiTests(Reflect.apply(value, target, args));
+    },
+  });
+}
 
 function localClient(
   config: ConstructorParameters<typeof TestClient>[0] = {},
@@ -3672,6 +3710,8 @@ describe("CodexSecurity orchestration", () => {
   test.each(["EACCES", "EPERM", "EMFILE"])(
     "retries session logs and limits repeated %s diagnostics appropriately",
     async (code) => {
+      if (process.platform === "win32")
+        writeSync(2, `[api-log-retry] ${code}\n`);
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const sessions = join(codexHome, "sessions");
       await mkdir(sessions);
