@@ -55,6 +55,7 @@ type Scenario = readonly [
   ids: readonly [string, string],
   paths?: FixturePaths,
   recoveryOnly?: boolean,
+  reducerLabels?: readonly [string, string],
 ];
 type PublicationFixture = Awaited<ReturnType<typeof createFixture>>;
 
@@ -179,6 +180,22 @@ const scenarios: Scenario[] = [
   ["decreasing timestamps", [2, 1], [lowId, highId]],
   ["equal timestamps and ascending UUIDs", [1, 1], [lowId, highId]],
   [
+    "legacy reducer label",
+    [1, 1],
+    [highId, lowId],
+    undefined,
+    false,
+    ["dedup-0002-legacy", "dedup-0001"],
+  ],
+  [
+    "large reducer sequence",
+    [1, 1],
+    [highId, lowId],
+    undefined,
+    false,
+    ["dedup-9007199254740992", "dedup-9007199254740993"],
+  ],
+  [
     "scan root collision, live publication",
     [1, 1],
     [highId, lowId],
@@ -205,7 +222,14 @@ const scenarios: Scenario[] = [
     true,
   ],
 ];
-for (const [label, offsets, ids, paths, recoveryOnly] of scenarios) {
+for (const [
+  label,
+  offsets,
+  ids,
+  paths,
+  recoveryOnly,
+  reducerLabels,
+] of scenarios) {
   test(`selected reducer survives recovery and public completion: ${label}`, async (t) => {
     const fixture = await createFixture(t, paths);
     const { run, store, call, runWorkbench, instant } = fixture;
@@ -223,7 +247,7 @@ for (const [label, offsets, ids, paths, recoveryOnly] of scenarios) {
     });
     assert.equal(claimed.run.coordinatorGeneration, 2);
     assert.equal(claimed.run.config.stopAfterNoNew, 4);
-    const results = await commitReducers(fixture, offsets, ids);
+    const results = await commitReducers(fixture, offsets, ids, reducerLabels);
     const persisted = await store.get(run.scanId, owner);
     assert.equal(persisted.noNewStreak, 4);
     assert.ok(persisted.persistedWorkers);
@@ -298,7 +322,10 @@ for (const [label, offsets, ids, paths, recoveryOnly] of scenarios) {
     );
     const sealed = await snapshot(run);
     const manifest = JSON.parse(sealed.files["scan-manifest.json"]);
-    assert.equal(manifest.scan.threatModel.summary, "dedup-0002");
+    assert.equal(
+      manifest.scan.threatModel.summary,
+      reducerLabels?.[1] ?? "dedup-0002",
+    );
     assert.ok(manifest.scan.sealedAt);
     assert.deepEqual(JSON.parse(sealed.files["findings.json"]).findings, []);
     assert.deepEqual(JSON.parse(sealed.files["coverage.json"]).deferred, []);
@@ -642,6 +669,7 @@ async function commitReducers(
   fixture: PublicationFixture,
   offsets: readonly [number, number],
   ids: readonly [string, string],
+  reducerLabels?: readonly [string, string],
 ) {
   const { run, store } = fixture;
   const results = [];
@@ -672,7 +700,8 @@ async function commitReducers(
       });
       workerIds.push(id);
     }
-    const label = `dedup-${String(batch + 1).padStart(4, "0")}`;
+    const label =
+      reducerLabels?.[batch] ?? `dedup-${String(batch + 1).padStart(4, "0")}`;
     const artifact = await workerArtifact(run, "dedup", label);
     const id = ids[batch];
     await store.claimDedup({ id, scanId: run.scanId, workerIds, ...artifact });

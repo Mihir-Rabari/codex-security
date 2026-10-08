@@ -2425,7 +2425,7 @@ def _require_current_deep_publication(
 
     # Match the durable reducer sequence used by coordinator recovery.
     def reducer_order(worker: Any) -> tuple[int, str]:
-        match = re.search(r"dedup-(\d+)", Path(worker["prompt_path"]).parent.name)
+        match = re.fullmatch(r"dedup-([0-9]+)", Path(worker["prompt_path"]).parent.name)
         return (int(match[1]) if match else 0, worker["id"])
 
     reducer = max(
