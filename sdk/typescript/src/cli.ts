@@ -1326,6 +1326,14 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
       protectedRoot =
         (await gitMarkerRoot(protectedRoot, signal, "outermost")) ??
         protectedRoot;
+    }
+    const python = await resolvePluginPython({
+      configuredPath: pythonPath,
+      environment,
+      signal,
+      protectedRoot,
+    });
+    if (protectedRoot !== undefined) {
       const git = await inspectTrustedExecutable(
         "git",
         environment,
@@ -1335,12 +1343,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     }
     return await runWorkbench(
       {
-        python: await resolvePluginPython({
-          configuredPath: pythonPath,
-          environment,
-          signal,
-          protectedRoot,
-        }),
+        python,
         pluginRoot: await bundledPluginRoot(),
         environment,
         signal,

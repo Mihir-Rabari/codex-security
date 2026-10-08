@@ -1,5 +1,12 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import {
+  copyFile,
+  mkdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { delimiter, join } from "node:path";
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { CodexSecurity } from "../src/api.js";
@@ -17,6 +24,7 @@ import { createCliTest } from "./support/cli-run.js";
 import { throwing } from "./support/errors.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
+import { execNodePython } from "./support/python-probe.js";
 
 describe("CLI scan validation preflight", () => {
   test.each([
@@ -277,11 +285,11 @@ for (const changed of ["unchanged", "content", "head"] as const)
     }
   });
 
-test("empty scan validation preserves configured Git ignore rules", async () => {
+test("empty scan validation preserves configured Python and Git ignore rules", async () => {
   if (
     runTestInSubprocess(
       import.meta.path,
-      "empty scan validation preserves configured Git ignore rules",
+      "empty scan validation preserves configured Python and Git ignore rules",
     )
   )
     return;
@@ -293,6 +301,7 @@ test("empty scan validation preserves configured Git ignore rules", async () => 
   const overrides = {
     GIT_CONFIG_GLOBAL: globalConfig,
     CODEX_SECURITY_STATE_DIR: join(root, "state"),
+    PATH: process.env["PATH"] ?? "",
   };
   const previous = Object.fromEntries(
     Object.keys(overrides).map((name) => [name, process.env[name]]),
@@ -323,6 +332,27 @@ test("empty scan validation preserves configured Git ignore rules", async () => 
       environment: process.env,
       protectedRoot: repository,
     });
+    const pythonHome = join(root, "python-runtime");
+    execNodePython(
+      python,
+      ["-m", "venv", "--without-pip", "--system-site-packages", pythonHome],
+      process.env,
+    );
+    const hostBin = join(
+      pythonHome,
+      process.platform === "win32" ? "Scripts" : "bin",
+    );
+    const suffix = process.platform === "win32" ? ".exe" : "";
+    const barePython = "selected-python";
+    await copyFile(
+      join(hostBin, `python${suffix}`),
+      join(hostBin, `${barePython}${suffix}`),
+    );
+    const repositoryGit = join(repository, `git${suffix}`);
+    await writeFile(repositoryGit, "Synthetic repository-controlled Git.", {
+      mode: 0o700,
+    });
+    await symlink(repositoryGit, join(hostBin, `git${suffix}`), "file");
     const registered = await runWorkbench(
       { python, pluginRoot: PLUGIN_ROOT, environment: process.env },
       [
@@ -346,32 +376,43 @@ test("empty scan validation preserves configured Git ignore rules", async () => 
       result,
     );
     try {
-      const outcomes = [];
-      for (const changed of [false, true]) {
-        if (changed) await writeFile(source, "export const value = 2;\n");
-        const cli = createCliTest(main);
-        const exitCode = await cli.runCli(
-          ["scan", repository, "--python", python, "--validate", "--json"],
-          undefined,
-        );
-        outcomes.push({
-          exitCode,
-          stderr: cli.stderr.text(),
-          validation: JSON.parse(cli.stdout.text()).validation,
+      process.env["PATH"] = [hostBin, overrides.PATH].join(delimiter);
+      for (const selectedPython of [python, barePython]) {
+        await writeFile(source, "export const value = 1;\n");
+        const outcomes = [];
+        for (const changed of [false, true]) {
+          if (changed) await writeFile(source, "export const value = 2;\n");
+          const cli = createCliTest(main);
+          const exitCode = await cli.runCli(
+            [
+              "scan",
+              repository,
+              "--python",
+              selectedPython,
+              "--validate",
+              "--json",
+            ],
+            undefined,
+          );
+          outcomes.push({
+            exitCode,
+            stderr: cli.stderr.text(),
+            validation: JSON.parse(cli.stdout.text()).validation,
+          });
+        }
+        expect(
+          outcomes.map(({ exitCode }) => exitCode),
+          JSON.stringify({ selectedPython, outcomes }),
+        ).toEqual([0, 2]);
+        expect(outcomes[0]!.validation).toEqual({
+          status: "complete",
+          findings: 0,
+        });
+        expect(outcomes[1]!.validation).toMatchObject({
+          status: "failed",
+          message: expect.stringContaining("Scan target contents changed"),
         });
       }
-      expect(
-        outcomes.map(({ exitCode }) => exitCode),
-        JSON.stringify(outcomes),
-      ).toEqual([0, 2]);
-      expect(outcomes[0]!.validation).toEqual({
-        status: "complete",
-        findings: 0,
-      });
-      expect(outcomes[1]!.validation).toMatchObject({
-        status: "failed",
-        message: expect.stringContaining("Scan target contents changed"),
-      });
     } finally {
       scan.mockRestore();
     }
