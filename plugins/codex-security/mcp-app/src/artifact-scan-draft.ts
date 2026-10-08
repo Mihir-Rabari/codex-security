@@ -869,7 +869,7 @@ async function preserveScanDraft(
             (recovered &&
             matches.length === 0 &&
             sourceIndex >= sourceOrder.get(recovered.source.input)!
-              ? recovered.pending
+              ? deferred.find((item) => coverageKey(item) === candidateId)
               : undefined));
       if (disposition) {
         if (isObject(disposition.finding)) {

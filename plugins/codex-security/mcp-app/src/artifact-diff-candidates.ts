@@ -325,6 +325,19 @@ export function preserveDiffCandidateDecisions(
       candidate,
     ]),
   );
+  // Bind a newly authored proof gap to the ledger phase it reopens.
+  input = {
+    ...input,
+    coverage: {
+      ...input.coverage,
+      deferred: (input.coverage.deferred as JsonObject[]).map((pending) => {
+        const candidate = ledger.get(coverageCandidateKey(pending) ?? "");
+        return pending.candidate === undefined && candidate
+          ? { ...pending, candidate: structuredClone(candidate) }
+          : pending;
+      }),
+    },
+  };
   const history = candidateHistory(
     [{ ...input, findings: currentFindings }, ...previous],
     ledger,

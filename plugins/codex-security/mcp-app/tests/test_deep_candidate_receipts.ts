@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { promises as fs } from "node:fs";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { importSource } from "./import-module.ts";
 import { finding, scanId, workerDraft } from "./scan-draft-fixture.ts";
@@ -584,4 +592,152 @@ for (const archived of [false, true]) {
       }
     });
   }
+}
+
+for (const outcome of [
+  "pending",
+  "finding",
+  "decision",
+  "valid-receipt",
+] as const) {
+  test(`archived receipt recovery retains finding evidence: ${outcome}`, async () => {
+    const f = await fixture();
+    try {
+      const original = {
+        ...finding("archived-proof", "src/handler.ts"),
+        provenance: { source: "local_plugin", candidateId: "candidate" },
+      };
+      await recordCodexSecurityWorkerScanDraft(
+        f.worker,
+        workerDraft([original], { complete: true }),
+      );
+      const resultBytes = await readFile(path.join(f.output, "result.json"));
+      for (const name of [
+        "result.json",
+        "checkpoint-head.json",
+        ...(await readdir(path.join(f.output, "checkpoints"))).map((name) =>
+          path.join("checkpoints", name),
+        ),
+      ])
+        await utimes(path.join(f.output, name), 10, 10);
+      const ref = "artifacts/decision.txt";
+      if (outcome === "valid-receipt") {
+        await mkdir(path.join(f.output, "artifacts"));
+        await writeFile(
+          path.join(f.output, ref),
+          "Synthetic terminal evidence.\n",
+        );
+      }
+      const terminal = workerDraft([], {
+        complete: true,
+        coverage: {
+          completeness: "complete",
+          surfaces: [
+            {
+              id: "review",
+              candidateId: "candidate",
+              label: "Synthetic review",
+              disposition: "rejected",
+              notes: "Review requires its saved receipt.",
+              receiptRefs: [ref],
+            },
+          ],
+          explicitExclusions: [],
+          deferred: [],
+        },
+      });
+      const rename = fs.rename;
+      fs.rename = async (source, target) => {
+        await rename(source, target);
+        if (
+          path.dirname(String(target)) === path.join(f.output, "checkpoints")
+        ) {
+          await utimes(target, 20, 20);
+          throw new Error("interrupted after authored checkpoint");
+        }
+      };
+      try {
+        await assert.rejects(
+          recordCodexSecurityWorkerScanDraft(f.worker, terminal),
+          /interrupted after authored checkpoint/,
+        );
+      } finally {
+        fs.rename = rename;
+      }
+      assert.deepEqual(
+        await readFile(path.join(f.output, "result.json")),
+        resultBytes,
+      );
+      const archive = path.join(f.workerRoot, "attempts", "attempt-01");
+      await archiveDirectory(f.output, archive);
+      const originals = await Promise.all(
+        [
+          "result.json",
+          "checkpoint-head.json",
+          ...(await readdir(path.join(archive, "checkpoints"))).map((name) =>
+            path.join("checkpoints", name),
+          ),
+        ].map(
+          async (name) =>
+            [name, await readFile(path.join(archive, name))] as const,
+        ),
+      );
+      const current = workerDraft(outcome === "finding" ? [original] : [], {
+        complete: true,
+      });
+      if (outcome === "decision")
+        (current.coverage.surfaces as Record<string, unknown>[]).push({
+          id: "new-review",
+          candidateId: "candidate",
+          label: "New review",
+          disposition: "not_applicable",
+          notes: "A new review resolves this candidate.",
+          receiptRefs: [],
+        });
+      await recordCodexSecurityWorkerScanDraft(f.worker, current);
+      for (let retry = 0; retry < 2; retry++) {
+        await recordCodexSecurityWorkerScanDraft(
+          f.worker,
+          workerDraft([], { complete: true }),
+        );
+        const saved = await readJson(path.join(f.output, "result.json"));
+        const inputs = await getCodexSecurityDeepReducerInputs(f.reducer);
+        await recordCodexSecurityDeepReduction(f.reducer, {
+          scanId,
+          findings: inputs.discoveries.flatMap(
+            (input: any) => input.result.findings,
+          ),
+        });
+        const reduced = deepReductionScanDraft(
+          await readJson(path.join(f.reducerRoot, "result.json")),
+        );
+        for (const published of [saved, reduced]) {
+          assert.equal(
+            unresolvedCandidates(published.coverage, published.findings).length,
+            outcome === "pending" ? 1 : 0,
+          );
+          if (outcome === "pending") {
+            assert.equal(published.findings.length, 0);
+            assert.deepEqual(
+              published.coverage.deferred.find(
+                (row: any) => row.candidateId === "candidate",
+              ).finding,
+              original,
+            );
+          }
+          if (outcome === "finding") assert.equal(published.findings.length, 1);
+          if (outcome === "decision" && published === saved)
+            assert.ok(
+              published.coverage.surfaces.some(
+                (row: any) => row.disposition === "not_applicable",
+              ),
+            );
+        }
+        for (const [name, bytes] of originals)
+          assert.deepEqual(await readFile(path.join(archive, name)), bytes);
+      }
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
 }

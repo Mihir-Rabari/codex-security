@@ -3831,3 +3831,98 @@ for (const resolution of ["pending", "accepted", "rejected"] as const) {
     }
   });
 }
+
+for (const initial of ["suppressed", "not_applicable"] as const) {
+  for (const next of ["pending", "ledger", "finding", "decision"] as const) {
+    test(`payload-free Diff follow-up survives until ${next}: ${initial}`, async (t) => {
+      const reviewed = candidate("authored-proof-gap", initial);
+      const context = await fixture(t, [reviewed]);
+      const authored = {
+        id: "fresh-gap",
+        candidateId: reviewed.candidate_id,
+        reason: "New evidence requires another review of this candidate.",
+      };
+      const ledgerPath = path.join(
+        context.root,
+        "artifacts/02_discovery/candidate_ledger.jsonl",
+      );
+      const originalLedger = await readFile(ledgerPath);
+      const first = { ...draft([authored]), complete: true };
+      first.coverage.completeness = "partial";
+      await recordCodexSecurityScanDraft(context, first);
+      assert.deepEqual(first.coverage.deferred, [authored]);
+      const originals = await Promise.all(
+        (await readdir(path.join(context.root, "checkpoints"))).map(
+          async (name) =>
+            [
+              name,
+              await readFile(path.join(context.root, "checkpoints", name)),
+            ] as const,
+        ),
+      );
+      for (let retry = 0; retry < 2; retry++) {
+        await recordCodexSecurityScanDraft(context, {
+          ...draft(),
+          complete: true,
+        });
+        const coverage = await readCoverage(context);
+        assert.equal(coverage.deferred.length, 1);
+        assert.equal(coverage.deferred[0].reason, authored.reason);
+        assert.equal(coverage.deferred[0].candidateId, authored.candidateId);
+        assert.deepEqual(coverage.deferred[0].candidate, reviewed);
+        assert.ok(
+          coverage.surfaces.every(
+            (row: FixtureObject) => row.disposition === "needs_follow_up",
+          ),
+        );
+        assert.deepEqual(await readFile(ledgerPath), originalLedger);
+      }
+      const current = { ...draft(), complete: true };
+      if (next === "ledger")
+        await writeLedger(context, [
+          {
+            ...reviewed,
+            validation: {
+              disposition: initial,
+              evidence: "A later validation resolves the new proof gap.",
+            },
+          },
+        ]);
+      if (next === "finding")
+        current.findings = [finding(reviewed.candidate_id)];
+      if (next === "decision")
+        current.coverage.surfaces.push({
+          candidateId: reviewed.candidate_id,
+          label: "New review",
+          disposition: "rejected",
+          notes: "A later authored review resolves the proof gap.",
+        });
+      await recordCodexSecurityScanDraft(context, current);
+      for (let retry = 0; retry < 2; retry++) {
+        await recordCodexSecurityScanDraft(context, {
+          ...draft(),
+          complete: true,
+        });
+        const coverage = await readCoverage(context);
+        assert.equal(coverage.deferred.length, next === "pending" ? 1 : 0);
+        if (next === "finding")
+          assert.equal(
+            JSON.parse(
+              await readFile(path.join(context.root, "findings.json"), "utf8"),
+            ).findings.length,
+            1,
+          );
+        if (next === "decision")
+          assert.equal(
+            coverage.surfaces[0].notes,
+            current.coverage.surfaces[0].notes,
+          );
+      }
+      for (const [name, bytes] of originals)
+        assert.deepEqual(
+          await readFile(path.join(context.root, "checkpoints", name)),
+          bytes,
+        );
+    });
+  }
+}
