@@ -456,24 +456,24 @@ export class ScanCostTracker {
         }
         this.#reportWorkerProgress(session);
       }
-      // A copied prefix must not supply model usage for a more complete log.
+      // Exact native receipts identify the continuation even when a legacy
+      // counter prefix reports a larger total. Retain its independent floor below.
       const previous = usageSessions.get(threadId);
       if (
         previous === undefined ||
-        (session.usage?.total_tokens ?? -1) >
-          (previous.usage?.total_tokens ?? -1) ||
-        ((session.usage?.total_tokens ?? -1) ===
-          (previous.usage?.total_tokens ?? -1) &&
-          ((session.counterUsage?.total_tokens ?? -1) >
-            (previous.counterUsage?.total_tokens ?? -1) ||
-            ((session.counterUsage?.total_tokens ?? -1) ===
-              (previous.counterUsage?.total_tokens ?? -1) &&
-              session.pendingLine.length === 0 &&
-              !session.unreadable &&
-              (previous.pendingLine.length > 0 ||
-                previous.unreadable ||
-                (session.responseUsageObserved &&
-                  !previous.responseUsageObserved)))))
+        session.responseIds.size > previous.responseIds.size ||
+        (session.responseIds.size === previous.responseIds.size &&
+          ((session.usage?.total_tokens ?? -1) >
+            (previous.usage?.total_tokens ?? -1) ||
+            ((session.usage?.total_tokens ?? -1) ===
+              (previous.usage?.total_tokens ?? -1) &&
+              ((session.counterUsage?.total_tokens ?? -1) >
+                (previous.counterUsage?.total_tokens ?? -1) ||
+                ((session.counterUsage?.total_tokens ?? -1) ===
+                  (previous.counterUsage?.total_tokens ?? -1) &&
+                  session.pendingLine.length === 0 &&
+                  !session.unreadable &&
+                  (previous.pendingLine.length > 0 || previous.unreadable))))))
       ) {
         usageSessions.set(threadId, session);
       }

@@ -3444,3 +3444,119 @@ test.each([
     }
   },
 );
+
+for (const scenario of [
+  "prefix-first",
+  "prefix-last",
+  "continuation-only",
+  "legacy-only",
+]) {
+  test(`retains priced native receipt evidence across copied rollouts: ${scenario}`, async () => {
+    const home = await codexHome();
+    const recorded = await codexHome();
+    const scanDirectory = join(home, "scan");
+    await mkdir(join(scanDirectory, "artifacts", "deep_discovery"), {
+      recursive: true,
+    });
+    await writeFile(
+      join(
+        scanDirectory,
+        "artifacts",
+        "deep_discovery",
+        "execution-settings.json",
+      ),
+      JSON.stringify({ version: 1, settings: { codexHome: recorded } }),
+    );
+    await Promise.all([
+      mkdir(join(home, "sessions")),
+      mkdir(join(recorded, "sessions")),
+    ]);
+    const prefix =
+      jsonLines([
+        {
+          type: "session_meta",
+          payload: {
+            id: "worker",
+            timestamp: "2026-09-01T00:00:00Z",
+            source: "exec",
+          },
+        },
+        {
+          type: "turn_context",
+          payload: { model: "gpt-5.6-sol", turn_id: "turn" },
+        },
+        {
+          type: "event_msg",
+          timestamp: "2026-09-01T00:00:01Z",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 200,
+                output_tokens: 0,
+                total_tokens: 200,
+              },
+            },
+          },
+        },
+      ]) + "\n";
+    const continuation =
+      prefix +
+      "\n" +
+      jsonLines([
+        {
+          type: "token_usage_record",
+          timestamp: "2026-09-01T00:00:02Z",
+          payload: {
+            thread_id: "worker",
+            turn_id: "turn",
+            response_id: "response",
+            model: "gpt-6-astra",
+            usage: { input_tokens: 150, output_tokens: 0, total_tokens: 150 },
+          },
+        },
+      ]) +
+      "\n";
+    await writeFile(
+      join(home, "sessions", "worker.jsonl"),
+      scenario === "prefix-first" || scenario === "legacy-only"
+        ? prefix
+        : continuation,
+    );
+    if (scenario.startsWith("prefix-")) {
+      await writeFile(
+        join(recorded, "sessions", "worker.jsonl"),
+        scenario === "prefix-first" ? continuation : prefix,
+      );
+    }
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      scanDirectory,
+      model: "gpt-5.6-sol",
+    });
+    tracker.setAttributionReader(async () =>
+      recordedWorkerAttribution(recorded, "worker"),
+    );
+    tracker.start("worker");
+    try {
+      const snapshot = await tracker.stop();
+      expect(tokenUsage(snapshot.usage)?.total_tokens).toBe(200);
+      expect(
+        estimateScanCostLowerBound("gpt-5.6-sol", snapshot.usage)?.estimatedUsd,
+      ).toBeGreaterThanOrEqual(scenario === "legacy-only" ? 0.0008 : 0.0015);
+      if (scenario !== "legacy-only") {
+        expect(
+          (snapshot.usage as { modelUsage: unknown[] }).modelUsage,
+        ).toContainEqual(
+          expect.objectContaining({ model: "gpt-6-astra", input_tokens: 150 }),
+        );
+        expect(snapshot.cost).toBeNull();
+        expect((snapshot.usage as { coverage?: string }).coverage).toBe(
+          "partial",
+        );
+      }
+    } finally {
+      await tracker.stop();
+    }
+  });
+}

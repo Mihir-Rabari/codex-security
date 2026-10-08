@@ -509,3 +509,28 @@ function mutateDraft(
     };
   return draft;
 }
+
+// File-authored canonical artifacts use the public coverage ID contract.
+test.each(["API v1", "api-v1"])(
+  "canonical surface admission: %s",
+  async (id) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    const scanDir = await copyCompletedScan(root);
+    const coveragePath = join(scanDir, "coverage.json");
+    const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
+    coverage.surfaces[0].id = id;
+    await writeFile(coveragePath, JSON.stringify(coverage));
+    const result = await observeStandardAdmission(repository, scanDir);
+    console.log(
+      JSON.stringify({
+        id,
+        finalizations: result.finalizations,
+        error: String(result.error),
+      }),
+    );
+    expect(result.error).toBe(result.finalization);
+    expect(result.finalizations).toBe(1);
+  },
+);

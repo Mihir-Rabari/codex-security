@@ -1562,3 +1562,58 @@ def test_foreign_response_cumulative_does_not_hide_an_earlier_owned_gap(
     assert total == _counts(20, 0, 0)
     assert warnings == (set() if foreign_first else {"token_receipts_incomplete"})
     assert models == {"gpt-5.6-sol": _counts(20, 0, 0)}
+
+
+@pytest.mark.parametrize(
+    "scenario", ["prefix-first", "prefix-last", "continuation-only", "legacy-only"]
+)
+def test_rollout_copies_retain_the_continuations_native_receipt_model(
+    tmp_path: Path, workbench_api, scenario: str
+) -> None:
+    reader = sys.modules["workbench_scan_usage"]
+    start = datetime.fromisoformat("2026-09-01T00:00:00+00:00")
+    prefix = [
+        {
+            "type": "session_meta",
+            "payload": {"id": "worker", "timestamp": "2026-09-01T00:00:00Z", "source": "exec"},
+        },
+        _event(start, "turn_context", {"model": "gpt-5.6-sol", "turn_id": "turn"}),
+        _token_event(start + timedelta(seconds=1), 200, 0),
+    ]
+    continuation = [
+        *prefix,
+        _event(
+            start + timedelta(seconds=2),
+            "token_usage_record",
+            {
+                "thread_id": "worker",
+                "turn_id": "turn",
+                "response_id": "response",
+                "model": "gpt-6-astra",
+                "usage": {"input_tokens": 150, "output_tokens": 0, "total_tokens": 150},
+            },
+        ),
+    ]
+    events = {
+        "prefix-first": [prefix, continuation],
+        "prefix-last": [continuation, prefix],
+        "continuation-only": [continuation],
+        "legacy-only": [prefix],
+    }[scenario]
+    copies = [
+        reader.RolloutSession(
+            "worker", None, _rollout(tmp_path, f"copy-{index}", value, recorded_thread_id="worker")
+        )
+        for index, value in enumerate(events)
+    ]
+    models = {}
+    total, warnings = reader._read_rollout_copies_usage(
+        copies, started_at=start, completed_at=None, owner_turn_id=None, model_usage=models
+    )
+    assert total == _counts(200, 0, 0)
+    if scenario == "legacy-only":
+        assert warnings == set()
+        assert models == {"gpt-5.6-sol": _counts(200, 0, 0)}
+    else:
+        assert warnings == {"token_receipts_incomplete"}
+        assert models == {"gpt-6-astra": _counts(150, 0, 0), None: _counts(50, 0, 0)}

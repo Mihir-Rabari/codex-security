@@ -311,6 +311,7 @@ def _read_rollout_copies_usage(
     readings = []
     for session in copies:
         local_models: dict[str | None, dict[str, int]] = {}
+        response_ids: set[str] = set()
         try:
             usage, warnings = _read_rollout_usage(
                 session,
@@ -318,10 +319,11 @@ def _read_rollout_copies_usage(
                 completed_at=completed_at,
                 owner_turn_id=owner_turn_id,
                 model_usage=local_models,
+                accepted_response_ids=response_ids,
             )
         except (OSError, UnicodeError, ValueError):
             continue
-        readings.append((usage, warnings, local_models))
+        readings.append((usage, warnings, local_models, response_ids))
     if not readings:
         raise ValueError("No readable rollout copy.")
     attributable = [
@@ -338,9 +340,9 @@ def _read_rollout_copies_usage(
     ]
     # Restored indexes can reference a prefix and its complete continuation.
     # Keep totals and model attribution from the same copy, counting it once.
-    usage, warnings, selected_models = max(
+    usage, warnings, selected_models, _ = max(
         attributable or readings,
-        key=lambda reading: (reading[0]["totalTokens"], -len(reading[1])),
+        key=lambda reading: (len(reading[3]), reading[0]["totalTokens"], -len(reading[1])),
     )
     for model, tokens in selected_models.items():
         _add_token_usage(model_usage.setdefault(model, _empty_token_usage()), tokens)
@@ -735,6 +737,7 @@ def _read_rollout_usage(
     completed_at: datetime | None,
     owner_turn_id: str | None = None,
     model_usage: dict[str | None, dict[str, int]] | None = None,
+    accepted_response_ids: set[str] | None = None,
 ) -> tuple[dict[str, int], set[str]]:
     total = _empty_token_usage()
     counter_total = _empty_token_usage()
@@ -919,6 +922,8 @@ def _read_rollout_usage(
                 ):
                     continue
                 response_ids.add(response_id)
+                if accepted_response_ids is not None:
+                    accepted_response_ids.add(response_id)
                 if not response_usage_observed:
                     response_usage_observed = True
                     total = _empty_token_usage()
