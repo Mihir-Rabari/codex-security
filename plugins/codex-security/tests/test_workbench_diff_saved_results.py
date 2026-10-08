@@ -1221,6 +1221,7 @@ def test_stopped_diff_freezes_blank_owner_pending_candidate_without_ledger(
         current_coverage=coverage,
         current_findings=[],
         checkpoint_findings=[],
+        receipt_reopened=set(),
     )
     assert draft["coverage"]["deferred"] == coverage["deferred"]
 

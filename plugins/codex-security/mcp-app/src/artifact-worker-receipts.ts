@@ -15,7 +15,8 @@ export async function recoverWorkerCandidateReceipts(
   coverage: JsonObject,
   source: ArtifactContext,
   retainIn?: ArtifactContext,
-): Promise<void> {
+): Promise<Set<string>> {
+  const reopened = new Set<string>();
   const deferred = coverage.deferred as JsonObject[];
   for (const surface of coverage.surfaces as JsonObject[]) {
     if (
@@ -39,6 +40,7 @@ export async function recoverWorkerCandidateReceipts(
           "Worker candidate receipt",
         );
       } catch (error) {
+        reopened.add(surface.candidateId as string);
         surface.disposition = "needs_follow_up";
         coverage.completeness = "partial";
         let pending = deferred.find(
@@ -115,4 +117,5 @@ export async function recoverWorkerCandidateReceipts(
     }
     surface.receiptRefs = retainedRefs;
   }
+  return reopened;
 }

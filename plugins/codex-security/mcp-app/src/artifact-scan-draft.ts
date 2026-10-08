@@ -335,6 +335,25 @@ export async function recordCodexSecurityWorkerScanDraft(
           ),
         }
       : parsed;
+  if (scoped.complete !== false) {
+    const pending = new Set(
+      (scoped.coverage.deferred as JsonObject[]).map((row) =>
+        coverageCandidateKey(row, context.root),
+      ),
+    );
+    scoped.findings = scoped.findings.map((finding) => {
+      const key = findingCandidateKey(finding, context.root);
+      const provenance = finding.provenance as JsonObject | undefined;
+      if (
+        key === undefined ||
+        pending.has(key) ||
+        provenance?.candidateReopened !== true
+      )
+        return finding;
+      const { candidateReopened: _reopened, ...confirmed } = provenance;
+      return { ...finding, provenance: confirmed };
+    });
+  }
   scoped = (await preserveScanDraft(context, scoped)).input;
   const destination = await artifactDestination(
     context,
@@ -446,8 +465,9 @@ async function preserveScanDraft(
     context.layout === "worker"
       ? await readArchivedWorkerCheckpoints(context)
       : [];
+  const receiptReopened = new Map<string, JsonObject>();
   for (const source of archived) {
-    await recoverWorkerCandidateReceipts(
+    const recovered = await recoverWorkerCandidateReceipts(
       source.input.coverage,
       {
         ...context,
@@ -455,6 +475,16 @@ async function preserveScanDraft(
       },
       context,
     );
+    for (const pending of source.input.coverage.deferred as JsonObject[]) {
+      const key = coverageKey(pending);
+      if (
+        key !== undefined &&
+        recovered.has(pending.candidateId as string) &&
+        !currentOutcomes.has(key) &&
+        !receiptReopened.has(key)
+      )
+        receiptReopened.set(key, pending);
+    }
   }
   if (previous) {
     current.unshift({ input: previous, modifiedMs: previousState.modifiedMs });
@@ -824,7 +854,8 @@ async function preserveScanDraft(
       const disposition =
         candidateId === undefined
           ? undefined
-          : dispositions.find((item) => coverageKey(item) === candidateId);
+          : (dispositions.find((item) => coverageKey(item) === candidateId) ??
+            receiptReopened.get(candidateId));
       if (disposition) {
         if (isObject(disposition.finding)) {
           if (isObject(disposition.finding.provenance))

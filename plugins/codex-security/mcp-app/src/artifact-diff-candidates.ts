@@ -42,21 +42,14 @@ export async function readDiffCandidates(context: ArtifactContext) {
 
 export type DiffCandidates = Awaited<ReturnType<typeof readDiffCandidates>>;
 
-/** Keep generated historical decisions aligned with the current ledger. */
-export function refreshDiffCandidateHistory(
+function candidateHistory(
   sources: ScanDraftInput[],
-  candidates: DiffCandidates,
-): ScanDraftInput[] {
-  if (candidates === undefined) return sources;
-  const ledger = new Map(
-    candidates.map((candidate) => [
-      candidateKey(candidate.candidate_id)!,
-      candidate,
-    ]),
-  );
+  ledger: ReadonlyMap<string, NonNullable<DiffCandidates>[number]>,
+) {
   // A newer authored decision takes precedence over an older generated checkpoint.
   const seen = new Set<string>();
   const authoredResolutions = new Set<string>();
+  const pendingDecisions = new Set<string>();
   for (const source of sources) {
     const authored = [
       ...source.findings
@@ -77,6 +70,24 @@ export function refreshDiffCandidateHistory(
         .map((item) => coverageCandidateKey(item)),
     ].filter((id): id is string => typeof id === "string");
     for (const id of authored) if (!seen.has(id)) authoredResolutions.add(id);
+    for (const pending of source.coverage.deferred as JsonObject[]) {
+      const key = coverageCandidateKey(pending);
+      const saved = object(pending.candidate);
+      const candidate = ledger.get(key ?? "");
+      if (
+        key &&
+        !seen.has(key) &&
+        !authored.includes(key) &&
+        saved &&
+        candidate &&
+        candidateDisposition(candidate) !== undefined &&
+        isDeepStrictEqual(
+          candidateDecision(saved),
+          candidateDecision(candidate),
+        )
+      )
+        pendingDecisions.add(key);
+    }
     for (const id of [
       ...source.findings.map((finding) => findingCandidateKey(finding)),
       ...authored,
@@ -89,6 +100,28 @@ export function refreshDiffCandidateHistory(
     ])
       if (typeof id === "string") seen.add(id);
   }
+  return { authoredResolutions, pendingDecisions };
+}
+
+/** Keep generated historical decisions aligned with the current ledger. */
+export function refreshDiffCandidateHistory(
+  sources: ScanDraftInput[],
+  candidates: DiffCandidates,
+  history?: ReturnType<typeof candidateHistory>,
+): ScanDraftInput[] {
+  if (candidates === undefined) return sources;
+  const ledger = new Map(
+    candidates.map((candidate) => [
+      candidateKey(candidate.candidate_id)!,
+      candidate,
+    ]),
+  );
+  const { authoredResolutions, pendingDecisions } =
+    history ?? candidateHistory(sources, ledger);
+  const dispositionFor = (candidate: NonNullable<DiffCandidates>[number]) =>
+    pendingDecisions.has(candidateKey(candidate.candidate_id)!)
+      ? undefined
+      : candidateDisposition(candidate);
   const reopened = new Map<string, JsonObject>();
   const refreshed = sources.map((source) => {
     const result = structuredClone(source);
@@ -102,7 +135,7 @@ export function refreshDiffCandidateHistory(
         key &&
         candidate &&
         !authoredResolutions.has(key) &&
-        candidateDisposition(candidate) === undefined &&
+        dispositionFor(candidate) === undefined &&
         !reopened.has(key)
       )
         reopened.set(key, pending);
@@ -113,7 +146,7 @@ export function refreshDiffCandidateHistory(
       if (
         !candidate ||
         authoredResolutions.has(key!) ||
-        candidateDisposition(candidate) !== undefined ||
+        dispositionFor(candidate) !== undefined ||
         (!changedFindingDecision(finding, candidate) && !reopened.has(key!))
       )
         continue;
@@ -145,7 +178,7 @@ export function refreshDiffCandidateHistory(
         );
         if (!candidate || (!isGeneratedDecision(surface) && !generatedFollowUp))
           return surface;
-        const disposition = candidateDisposition(candidate);
+        const disposition = dispositionFor(candidate);
         if (generatedFollowUp && disposition === undefined) return surface;
         if (disposition === undefined && authoredResolutions.has(key))
           return surface;
@@ -286,11 +319,22 @@ export function preserveDiffCandidateDecisions(
   currentFindings: JsonObject[] = input.findings,
 ): ScanDraftInput {
   if (candidates === undefined) return input;
+  const ledger = new Map(
+    candidates.map((candidate) => [
+      candidateKey(candidate.candidate_id)!,
+      candidate,
+    ]),
+  );
+  const history = candidateHistory(
+    [{ ...input, findings: currentFindings }, ...previous],
+    ledger,
+  );
   input = {
     ...input,
     coverage: refreshDiffCandidateHistory(
       [{ ...input, findings: [] }],
       candidates,
+      history,
     )[0]!.coverage,
   };
   const resolved = resolvedCandidateKeys({
@@ -304,12 +348,6 @@ export function preserveDiffCandidateDecisions(
   );
   const accepted = new Set(currentFindingKeys);
   accepted.delete(undefined);
-  const ledger = new Map(
-    candidates.map((candidate) => [
-      candidateKey(candidate.candidate_id)!,
-      candidate,
-    ]),
-  );
   const previousDecisions = new Map<
     string,
     { section: string; item: JsonObject }
@@ -388,7 +426,12 @@ export function preserveDiffCandidateDecisions(
   for (const candidate of candidates) {
     const key = candidateKey(candidate.candidate_id)!;
     const disposition = candidateDisposition(candidate);
-    if (disposition === undefined || accepted.has(key)) continue;
+    if (
+      disposition === undefined ||
+      accepted.has(key) ||
+      history.pendingDecisions.has(key)
+    )
+      continue;
     dismissed.add(key);
     if (resolved.has(key)) continue;
     // An authored final decision keeps its rationale on later empty saves.
