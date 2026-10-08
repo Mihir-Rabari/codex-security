@@ -99,6 +99,7 @@
 - preserve severity assessments for each scan ([#1058](https://github.com/openai/codex-security/pull/1058))
 - show active reviews and result consolidation during Deep Scan ([#1253](https://github.com/openai/codex-security/pull/1253))
 - keep bulk-scan knowledge and settings stable on resume ([#1059](https://github.com/openai/codex-security/pull/1059))
+- reject plaintext remote login URLs ([#1331](https://github.com/openai/codex-security/pull/1331))
 
 <!-- release-section: highlights:end -->
 
