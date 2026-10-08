@@ -241,26 +241,47 @@ access_key_id = "synthetic-secret"
       await loadSettings(providerDir, boundRun(selected)),
       { filesystemDenies: [] },
     ).codexOptions.config.model_providers;
-    if (expectedProvider) assert.deepEqual(restoredProvider, expectedProvider);
-    else
-      assert.deepEqual(Object.keys(restoredProvider[modelProvider]).sort(), [
-        "base_url",
-        "env_key",
-        "name",
-        "wire_api",
-      ]);
+    assert.deepEqual(restoredProvider, expectedProvider);
     assert.equal(await readFile(path, "utf8"), bytes);
-    // Older snapshots can contain catalog definitions. Reading them must not
-    // rewrite their bytes or prevent the existing launch projection.
+    await writeFile(
+      join(root, "config.toml"),
+      `model_provider = ${JSON.stringify(modelProvider)}
+[model_providers.${modelProvider}]
+base_url = "https://native.example.invalid/v1"
+env_key = "SYNTHETIC_NATIVE_KEY"
+[model_providers.${modelProvider}.aws]
+region = "us-west-2"
+profile = "fixture-profile"
+`,
+    );
+    const native = await captureSettings(
+      {},
+      { filesystemDenies: [] },
+      { CODEX_CLI_PATH: process.execPath, CODEX_HOME: root },
+    );
+    const nativeConfig = restoreSettings(native, { filesystemDenies: [] })
+      .codexOptions.config;
+    assert.equal(nativeConfig.model_provider, modelProvider);
+    assert.deepEqual(nativeConfig.model_providers, expectedProvider);
+    // Older snapshots can contain catalog definitions. Reading them keeps
+    // their bytes intact and still inherits the original native definition.
     if (!expectedProvider) {
+      const legacyProvider = {
+        [modelProvider]: {
+          name: "Fixture",
+          base_url: "https://catalog.example.invalid/v1",
+          env_key: "SYNTHETIC_CATALOG_KEY",
+          wire_api: "responses",
+        },
+      };
       await writeSnapshot(providerDir, {
         ...selected,
-        providerConfig: restoredProvider,
+        providerConfig: legacyProvider,
       });
       const legacyBytes = await readFile(path, "utf8");
       const legacy = await loadSettings(
         providerDir,
-        boundRun({ ...selected, providerConfig: restoredProvider }),
+        boundRun({ ...selected, providerConfig: legacyProvider }),
       );
       assert.equal(legacy.providerConfig, undefined);
       assert.deepEqual(

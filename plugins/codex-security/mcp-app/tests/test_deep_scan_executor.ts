@@ -3498,24 +3498,20 @@ async function testIsolatedReconstructedWorkers() {
               const provider = launch.argv.filter((argument: string) =>
                 /^model_providers[.=]/u.test(argument),
               );
-              assert.ok(
-                provider.length > 0,
-                "both preflight and worker launch receive provider configuration",
-              );
-              const providers = parseToml(provider.join("\n"))
-                .model_providers as Record<string, Record<string, unknown>>;
-              if (scan.expectedProvider)
+              if (scan.expectedProvider) {
+                const providers = parseToml(provider.join("\n"))
+                  .model_providers as Record<string, Record<string, unknown>>;
                 assert.deepEqual(
                   JSON.parse(JSON.stringify(providers)),
                   scan.expectedProvider,
                 );
-              else
-                assert.deepEqual(Object.keys(providers.openrouter).sort(), [
-                  "base_url",
-                  "env_key",
-                  "name",
-                  "wire_api",
-                ]);
+              } else {
+                assert.deepEqual(
+                  provider,
+                  [],
+                  "restored external providers inherit the recorded native home",
+                );
+              }
               assert.equal(
                 workerPermissionProfileOverride(launch.argv).includes(
                   "glob_scan_max_depth",
@@ -3781,19 +3777,27 @@ async function testRestoredPrivateProfileHomes() {
       name === "same" ? originalHome : path.join(fixture.root, name, "current");
     await mkdir(originalHome, { recursive: true });
     await mkdir(currentHome, { recursive: true });
+    const provider =
+      name === "first"
+        ? "openrouter"
+        : name === "second"
+          ? "fireworks"
+          : "fixture-provider";
     const config = {
       model: "fixture-model",
-      model_provider: "fixture-provider",
+      model_provider: provider,
       model_providers: {
-        "fixture-provider": {
+        [provider]: {
           name: "Fixture",
+          base_url: `https://${name}.example.invalid/v1`,
+          env_key: `SYNTHETIC_${name.toUpperCase()}_KEY`,
           wire_api: "responses",
           requires_openai_auth: true,
           http_headers: { Authorization: `synthetic-${name}-profile-header` },
         },
       },
     };
-    const configPath = path.join(fixture.root, name, "preflight.toml");
+    const configPath = path.join(originalHome, "config.toml");
     await writeFile(configPath, stringifyToml(config));
     const sandbox = {
       filesystemDenies: [...new Set([originalHome, currentHome])],
@@ -3803,7 +3807,6 @@ async function testRestoredPrivateProfileHomes() {
       sandbox,
       {
         CODEX_HOME: originalHome,
-        CODEX_SECURITY_CONFIG_PATH: configPath,
         CODEX_CLI_PATH: process.execPath,
       },
     );
@@ -3859,6 +3862,8 @@ async function testRestoredPrivateProfileHomes() {
     });
     owners.push({
       name,
+      provider,
+      config,
       originalHome,
       currentHome,
       current,
@@ -3886,7 +3891,7 @@ async function testRestoredPrivateProfileHomes() {
   syncBuiltinESMExports();
   try {
     for (const kind of ["discovery", "dedup"] as const) {
-      await Promise.all(
+      const launches: PromiseSettledResult<void>[] = await Promise.allSettled(
         owners.map(async (owner) => {
           const request = workerRequest(owner.promptPath, fixture.root, {
             kind,
@@ -3903,6 +3908,22 @@ async function testRestoredPrivateProfileHomes() {
           );
           const child = await readJson(owner.markerPath);
           assert.equal(child.codexHome, owner.originalHome);
+          const profile = parseToml(child.profileContents);
+          assert.deepEqual(
+            JSON.parse(JSON.stringify(profile.model_providers)),
+            owner.config.model_providers,
+          );
+          const preflight = await readJson(
+            owner.environment.FAKE_CODEX_PREFLIGHT_MARKER,
+          );
+          assertConfigOverrides(child.argv, {
+            [`model_providers.${owner.provider}.base_url`]: undefined,
+            [`model_providers.${owner.provider}.env_key`]: undefined,
+          });
+          assertConfigOverrides(preflight.argv, {
+            [`model_providers.${owner.provider}.base_url`]: undefined,
+            [`model_providers.${owner.provider}.env_key`]: undefined,
+          });
           assert.match(
             child.profileContents,
             new RegExp(`synthetic-${owner.name}-profile-header`),
@@ -3921,6 +3942,13 @@ async function testRestoredPrivateProfileHomes() {
             await assert.rejects(readFile(profile.path), { code: "ENOENT" });
           await readFile(owner.current.path);
         }),
+      );
+      assert.deepEqual(
+        launches.flatMap((launch) =>
+          launch.status === "rejected" ? [String(launch.reason)] : [],
+        ),
+        [],
+        `native provider selections survive ${kind} child launches`,
       );
     }
     assert.equal(owners[0].recreated.length, 0);

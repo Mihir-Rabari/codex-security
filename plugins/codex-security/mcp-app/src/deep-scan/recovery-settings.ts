@@ -357,6 +357,28 @@ export function restoredDeepScanWorkerSettings(
         ["*", "?", "[", "]"].some((character) => path.includes(character)),
       ),
   );
+  const config = scanPreflightCodexConfig({
+    ...(settings.model === undefined ? {} : { model: settings.model }),
+    ...(settings.reasoningEffort === undefined
+      ? {}
+      : { model_reasoning_effort: settings.reasoningEffort }),
+    ...(settings.modelProvider === undefined
+      ? {}
+      : { model_provider: settings.modelProvider }),
+    ...(settings.reasoningSummary === undefined
+      ? {}
+      : { model_reasoning_summary: settings.reasoningSummary }),
+    ...(settings.serviceTier === undefined
+      ? {}
+      : { service_tier: settings.serviceTier }),
+    ...(settings.providerConfig === undefined
+      ? {}
+      : { model_providers: settings.providerConfig }),
+  });
+  // Other provider definitions remain in the bound native home. Catalog
+  // defaults would override its customized endpoint or authentication key.
+  if (settings.modelProvider !== "amazon-bedrock")
+    delete config.model_providers;
   return {
     get nativeProfileHome() {
       return environment().CODEX_HOME || join(homedir(), ".codex");
@@ -407,24 +429,7 @@ export function restoredDeepScanWorkerSettings(
           ),
         );
       },
-      config: scanPreflightCodexConfig({
-        ...(settings.model === undefined ? {} : { model: settings.model }),
-        ...(settings.reasoningEffort === undefined
-          ? {}
-          : { model_reasoning_effort: settings.reasoningEffort }),
-        ...(settings.modelProvider === undefined
-          ? {}
-          : { model_provider: settings.modelProvider }),
-        ...(settings.reasoningSummary === undefined
-          ? {}
-          : { model_reasoning_summary: settings.reasoningSummary }),
-        ...(settings.serviceTier === undefined
-          ? {}
-          : { service_tier: settings.serviceTier }),
-        ...(settings.providerConfig === undefined
-          ? {}
-          : { model_providers: settings.providerConfig }),
-      }) as NonNullable<CodexOptions["config"]>,
+      config: config as NonNullable<CodexOptions["config"]>,
     },
   };
 }
@@ -432,8 +437,8 @@ export function restoredDeepScanWorkerSettings(
 function executionSettings(
   value: DeepScanExecutionSettings,
 ): DeepScanExecutionSettings {
-  // Catalog provider definitions are reconstructed by the existing launch
-  // projection. Only Bedrock's per-scan AWS selectors need persistence.
+  // Only Bedrock's per-scan AWS selectors need persistence. Other provider
+  // definitions remain in the original native home.
   const provider =
     value.modelProvider === "amazon-bedrock"
       ? (scanPreflightCodexConfig({
