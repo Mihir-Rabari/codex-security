@@ -13,10 +13,7 @@ import { join } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { stringify } from "smol-toml";
 import { scanRuntimeCodexConfig } from "../src/api.js";
-import {
-  providerProcessConfiguration,
-  type JsonObject,
-} from "../src/config.js";
+import type { JsonObject } from "../src/config.js";
 import { definedEnvironment } from "../src/execution-auth.js";
 import {
   createExecutionCodex,
@@ -98,7 +95,7 @@ if(args.includes("mcp")) { fs.appendFileSync(${JSON.stringify(capture)},JSON.str
 const provider = config["model_providers"].synthetic;
 const headers = {...provider["http_headers"]};
 for(const [key,name] of Object.entries(provider["env_http_headers"] ?? {})) { const value=process.env[name]; if(value?.trim()) headers[key]=value; }
-fs.appendFileSync(${JSON.stringify(capture)},JSON.stringify({args,ambientContents:fs.readFileSync(${JSON.stringify(configEntry)},"utf8"),config,headers,mcpServers:config.mcp_servers,bearer:process.env[provider["env_key"]],unused:process.env[config["model_providers"].unused["env_key"]],privateEnvironment:Object.fromEntries(Object.entries(process.env).filter(([name])=>name.startsWith("CODEX_SECURITY_INTERNAL_")))})+"\\n");
+fs.appendFileSync(${JSON.stringify(capture)},JSON.stringify({args,ambientContents:fs.readFileSync(${JSON.stringify(configEntry)},"utf8"),config,headers,mcpServers:config.mcp_servers,bearer:provider.experimental_bearer_token ?? process.env[provider["env_key"]],unused:config["model_providers"].unused.experimental_bearer_token,ambientOverride:process.env.SYNTHETIC_OVERRIDE,literalCredentialInEnvironment:[provider.experimental_bearer_token,provider.http_headers?.["X-Synthetic"]].some(value=>typeof value==="string"&&Object.values(process.env).includes(value)),privateEnvironment:Object.fromEntries(Object.entries(process.env).filter(([name])=>name.startsWith("CODEX_SECURITY_INTERNAL_")))})+"\\n");
 if(args.includes("app-server")) require("node:readline").createInterface({input:process.stdin}).on("line",line=>{
  const request=JSON.parse(line); if(request.id===undefined)return;
  const result=request.method==="initialize"?{}:request.method==="config/read"?{config}:{data:[{id:config.default_permissions,allowed:true}],nextCursor:null};
@@ -123,6 +120,10 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
               ? inheritedConfiguration["mcp_servers"]!
               : mcpSettings(name),
           model: "synthetic-model",
+          shell_environment_policy: {
+            inherit: "all",
+            ignore_default_excludes: true,
+          },
           model_provider: "synthetic",
           model_providers: {
             synthetic: {
@@ -186,14 +187,10 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
       });
       await Promise.all(
         sessions.map(async (session) => {
-          const launch = providerProcessConfiguration(
-            session.sessionConfig,
-            session.source.environment,
-          );
           await disabledMcpServers(
             session.source.command,
-            launch.config,
-            definedEnvironment(launch.environment),
+            session.sessionConfig,
+            definedEnvironment(session.source.environment),
             { workingDirectory: root },
           );
           for (const role of ["discovery", "merge"] as const) {
@@ -236,20 +233,36 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
         expect(row.args.join("\n")).not.toContain("synthetic-first-");
         expect(row.args.join("\n")).not.toContain("synthetic-second-");
       }
-      for (const row of rows.filter((row) => row.args.includes("mcp"))) {
+      const enumerations = rows.filter((row) => row.args.includes("mcp"));
+      expect(enumerations).toHaveLength(2);
+      for (const row of enumerations) {
         expect(row.args.join("\n")).not.toContain("synthetic-first-");
         expect(row.args.join("\n")).not.toContain("synthetic-second-");
-        expect(
-          Object.values(row.privateEnvironment).some((value) =>
-            String(value).includes("-bearer"),
-          ),
-        ).toBe(true);
+        expect(row.privateEnvironment).toEqual({});
+      }
+      const preflights = rows.filter((row) => row.args.includes("app-server"));
+      expect(preflights).toHaveLength(8);
+      for (const row of preflights) {
+        const name = ["first", "second"].find(
+          (name) => row.ambientOverride === `synthetic-${name}-override`,
+        );
+        expect(name).toBeDefined();
+        expect(row.privateEnvironment).toEqual({});
+        expect(row.literalCredentialInEnvironment).toBe(false);
+        const permissions =
+          row.config.permissions[row.config.default_permissions];
+        expect(permissions.filesystem[join(root, name!, "private")]).toBe(
+          "deny",
+        );
+        expect(permissions.network.enabled).toBe(false);
       }
       for (const [index, name] of ["first", "second"].entries()) {
         const selected = rows.filter(
-          (row) => row.bearer === `synthetic-${name}-bearer`,
+          (row) =>
+            row.args.includes("exec") &&
+            row.bearer === `synthetic-${name}-bearer`,
         );
-        expect(selected).toHaveLength(8);
+        expect(selected).toHaveLength(4);
         for (const row of selected) {
           expect(row.ambientContents).toBe(originalContents);
           expect(row.args.join("\n")).not.toContain("synthetic-first-");
@@ -263,11 +276,13 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
             "X-Override": `synthetic-${name}-override`,
             "X-Empty": "",
           });
-          expect(
-            Object.values(row.privateEnvironment).every((value) =>
-              String(value).includes(`synthetic-${name}-`),
-            ),
-          ).toBe(true);
+          expect(row.privateEnvironment).toEqual({});
+          expect(row.literalCredentialInEnvironment).toBe(false);
+          expect(row.ambientOverride).toBe(`synthetic-${name}-override`);
+          expect(row.config.shell_environment_policy).toEqual({
+            inherit: "all",
+            ignore_default_excludes: true,
+          });
           if (!row.args.includes("mcp")) {
             const permissions =
               row.config.permissions[row.config.default_permissions];
@@ -311,85 +326,6 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
     } finally {
       spawn.mockRestore();
     }
-  },
-);
-
-test("provider process transport preserves existing keys, blank literals, and environment-header fallback", () => {
-  const original: JsonObject = {
-    model_providers: {
-      selected: {
-        env_key: "EXISTING_KEY",
-        experimental_bearer_token: "synthetic-unused-bearer",
-        http_headers: {
-          Authorization: "synthetic-literal",
-          "X-Empty": "",
-          "X-Blank": "  ",
-        },
-        env_http_headers: { authorization: "SELECTED_HEADER" },
-      },
-      blank: { experimental_bearer_token: "  " },
-    },
-    profiles: {
-      inherited: {
-        model_providers: {
-          selected: { experimental_bearer_token: "synthetic-profile-bearer" },
-        },
-      },
-    },
-  };
-  for (const selected of [
-    undefined,
-    "",
-    "  ",
-    "synthetic-environment",
-    "synthetic-Ā",
-    "synthetic-😀",
-    "invalid\nheader",
-  ]) {
-    const environment = { SELECTED_HEADER: selected };
-    const before = structuredClone(original);
-    const launch = providerProcessConfiguration(original, environment);
-    const provider = (launch.config["model_providers"] as JsonObject)[
-      "selected"
-    ] as JsonObject;
-    expect(provider["env_key"]).toBe("EXISTING_KEY");
-    expect(launch.environment["EXISTING_KEY"]).toBeUndefined();
-    expect(provider["experimental_bearer_token"]).toBeUndefined();
-    expect(provider["http_headers"]).toEqual({
-      "X-Empty": "",
-      "X-Blank": "  ",
-    });
-    const headers = provider["env_http_headers"] as JsonObject;
-    if (selected?.startsWith("synthetic-"))
-      expect(headers["Authorization"]).toBeUndefined();
-    else
-      expect(launch.environment[headers["Authorization"] as string]).toBe(
-        "synthetic-literal",
-      );
-    expect((launch.config["model_providers"] as JsonObject)["blank"]).toEqual({
-      experimental_bearer_token: "  ",
-    });
-    expect(JSON.stringify(launch.config)).not.toContain(
-      "synthetic-profile-bearer",
-    );
-    expect(original).toEqual(before);
-    expect(environment).toEqual({ SELECTED_HEADER: selected });
-  }
-});
-
-test.each(["amazon-bedrock", "amazon-bedrock-runtime"])(
-  "%s retains its supported literal-header configuration",
-  (name) => {
-    const config: JsonObject = {
-      model_provider: name,
-      model_providers: {
-        [name]: {
-          http_headers: { "X-Synthetic": "synthetic-header" },
-          aws: { region: "us-east-1" },
-        },
-      },
-    };
-    expect(providerProcessConfiguration(config, {}).config).toEqual(config);
   },
 );
 

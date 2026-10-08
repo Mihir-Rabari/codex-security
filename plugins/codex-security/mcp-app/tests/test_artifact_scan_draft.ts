@@ -144,6 +144,10 @@ test("draft saves read one committed snapshot and preserve accepted findings by 
     remediation: "Preserve this original repair.",
   });
   await f.save(draft({ complete: false, findings: [original] }));
+  const persisted = JSON.parse(await readFile(f.snapshotPath, "utf8"));
+  persisted.findings.findings[0].code_evidence = null;
+  persisted.findings.findings[0].root_cause = null;
+  await writeFile(f.snapshotPath, JSON.stringify(persisted));
   // Archived checkpoints are evidence, not inputs to every subsequent write.
   await mkdir(join(f.root, "checkpoints"));
   await writeFile(join(f.root, "checkpoints", "invalid.json"), "not JSON");

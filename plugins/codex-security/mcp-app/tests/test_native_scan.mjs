@@ -122,6 +122,7 @@ function syntheticPermissionAppServer() {
   };
   const selectedProvider = config.model_providers?.[config.model_provider];
   capture({ kind: "preflight", argv, cwd: process.cwd(), home: process.env.CODEX_HOME, marker: process.env.NATIVE_PROFILE_MARKER,
+    literalCredentialInEnvironment: ["synthetic-provider-token", "synthetic-provider-header"].some(value => Object.values(process.env).includes(value)),
     providerToken: selectedProvider && process.env[selectedProvider.env_key],
     providerHeaders: selectedProvider && Object.fromEntries(Object.entries(selectedProvider.env_http_headers ?? {}).map(([header, key]) => [header, process.env[key]])),
     codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY,
@@ -238,13 +239,17 @@ if (process.argv.includes("app-server")) servePermissionProfiles();
 else {
   const { parse } = require(${JSON.stringify(createRequire(import.meta.url).resolve("smol-toml"))});
   const argv = process.argv.slice(2);
-  const effective = Object.assign({}, ...argv.flatMap((arg, index) =>
-    ["--config", "-c"].includes(arg) ? [parse(argv[index + 1])] : []));
+  const path = require("node:path");
+  const effective = parse(fs.readFileSync(path.join(process.env.CODEX_HOME, "config.toml"), "utf8"));
+  const merge = (target, value) => { for (const [key, child] of Object.entries(value)) target[key] = child && typeof child === "object" && !Array.isArray(child) ? merge(target[key] ?? {}, child) : child; return target; };
+  if (argv.includes("--profile")) merge(effective, parse(fs.readFileSync(path.join(process.env.CODEX_HOME, argv[argv.indexOf("--profile") + 1] + ".config.toml"), "utf8")));
+  for (let i = 0; i < argv.length; i++) if (["--config", "-c"].includes(argv[i])) merge(effective, parse(argv[++i]));
   const selectedProvider = effective.model_providers?.[effective.model_provider];
   fs.appendFileSync(process.env.NATIVE_PROFILE_CAPTURE, JSON.stringify({
     kind: process.argv.includes("login") ? "login" : "exec", argv, home: process.env.CODEX_HOME,
-    providerToken: selectedProvider && process.env[selectedProvider.env_key],
-    providerHeaders: selectedProvider && Object.fromEntries(Object.entries(selectedProvider.env_http_headers ?? {}).map(([header, key]) => [header, process.env[key]])),
+    providerToken: selectedProvider && (selectedProvider.experimental_bearer_token ?? process.env[selectedProvider.env_key]),
+    providerHeaders: selectedProvider && {...selectedProvider.http_headers, ...Object.fromEntries(Object.entries(selectedProvider.env_http_headers ?? {}).map(([header, key]) => [header, process.env[key]]))},
+    literalCredentialInEnvironment: ["synthetic-provider-token", "synthetic-provider-header"].some(value => Object.values(process.env).includes(value)),
     codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY,
   }) + "\\n");
   if (process.argv.includes("login")) { console.error("Logged in using ChatGPT"); process.exit(0); }
@@ -371,6 +376,10 @@ else {
             .map(JSON.parse);
           const executions = rows.filter((row) => row.kind === "exec");
           assert.equal(executions.length, 4);
+          assert.equal(
+            rows.filter((row) => row.kind === "preflight").length,
+            4,
+          );
           for (const row of rows.filter((row) =>
             ["exec", "preflight", "login"].includes(row.kind),
           )) {
@@ -407,8 +416,9 @@ else {
                 assert.equal(provider.env_key, "OPENAI_API_KEY");
               } else if (scenario.endsWith("-bearer")) {
                 assert.equal(provider.experimental_bearer_token, undefined);
-                assert.equal(typeof provider.env_key, "string");
-                assert.equal(row.providerToken, "synthetic-provider-token");
+                assert.equal(row.literalCredentialInEnvironment, false);
+                if (row.kind === "exec")
+                  assert.equal(row.providerToken, "synthetic-provider-token");
                 assert.equal(
                   row.argv.some((argument) =>
                     argument.includes("synthetic-provider-token"),
@@ -417,12 +427,17 @@ else {
                 );
               } else if (scenario.endsWith("-http-headers")) {
                 assert.equal(provider.env_key, undefined);
-                assert.equal(
-                  row.providerHeaders.Authorization,
+                assert.equal(row.literalCredentialInEnvironment, false);
+                if (
+                  row.kind === "exec" ||
                   scenario.endsWith("-env-http-headers")
-                    ? "synthetic-openai-selected"
-                    : "synthetic-provider-header",
-                );
+                )
+                  assert.equal(
+                    row.providerHeaders.Authorization,
+                    scenario.endsWith("-env-http-headers")
+                      ? "synthetic-openai-selected"
+                      : "synthetic-provider-header",
+                  );
                 assert.equal(
                   row.argv.some((argument) =>
                     argument.includes("synthetic-provider-header"),
@@ -2609,6 +2624,9 @@ for (const scenario of [
   "both-finite",
   "saved-literal",
   "current-literal",
+  "saved-glob-current-literal",
+  "saved-literal-current-glob",
+  "repeated-literal",
 ]) {
   test(
     `native merged settings reach every worker: ${scenario}`,
@@ -2692,12 +2710,27 @@ else {
               };
         const configText = stringifyToml(configuration);
         await writeFile(join(home, "config.toml"), configText);
-        const savedPath =
-          scenario === "saved-literal"
+        const samePath = [
+          "saved-glob-current-literal",
+          "saved-literal-current-glob",
+          "repeated-literal",
+        ].includes(scenario);
+        const savedLiteral = [
+          "saved-literal-current-glob",
+          "repeated-literal",
+        ].includes(scenario);
+        const currentLiteral = [
+          "saved-glob-current-literal",
+          "repeated-literal",
+        ].includes(scenario);
+        const savedPath = samePath
+          ? join(repository, "private[0]")
+          : scenario === "saved-literal"
             ? join(repository, "saved.env")
             : join(repository, "**", "saved.env");
-        const currentPath =
-          scenario === "current-literal"
+        const currentPath = samePath
+          ? savedPath
+          : scenario === "current-literal"
             ? join(repository, "current.env")
             : join(repository, "**", "current.env");
         const permissionsCase =
@@ -2720,7 +2753,7 @@ else {
             ? 3
             : 7;
         for (const resumed of [false, true]) {
-          const prepared = await prepareNativeScan({
+          const request = {
             ...input(),
             pluginRoot,
             scan: {
@@ -2732,7 +2765,10 @@ else {
             reasoningEffort: "ultra",
             parentSandbox: permissionsCase
               ? {
-                  filesystemDenies: [currentPath],
+                  filesystemDenies: currentLiteral ? [] : [currentPath],
+                  ...(currentLiteral
+                    ? { literalFilesystemDenies: [currentPath] }
+                    : {}),
                   ...(currentDepth === undefined
                     ? {}
                     : { globScanMaxDepth: currentDepth }),
@@ -2756,7 +2792,7 @@ else {
                 ? {
                     inheritedPermissions: {
                       filesystem: {
-                        [savedPath]: "deny",
+                        [savedPath]: savedLiteral ? { ".": "deny" } : "deny",
                         ...(savedDepth === undefined
                           ? {}
                           : { glob_scan_max_depth: savedDepth }),
@@ -2766,7 +2802,16 @@ else {
                   }
                 : {}),
             },
-          });
+          };
+          if (samePath && savedLiteral !== currentLiteral) {
+            await assert.rejects(
+              prepareNativeScan(request),
+              /literal.*glob|glob.*literal/u,
+            );
+            await assert.rejects(readFile(capture), { code: "ENOENT" });
+            continue;
+          }
+          const prepared = await prepareNativeScan(request);
           const ambient = prepared.client.dependencies.ambientExecution;
           const runtime = await prepareAmbientRuntime(ambient);
           try {
@@ -2845,8 +2890,18 @@ else {
               } else {
                 const filesystem =
                   config.permissions[config.default_permissions].filesystem;
-                assert.equal(filesystem[savedPath], "deny");
-                assert.equal(filesystem[currentPath], "deny");
+                assert.equal(
+                  savedLiteral
+                    ? filesystem[savedPath]["."]
+                    : filesystem[savedPath],
+                  "deny",
+                );
+                assert.equal(
+                  currentLiteral
+                    ? filesystem[currentPath]["."]
+                    : filesystem[currentPath],
+                  "deny",
+                );
                 assert.equal(filesystem.glob_scan_max_depth, expectedDepth);
               }
               assert.equal(

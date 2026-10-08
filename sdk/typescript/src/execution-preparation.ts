@@ -20,7 +20,6 @@ import {
   deepMerge,
   providerProcessConfiguration,
   mcpProcessConfiguration,
-  bedrockProcessConfiguration,
   codexConfigOverrides,
   writeCodexConfig,
   writeCodexConfigContents,
@@ -269,16 +268,12 @@ export function createExecutionCodex(
   }
   const nativeTransport =
     client.createCodex === undefined || runtime.preserveCodexHomeConfig;
-  const launch = nativeTransport
-    ? providerProcessConfiguration(launchConfig, environment)
-    : { config: launchConfig, environment };
-  const sdkCodexConfig = { ...launch.config };
-  Object.assign(environment, launch.environment);
+  const sdkCodexConfig = { ...launchConfig };
   const mcpLaunch = nativeTransport
     ? mcpProcessConfiguration(sdkCodexConfig)
     : { config: sdkCodexConfig, requiresConfigFile: false };
   const providerLaunch = nativeTransport
-    ? bedrockProcessConfiguration(mcpLaunch.config)
+    ? providerProcessConfiguration(mcpLaunch.config)
     : { config: mcpLaunch.config, requiresConfigFile: false };
   const processConfig = { ...providerLaunch.config };
   const requiresConfigFile =

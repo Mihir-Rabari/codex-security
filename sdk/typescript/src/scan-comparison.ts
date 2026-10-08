@@ -23,7 +23,6 @@ import {
   codexConfigOverrides,
   providerProcessConfiguration,
   mcpProcessConfiguration,
-  bedrockProcessConfiguration,
   hasCommandAuth,
   mergedCodexConfig,
   normalizeLegacyWindowsSandboxOverride,
@@ -36,7 +35,6 @@ import {
   type JsonObject,
 } from "./config.js";
 import { prepareReadOnlyExecution } from "./execution-preparation.js";
-import { definedEnvironment } from "./execution-auth.js";
 import { createExecutionProfileCodex } from "./execution-profile.js";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
 import {
@@ -679,26 +677,21 @@ async function startReadOnlyCodexThread(
   const createCodex =
     preparedFactory ??
     (({ config, configOverrides, ...settings }: CodexOptions) => {
-      const launch = providerProcessConfiguration(
-        (config ?? {}) as JsonObject,
-        settings.env ?? {},
-      );
-      const provider = bedrockProcessConfiguration(
-        mcpProcessConfiguration(launch.config).config,
-      );
+      const configuration = (config ?? {}) as JsonObject;
+      const mcp = mcpProcessConfiguration(configuration);
+      const provider = providerProcessConfiguration(mcp.config);
       const settingsWithOverrides = {
         ...settings,
-        env: definedEnvironment(launch.environment),
         configOverrides: [
           ...codexConfigOverrides(provider.config),
           ...(configOverrides ?? []),
         ],
       };
-      return provider.requiresConfigFile
+      return provider.requiresConfigFile || mcp.requiresConfigFile
         ? createExecutionProfileCodex(
             settingsWithOverrides,
-            configuredCodexHome(launch.environment),
-            launch.config,
+            configuredCodexHome(settings.env ?? {}),
+            configuration,
           )
         : new Codex(settingsWithOverrides);
     });
@@ -800,7 +793,6 @@ export async function disabledMcpServers(
   configOverrides: readonly string[] = [],
 ): Promise<JsonObject> {
   const workingDirectory = resolve(options.workingDirectory ?? process.cwd());
-  const launch = providerProcessConfiguration(config ?? {}, environment);
   const { success, stdout, stderr } = await runCodexCommand(
     command,
     [
@@ -808,8 +800,8 @@ export async function disabledMcpServers(
       workingDirectory,
       ...[
         ...codexConfigOverrides(
-          bedrockProcessConfiguration(
-            mcpProcessConfiguration(launch.config).config,
+          providerProcessConfiguration(
+            mcpProcessConfiguration(config ?? {}).config,
           ).config,
         ),
         ...configOverrides,
@@ -820,7 +812,7 @@ export async function disabledMcpServers(
       "list",
       "--json",
     ],
-    definedEnvironment(launch.environment),
+    environment,
     undefined,
     options.signal,
     workingDirectory,

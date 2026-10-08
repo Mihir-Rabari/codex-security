@@ -343,9 +343,16 @@ export async function runDeepScans(
         [...completed.values()]
           .filter((pass) => merged.has(pass.scanId))
           .map((pass) => pass.draft.coverage),
-        state.passes
-          .filter((pass) => !pass.scanId || !merged.has(pass.scanId))
-          .map((pass) => pass.directory),
+        [
+          ...state.passes
+            .filter((pass) => !pass.scanId || !merged.has(pass.scanId))
+            .map((pass) => pass.directory),
+          ...(state.passes.length === 0 && deadlineController.signal.aborted
+            ? [
+                "The configured discovery time limit elapsed before any source review completed.",
+              ]
+            : []),
+        ],
         state.mergedScanIds.some((id) => !completed.has(id))
           ? state.aggregate.coverage
           : undefined,

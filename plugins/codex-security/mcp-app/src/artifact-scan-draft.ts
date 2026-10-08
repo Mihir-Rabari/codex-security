@@ -764,7 +764,7 @@ function savedDraft(
     throw new Error(
       "scan checkpoint: saved result belongs to a different scan.",
     );
-  const input = parseSavedScanDraft(semanticDraft(context, draft));
+  const input = parsePersistedScanDraft(semanticDraft(context, draft));
   requireDraftIdentities(input);
   return input;
 }
@@ -923,7 +923,7 @@ export function parseScanDraft(input: unknown): ScanDraftInput {
 
 /** Validate saved drafts before reconciling interrupted writes and older findings. */
 export function parsePersistedScanDraft(
-  input: Record<string, unknown>,
+  input: Record<string, unknown> | ScanDraftInput,
 ): ScanDraftInput {
   const compatible = structuredClone(input);
   if (!Array.isArray(compatible.findings)) {

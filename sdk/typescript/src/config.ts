@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { isRecord } from "./record.js";
-import { environmentEntry } from "./codex-home.js";
 import { mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
@@ -510,72 +509,29 @@ function isObject(value: unknown): value is Record<string, JsonValue> {
   return prototype === Object.prototype || prototype === null;
 }
 
-/** @internal Keep file-backed provider credentials out of native process arguments. */
-export function providerProcessConfiguration(
-  config: JsonObject,
-  environment: NodeJS.ProcessEnv,
-): { config: JsonObject; environment: NodeJS.ProcessEnv } {
+/** @internal Provider credentials stay in protected config, not argv or shell environments. */
+export function providerProcessConfiguration(config: JsonObject): {
+  config: JsonObject;
+  requiresConfigFile: boolean;
+} {
   const result = structuredClone(config);
-  const childEnvironment = { ...environment };
-  const prefix = `CODEX_SECURITY_INTERNAL_${randomUUID().replaceAll("-", "_")}`;
-  let index = 0;
-  const transfer = (value: string): string => {
-    const name = `${prefix}_${index++}_TOKEN`;
-    childEnvironment[name] = value;
-    return name;
-  };
+  let requiresConfigFile = false;
   const providers = (source: JsonObject): void => {
     if (!isRecord(source["model_providers"])) return;
-    for (const [name, provider] of Object.entries(source["model_providers"])) {
-      // Bedrock accepts literal headers but rejects env_http_headers overrides.
-      if (
-        ["amazon-bedrock", "amazon-bedrock-runtime"].includes(name) ||
-        !isRecord(provider)
-      )
-        continue;
-      const bearer = provider["experimental_bearer_token"];
-      if (typeof bearer === "string" && /\P{White_Space}/u.test(bearer)) {
-        // Codex requires an existing env_key before considering a literal bearer.
-        if (provider["env_key"] === undefined)
-          provider["env_key"] = transfer(bearer);
-        delete provider["experimental_bearer_token"];
+    for (const provider of Object.values(source["model_providers"])) {
+      if (!isRecord(provider)) continue;
+      for (const field of ["experimental_bearer_token", "http_headers"]) {
+        if (!Object.hasOwn(provider, field)) continue;
+        delete provider[field];
+        requiresConfigFile = true;
       }
-      const headers = provider["http_headers"];
-      if (!isRecord(headers)) continue;
-      const environmentHeaders = isRecord(provider["env_http_headers"])
-        ? provider["env_http_headers"]
-        : {};
-      for (const [name, value] of Object.entries(headers)) {
-        // Env-backed headers omit blank values; retain those literal semantics.
-        if (typeof value !== "string" || !/\P{White_Space}/u.test(value))
-          continue;
-        const overridden = Object.entries(environmentHeaders).some(
-          ([header, variable]) => {
-            if (
-              header.toLowerCase() !== name.toLowerCase() ||
-              typeof variable !== "string"
-            )
-              return false;
-            const selected = environmentEntry(environment, variable);
-            // Codex validates UTF-8 header bytes, including non-ASCII values.
-            return (
-              typeof selected === "string" &&
-              /\P{White_Space}/u.test(selected) &&
-              !/[\u0000-\u0008\u000a-\u001f\u007f]/u.test(selected)
-            );
-          },
-        );
-        if (!overridden) environmentHeaders[name] = transfer(value);
-        delete headers[name];
-      }
-      provider["env_http_headers"] = environmentHeaders;
     }
   };
   providers(result);
   if (isRecord(result["profiles"]))
     for (const profile of Object.values(result["profiles"]))
-      if (isRecord(profile)) providers(profile as JsonObject);
-  return { config: result, environment: childEnvironment };
+      if (isRecord(profile)) providers(profile);
+  return { config: result, requiresConfigFile };
 }
 
 /** @internal MCP credentials are read from protected config, not process arguments. */
@@ -595,30 +551,6 @@ export function mcpProcessConfiguration(config: JsonObject): {
       }
     }
   }
-  return { config: result, requiresConfigFile };
-}
-
-/** @internal Bedrock headers remain file-backed; Codex rejects env_http_headers. */
-export function bedrockProcessConfiguration(config: JsonObject): {
-  config: JsonObject;
-  requiresConfigFile: boolean;
-} {
-  const result = structuredClone(config);
-  let requiresConfigFile = false;
-  const removeHeaders = (source: JsonObject) => {
-    if (!isRecord(source["model_providers"])) return;
-    for (const name of ["amazon-bedrock", "amazon-bedrock-runtime"]) {
-      const provider = source["model_providers"][name];
-      if (!isRecord(provider) || !Object.hasOwn(provider, "http_headers"))
-        continue;
-      delete provider["http_headers"];
-      requiresConfigFile = true;
-    }
-  };
-  removeHeaders(result);
-  if (isRecord(result["profiles"]))
-    for (const profile of Object.values(result["profiles"]))
-      if (isRecord(profile)) removeHeaders(profile as JsonObject);
   return { config: result, requiresConfigFile };
 }
 

@@ -1054,6 +1054,15 @@ test("zero-work Deep Scan preserves a zero receipt across interrupted sealing", 
   expect(result.cost).toEqual(zeroCost);
   expect(result.findings.findings).toEqual([]);
   expect(result.coverage.completeness).toBe("partial");
+  expect(result.coverage.deferred).toEqual([
+    expect.objectContaining({
+      reason:
+        "The configured discovery time limit elapsed before any source review completed.",
+    }),
+  ]);
+  expect(await readFile(join(h.outputDir, "report.md"), "utf8")).toContain(
+    "No source review completed before the configured time limit. No vulnerability conclusion can be drawn.",
+  );
   expect(h.launches).toHaveLength(0);
 });
 

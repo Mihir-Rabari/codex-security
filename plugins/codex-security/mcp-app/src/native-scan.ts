@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { isRecord } from "./record.js";
 import {
   CodexSecurity,
   type ScanOptions,
@@ -165,6 +166,24 @@ export async function prepareNativeScan(
     environment.CODEX_SECURITY_STATE_DIR = input.stateDirectory;
   const savedPermissions = recipe?.inheritedPermissions;
   const savedGlobDepth = savedPermissions?.filesystem.glob_scan_max_depth;
+  for (const path of input.parentSandbox.literalFilesystemDenies ?? []) {
+    const saved = savedPermissions?.filesystem[path];
+    if (/[?*\[]/u.test(path) && (saved === "deny" || saved === "none"))
+      throw new CodexSecurityError(
+        "Saved glob and current literal filesystem denials with the same key cannot be preserved.",
+      );
+  }
+  for (const path of input.parentSandbox.filesystemDenies) {
+    const saved = savedPermissions?.filesystem[path];
+    if (
+      /[?*\[]/u.test(path) &&
+      isRecord(saved) &&
+      (saved["."] === "deny" || saved["."] === "none")
+    )
+      throw new CodexSecurityError(
+        "Saved literal and current glob filesystem denials with the same key cannot be preserved.",
+      );
+  }
   const inheritedPermissions = {
     filesystem: Object.fromEntries([
       [":workspace_roots", "write"],

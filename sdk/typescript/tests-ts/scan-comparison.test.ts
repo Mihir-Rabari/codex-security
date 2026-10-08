@@ -865,8 +865,13 @@ process.exit(0);
           .map((line) => JSON.parse(line));
         if (literalCredentials) {
           expect(enumerations).toHaveLength(2);
-          for (const capture of [native, ordinary])
+          for (const capture of [native, ordinary]) {
             expect(capture.ambientConfigContents).toBe(homeConfig);
+            const fileConfig = parse(capture.configContents) as JsonObject;
+            expect(
+              (fileConfig["model_providers"] as JsonObject)[name],
+            ).toMatchObject(provider);
+          }
           for (const launch of [
             ...[native, ordinary].map((capture) => ({
               argv: capture.argv,
@@ -882,28 +887,13 @@ process.exit(0);
                 argvConfig(launch.argv)["model_providers"] as
                   JsonObject | undefined
               )?.[name] as JsonObject | undefined) ?? {};
-            if (["amazon-bedrock", "amazon-bedrock-runtime"].includes(name)) {
-              expect(configured["http_headers"]).toBeUndefined();
-              expect(configured["env_http_headers"]).toBeUndefined();
-              for (const capture of [native, ordinary]) {
-                const fileConfig = parse(capture.configContents) as JsonObject;
-                expect(
-                  (fileConfig["model_providers"] as JsonObject)[name],
-                ).toMatchObject(provider);
-              }
-            } else if (provider["experimental_bearer_token"] !== undefined) {
-              expect(configured).not.toHaveProperty(
-                "experimental_bearer_token",
-              );
-              expect(launch.environment[configured["env_key"] as string]).toBe(
-                provider["experimental_bearer_token"],
-              );
-            } else {
-              const headers = configured["env_http_headers"] as JsonObject;
-              expect(
-                launch.environment[headers["Authorization"] as string],
-              ).toBe((provider["http_headers"] as JsonObject)["Authorization"]);
-            }
+            expect(configured["experimental_bearer_token"]).toBeUndefined();
+            expect(configured["http_headers"]).toBeUndefined();
+            expect(
+              Object.keys(launch.environment).filter((key) =>
+                key.startsWith("CODEX_SECURITY_INTERNAL_"),
+              ),
+            ).toEqual([]);
           }
         }
         if (selection === "home-definition") {

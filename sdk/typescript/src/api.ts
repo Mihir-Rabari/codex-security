@@ -121,7 +121,6 @@ import { jsonForPrompt, shellEnvironmentReference } from "./codex-prompt.js";
 import {
   DEFAULT_CODEX_CONFIG,
   EXTERNAL_CODEX_PROVIDERS,
-  providerProcessConfiguration,
   deepMerge,
   inlineToml,
   isExternalModelProvider,
@@ -2646,15 +2645,12 @@ export class CodexSecurity {
                         signal,
                       );
                 try {
-                  const launch = runtime.preserveCodexHomeConfig
-                    ? providerProcessConfiguration(matcherConfig, environment)
-                    : { config: matcherConfig, environment };
-                  const processConfig = { ...launch.config };
+                  const processConfig = { ...matcherConfig };
                   delete processConfig["projects"];
                   matcherConfig["mcp_servers"] = await disabledMcpServers(
                     session.source.command,
                     processConfig,
-                    definedEnvironment(launch.environment),
+                    definedEnvironment(environment),
                     { signal, workingDirectory: repo },
                     configOverrides,
                   );

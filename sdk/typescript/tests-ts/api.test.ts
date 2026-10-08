@@ -982,6 +982,7 @@ describe("CodexSecurity orchestration", () => {
         },
         resolvePluginPython: async () => python!,
         prepareOutputDir: async () => scanDir,
+        prepareScanArtifactRestorer: runtime.prepareScanArtifactRestorer,
         runWorkbench: async (_options, args, input) => {
           const value = await runWorkbench(workbenchOptions, args, input);
           if (args[0] === "register-cli-scan") scanId = String(value["scanId"]);
