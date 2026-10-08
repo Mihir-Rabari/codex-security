@@ -112,6 +112,7 @@ test.each([
     const clients: TestClient[] = [];
     const runs: Promise<unknown>[] = [];
     const snapshots: string[] = [];
+    const snapshotContents: string[] = [];
     const filesystems: Array<Record<string, unknown>> = [];
     const observedProviders: Array<Record<string, unknown>> = [];
     const checkedLaunches = [0, 0];
@@ -245,6 +246,7 @@ test.each([
                       ".": "deny",
                     });
                     const preflight = await readFile(snapshots[index]!, "utf8");
+                    snapshotContents[index] ??= preflight;
                     expect(preflight).not.toContain("synthetic-key-");
                     expect(preflight).not.toContain("synthetic-header-");
                     expect(config["web_search"]).toBe(webSearch);
@@ -299,12 +301,19 @@ test.each([
           ),
         );
       }
+      const scanOptions = {
+        mode: "deep" as const,
+        workers: 1,
+        subagents: 0,
+        maxDiscoveryRuns: 1,
+        stopAfterConsecutiveErrors: 1,
+      };
       // A's snapshot exists before B updates the shared credential home.
-      runs.push(clients[0]!.run(repository, { mode: "deep" }));
+      runs.push(clients[0]!.run(repository, scanOptions));
       await Promise.race([ready[0]!.promise, runs[0]]);
       runs.push(
         clients[1]!
-          .run(repository, { mode: "deep" })
+          .run(repository, scanOptions)
           .finally(() => ready[1]!.resolve()),
       );
       const outcomes = await Promise.allSettled(runs);
@@ -321,6 +330,9 @@ test.each([
       expect(observedProviders[0]).not.toEqual(observedProviders[1]);
       expect(checkedLaunches).toEqual(launches);
       expect(checkedLaunches.every((count) => count > 0)).toBe(true);
+      for (const [index, snapshot] of snapshots.entries()) {
+        expect(await readFile(snapshot, "utf8")).toBe(snapshotContents[index]!);
+      }
       expect(
         await readFile(join(sourceHome, "config.toml"), "utf8").catch(() => ""),
       ).toBe("");
