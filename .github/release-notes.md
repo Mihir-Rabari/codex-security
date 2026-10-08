@@ -110,6 +110,7 @@
 - deduplicate saved scans with local SQLite ([#1338](https://github.com/openai/codex-security/pull/1338))
 - preserve manual line breaks ([#186](https://github.com/openai/codex-security/pull/186))
 - preserve saved diff snapshot provenance ([#1286](https://github.com/openai/codex-security/pull/1286))
+- cancel inherited pipes after the login process exits ([#1068](https://github.com/openai/codex-security/pull/1068))
 
 <!-- release-section: highlights:end -->
 
