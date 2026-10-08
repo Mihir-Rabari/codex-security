@@ -21,7 +21,7 @@ import * as fsPromises from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import * as childProcess from "node:child_process";
 import { createHash, hash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 import { basename, delimiter, dirname, join, relative, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -4390,6 +4390,95 @@ describe("CodexSecurity orchestration", () => {
       }
       expect(turns).toBe(2);
       await (closing ?? client.close());
+    },
+  );
+
+  test.each(["finalization", "earlier live poll"] as const)(
+    "applies the completed receipt without clearing an overage from %s",
+    async (phase) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      await copyCompletedScan(root);
+      const sessions = join(codexHome, "sessions");
+      await mkdir(sessions);
+      const rollout = join(sessions, "root.jsonl");
+      const token = (usage: Record<string, number>) =>
+        `${JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: usage } } })}\n`;
+      await writeFile(
+        rollout,
+        `${JSON.stringify({ type: "session_meta", payload: { id: "thread-1" } })}\n` +
+          token({ input_tokens: 0, output_tokens: 0 }),
+      );
+      let initialSeen!: () => void;
+      let overageSeen!: () => void;
+      const initialReady = new Promise<void>((resolve) => {
+        initialSeen = resolve;
+      });
+      const overageReady = new Promise<void>((resolve) => {
+        overageSeen = resolve;
+      });
+      const costs: number[] = [];
+      let receivedFinal = false;
+      const aborts: boolean[] = [];
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        resolveScanSessionPaths: async () => new Map([[rollout, "thread-1"]]),
+        createCodex: codexFactory(
+          async (_prompt: unknown, options: { signal?: AbortSignal }) => {
+            options.signal?.addEventListener(
+              "abort",
+              () => aborts.push(receivedFinal),
+              { once: true },
+            );
+            return {
+              events: (async function* (): AsyncGenerator<ThreadEvent> {
+                yield { type: "thread.started", thread_id: "thread-1" };
+                await initialReady;
+                // Keep the final receipt adjacent to the file update without a timer gap.
+                appendFileSync(
+                  rollout,
+                  token({ input_tokens: 1_000_000, output_tokens: 100_000 }),
+                );
+                if (phase === "earlier live poll") await overageReady;
+                receivedFinal = true;
+                yield {
+                  type: "turn.completed",
+                  usage: {
+                    input_tokens: 2_000_000,
+                    cached_input_tokens: 1_800_000,
+                    cache_write_input_tokens: 100_000,
+                    output_tokens: 100_000,
+                    reasoning_output_tokens: 0,
+                  },
+                };
+              })(),
+            };
+          },
+          "thread-1",
+        ),
+      });
+      try {
+        const result = client.run(repository, {
+          maxCostUsd: 5,
+          onCost: (cost) => {
+            costs.push(cost.estimatedUsd);
+            if (cost.estimatedUsd === 0) initialSeen();
+            if (cost.estimatedUsd > 5) overageSeen();
+          },
+        });
+        if (phase === "earlier live poll") {
+          await expect(result).rejects.toBeInstanceOf(
+            ScanCostLimitExceededError,
+          );
+          expect(costs.slice(0, 2)).toEqual([0, 6]);
+          expect(aborts).toEqual([false]);
+        } else {
+          expect((await result).cost?.estimatedUsd).toBe(3.62);
+          expect(costs).toEqual([0, 3.62]);
+          expect(aborts).toEqual([]);
+        }
+      } finally {
+        await client.close();
+      }
     },
   );
 

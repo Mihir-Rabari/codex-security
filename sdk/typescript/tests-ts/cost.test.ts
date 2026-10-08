@@ -3395,6 +3395,7 @@ describe("live scan cost tracking", () => {
         onCost: (cost) => costs.push(cost.inputTokens),
       },
       async (tracker) => {
+        await tracker.refresh();
         expect((await tracker.stop(later)).cost?.inputTokens).toBe(150);
         expect(costs).toEqual([100, 150]);
         expect(events).toHaveLength(5);
@@ -6500,6 +6501,78 @@ test("includes the price source and rates with each estimate", () => {
       },
     },
   });
+});
+
+test.each([
+  ["unknown", undefined, 1_900_000, 0.58],
+  ["known", 100_000, 1_800_000, 0.81],
+] as const)(
+  "retains %s cache writes when a growing SDK receipt adds cached reads",
+  async (_kind, writes, cachedReads, expectedUsd) => {
+    const home = await codexHome();
+    await writeUsageSession(home, "scan-thread", {
+      input_tokens: 1_000_000,
+      cached_input_tokens: 0,
+      output_tokens: 0,
+      ...(writes === undefined ? {} : { cache_write_input_tokens: writes }),
+    });
+    const thread = new Codex({
+      codexPathOverride: process.execPath,
+    }).startThread();
+    const executable = thread as unknown as {
+      _exec: { run(): AsyncGenerator<string> };
+    };
+    executable._exec.run = async function* () {
+      yield JSON.stringify({
+        type: "thread.started",
+        thread_id: "scan-thread",
+      });
+      yield JSON.stringify({
+        type: "turn.completed",
+        usage: {
+          input_tokens: 2_000_000,
+          cached_input_tokens: cachedReads,
+          output_tokens: 0,
+        },
+      });
+    };
+    const receipt = (await thread.run("Scan the repository.")).usage;
+    expect(receipt?.cache_write_input_tokens).toBe(0);
+    const costs: number[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-terra",
+      maxCostUsd: 1.5,
+      onCost: (cost) => costs.push(cost.estimatedUsd),
+    });
+    tracker.start("scan-thread");
+    const completed = await tracker.stop(receipt);
+    expect(completed.cost).toMatchObject({
+      inputTokens: 2_000_000,
+      cachedInputTokens: cachedReads,
+      cacheWriteInputTokens: writes ?? 0,
+      cacheWriteInputTokensReported: false,
+      outputTokens: 0,
+      estimatedUsd: expectedUsd,
+    });
+    expect(costs).toEqual([expectedUsd]);
+  },
+);
+
+test("preserves a newer recorded root receipt when stop receives stale usage", async () => {
+  const home = await codexHome();
+  const costs: number[] = [];
+  const tracker = new ScanCostTracker({
+    codexHome: home,
+    model: "gpt-5.6-terra",
+    maxCostUsd: 1,
+    onCost: (cost) => costs.push(cost.estimatedUsd),
+  });
+  tracker.start("scan-thread");
+  tracker.recordUsage({ input_tokens: 2_000, output_tokens: 100 });
+  const final = await tracker.stop({ input_tokens: 100, output_tokens: 10 });
+  expect(final.cost).toMatchObject({ inputTokens: 2_000, outputTokens: 100 });
+  expect(costs).toEqual([0.0052]);
 });
 
 test.each([

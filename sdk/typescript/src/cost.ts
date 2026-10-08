@@ -245,6 +245,17 @@ export class ScanCostTracker {
       this.#timer = null;
     }
     const suppliedRoot = tokenUsage(fallbackUsage);
+    if (suppliedRoot !== null) {
+      this.#completedThreadUsage.set(
+        this.#threadId,
+        higherCostUsage(
+          this.#options.model,
+          this.#completedThreadUsage.get(this.#threadId) ?? null,
+          suppliedRoot,
+          true,
+        ),
+      );
+    }
     let ownedPaths: ReadonlyMap<string, string> | undefined;
     let ownershipFailure: { error: unknown } | null = null;
     if (
@@ -1441,6 +1452,24 @@ function higherCostUsage(
     previousCost?.estimatedUsd === nextCost?.estimatedUsd
   )
     return previous;
+  // Growing receipts can refine reads without establishing omitted cache writes.
+  if (
+    nextIsSdkReceipt &&
+    previous !== null &&
+    next.cache_write_input_tokens === 0 &&
+    next.input_tokens >= previous.input_tokens &&
+    next.output_tokens >= previous.output_tokens &&
+    (next.input_tokens > previous.input_tokens ||
+      next.output_tokens > previous.output_tokens) &&
+    next.cached_input_tokens > previous.cached_input_tokens
+  ) {
+    const refined = tokenUsage({
+      ...next,
+      cache_write_input_tokens: previous.cache_write_input_tokens,
+      cache_write_input_tokens_reported: false,
+    });
+    if (refinesCacheClassification(previous, refined)) return refined;
+  }
   // A receipt's synthesized zero does not establish complete cache writes.
   if (
     (!nextIsSdkReceipt || next.cache_write_input_tokens > 0) &&
