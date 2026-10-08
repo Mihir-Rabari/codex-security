@@ -756,3 +756,81 @@ for (const changedReceipt of [false, true]) {
     }
   });
 }
+
+for (const mode of ["idless", "explicit", "mixed"]) {
+  for (const attempts of [2, 3]) {
+    test(`legacy equal coverage rows keep occurrence origins, mode=${mode}, attempts=${attempts}`, async () => {
+      const f = await fixture();
+      try {
+        f.context.deepReducer.claimedWorkers[0].attempt = attempts;
+        const archivedBytes: { path: string; bytes: Buffer }[] = [];
+        for (let attempt = 1; attempt <= attempts; attempt++) {
+          await mkdir(f.output, { recursive: true });
+          const surface = {
+            label: "Synthetic repeated legacy observation",
+            disposition: "needs_follow_up",
+            receiptRefs: [],
+          };
+          const surfaces = Array.from({ length: attempt }, (_, index) => ({
+            ...surface,
+            ...(mode === "explicit" || (mode === "mixed" && index > 0)
+              ? { id: `legacy-${index + 1}` }
+              : {}),
+          }));
+          // Persisted older worker outputs retain optional IDs and row order.
+          await writeFile(
+            f.resultPath,
+            JSON.stringify(
+              workerDraft([], {
+                complete: true,
+                coverage: {
+                  completeness: "partial",
+                  surfaces,
+                  explicitExclusions: [],
+                  deferred: [],
+                },
+              }),
+            ),
+          );
+          if (attempt < attempts) {
+            const bytes = await readFile(f.resultPath);
+            const archive = path.join(
+              f.workerRoot,
+              "attempts",
+              `attempt-0${attempt}`,
+            );
+            await archiveDirectory(f.output, archive);
+            archivedBytes.push({
+              path: path.join(archive, "result.json"),
+              bytes,
+            });
+          }
+        }
+        const original = await readFile(f.resultPath);
+        await validateDiscoveryArtifacts(
+          { workersRoot: path.dirname(f.workerRoot) },
+          f.resultPath,
+          scanId,
+        );
+        const coverage = (await readDeepReductionSources(f.context))
+          .discoveries[0].coverage;
+        assert.deepEqual(
+          coverage.surfaces.map(
+            (row: { provenance: { attempt: number } }) =>
+              row.provenance.attempt,
+          ),
+          Array.from({ length: attempts }, (_, index) => index + 1),
+        );
+        assert.equal(
+          new Set(coverage.surfaces.map((row: { id: string }) => row.id)).size,
+          attempts,
+        );
+        assert.deepEqual(await readFile(f.resultPath), original);
+        for (const archived of archivedBytes)
+          assert.deepEqual(await readFile(archived.path), archived.bytes);
+      } finally {
+        await rm(f.root, { recursive: true, force: true });
+      }
+    });
+  }
+}

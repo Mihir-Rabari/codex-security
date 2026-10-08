@@ -365,6 +365,11 @@ export function projectDiscoveryCoverage(
   const history = [...archived].sort(
     (left, right) => left.attempt - right.attempt,
   );
+  // Each historical occurrence accounts for one current surface in that attempt.
+  const matchedHistoricalSurfaces = new Map<
+    (typeof history)[number],
+    Set<number>
+  >();
   const surfaces = coverage.surfaces as Record<string, unknown>[];
   const prefix = (item: Record<string, unknown>) =>
     `${worker.id}-attempt-${(item.provenance as Record<string, unknown>).attempt ?? "unknown"}`;
@@ -377,11 +382,26 @@ export function projectDiscoveryCoverage(
         archivePrefix,
         receiptDigests,
       );
-    const original = history.find((historical) =>
-      ((historical.coverage[field] as unknown[] | undefined) ?? []).some(
-        matches,
-      ),
-    );
+    let original: (typeof history)[number] | undefined;
+    for (const historical of history) {
+      const rows = (historical.coverage[field] as unknown[] | undefined) ?? [];
+      if (field !== "surfaces") {
+        if (rows.some(matches)) {
+          original = historical;
+          break;
+        }
+        continue;
+      }
+      const matched =
+        matchedHistoricalSurfaces.get(historical) ?? new Set<number>();
+      const index = rows.findIndex(
+        (saved, index) => !matched.has(index) && matches(saved),
+      );
+      if (index < 0) continue;
+      matched.add(index);
+      matchedHistoricalSurfaces.set(historical, matched);
+      original ??= historical;
+    }
     const currentSources =
       (originalCoverage[field] as unknown[] | undefined) ?? [];
     const savedSource =

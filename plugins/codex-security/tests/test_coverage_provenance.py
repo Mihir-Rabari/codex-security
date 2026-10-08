@@ -1600,3 +1600,69 @@ def test_dense_retained_projection_keeps_every_linked_record(
         row for row in coverage["deferred"] if row.get("id") != "scan-stopped"
     ] == projected_deferred
     assert result.read_bytes() == original
+
+
+@pytest.mark.parametrize("mode", ["idless", "explicit"])
+@pytest.mark.parametrize("missing", [False, True], ids=["full-projection", "partial-projection"])
+@pytest.mark.parametrize("retry", [False, True], ids=["direct", "failed-retry"])
+def test_legacy_occurrences_survive_supported_parent_projection(
+    workbench_api, workbench_db, publication_scan, monkeypatch, mode, missing, retry
+):
+    scan = publication_scan()
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    surface = {
+        "label": "Synthetic repeated legacy observation",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [],
+    }
+    surfaces = [
+        {**surface, **({"id": "legacy-first"} if mode == "explicit" else {})},
+        {**surface, **({"id": "legacy-second"} if mode == "explicit" else {})},
+    ]
+    # Accepted older worker outputs can persist two equal rows without IDs.
+    result.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": [],
+                "coverage": {**scan.coverage, "completeness": "partial", "surfaces": surfaces},
+            }
+        )
+    )
+    original = result.read_bytes()
+    surfaces = json.loads(original)["coverage"]["surfaces"]
+    assert len(surfaces) == 2
+    projected = []
+    for index, surface in enumerate(surfaces[:1] if missing else surfaces, 1):
+        provenance = {"workerId": worker_id, "attempt": 1}
+        if "id" in surface:
+            provenance["sourceId"] = surface["id"]
+        projected.append(
+            {
+                **copy.deepcopy(surface),
+                "id": f"{worker_id}-attempt-1-surface-{index}",
+                "provenance": provenance,
+            }
+        )
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "completeness": "partial",
+            "surfaces": projected,
+            "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "partial"}],
+        },
+    )
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    assert len(coverage["surfaces"]) == 2
+    assert result.read_bytes() == original
+    assert coverage["surfaces"][0] == projected[0]
