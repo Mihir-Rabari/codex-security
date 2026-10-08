@@ -1,4 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   mkdir,
   mkdtemp,
@@ -22,6 +23,7 @@ import {
   type OsvProcessResult,
 } from "../src/sca-osv.js";
 import type { ScaInput } from "../src/sca-types.js";
+import { dependencyScanResult, saveDependencyScan } from "../src/sca.js";
 
 const execFile = promisify(execFileCallback);
 const temporaryDirectories: string[] = [];
@@ -599,6 +601,68 @@ describe("SCA input selection", () => {
       ).toBe(true);
     },
   );
+  test.each(["link", "directory"])(
+    "persists discovered inputs when an unsafe config %s prevents scanning",
+    async (shape) => {
+      const { root, repository, output } = await setup();
+      const content = npmLock();
+      await mkdir(join(repository, "nested"));
+      for (const path of ["package-lock.json", "nested/package-lock.json"])
+        await writeFile(join(repository, path), content);
+      await writeFile(join(repository, "osv-scanner.toml"), "");
+      const unsafeConfig = join(repository, "nested", "osv-scanner.toml");
+      if (shape === "link") {
+        const outside = join(root, "external.toml");
+        await writeFile(outside, "");
+        await symlink(outside, unsafeConfig);
+      } else await mkdir(unsafeConfig);
+      let scannerCalls = 0;
+      const result = await runOsvScan(
+        { repositoryPath: repository, outputDir: output },
+        {
+          executable: process.execPath,
+          runProcess: async () => {
+            scannerCalls += 1;
+            throw new Error("Unsafe configuration must prevent OSV invocation");
+          },
+        },
+      );
+      await saveDependencyScan(
+        dependencyScanResult(
+          result,
+          { path: repository, revision: null, dirty: null },
+          output,
+        ),
+      );
+      const saved = JSON.parse(
+        await readFile(join(output, "sca-result.json"), "utf8"),
+      );
+      const reason = `OSV configuration must be a regular file within the selected repository: ${unsafeConfig}`;
+      expect(scannerCalls).toBe(0);
+      expect(saved.status).toBe("failed");
+      expect(saved.coverage.status).toBe("failed");
+      expect(saved.coverage.inputs).toEqual(
+        ["nested/package-lock.json", "package-lock.json"].map((path) => ({
+          path,
+          sha256: createHash("sha256").update(content).digest("hex"),
+          format: "npm",
+          status: "failed",
+          reason,
+        })),
+      );
+      expect(saved.coverage.configFiles).toEqual([
+        {
+          path: "osv-scanner.toml",
+          sha256: createHash("sha256").update("").digest("hex"),
+        },
+      ]);
+      expect(saved.diagnostics).toEqual([reason]);
+      expect(saved.scanner.invocations).toEqual([]);
+      expect(saved.components).toEqual([]);
+      expect(saved.coverage.limitations.length).toBeGreaterThan(0);
+    },
+  );
+
   test("rejects a config link outside the repository", async () => {
     const { repository, root } = await setup();
     await writeFile(join(repository, "package-lock.json"), npmLock());

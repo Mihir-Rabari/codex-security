@@ -23,7 +23,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import {
   basename,
@@ -59,6 +59,7 @@ import {
   accountStatus,
   configuredCodexHome,
   codexSecurityPrivatePaths,
+  environmentEntry,
   CodexLoginHandle,
   loginApiKey as persistApiKey,
   logout as codexLogout,
@@ -847,6 +848,7 @@ export class CodexSecurity {
             profile: dependencyPermissions(
               this.#dependencies.environment,
               runtime.codexHome,
+              outputDir,
             ),
             cwd: outputDir,
             signal,
@@ -5010,11 +5012,56 @@ export function scanRuntimeCodexConfig(
 function dependencyPermissions(
   environment: ProcessEnvironment,
   runtimeHome: string,
+  workingDirectory: string,
 ): JsonObject {
   const ambientHome = configuredCodexHome(environment);
   const defaultHome = configuredCodexHome({});
+  const npmHome = resolve(
+    workingDirectory,
+    environmentEntry(environment, "HOME") ||
+      (process.platform === "win32"
+        ? environmentEntry(environment, "USERPROFILE")
+        : undefined) ||
+      homedir(),
+  );
+  const npmConfigs = Object.entries(environment).flatMap(([name, value]) => {
+    if (name.toLowerCase() !== "npm_config_userconfig" || !value) return [];
+    // npm expands environment references before resolving its user config path.
+    const expanded = value
+      .trim()
+      .replace(
+        /(?<!\\)(\\*)\$\{([^${}?]+)(\?)?\}/gu,
+        (
+          original: string,
+          escaped: string,
+          name: string,
+          optional: string | undefined,
+        ) => {
+          if (escaped.length % 2)
+            return original.slice((escaped.length + 1) / 2);
+          return (
+            escaped.slice(escaped.length / 2) +
+            (environmentEntry(environment, name) ??
+              (optional ? "" : `\${${name}}`))
+          );
+        },
+      );
+    const homeRelative =
+      expanded.startsWith("~/") ||
+      (process.platform === "win32" && expanded.startsWith("~\\"));
+    return [
+      resolve(
+        workingDirectory,
+        homeRelative ? resolve(npmHome, expanded.slice(2)) : expanded,
+      ),
+    ];
+  });
   const privatePaths = [
     ...codexSecurityPrivatePaths(environment),
+    join(homedir(), ".npmrc"),
+    resolve(workingDirectory, expandHome("~", environment), ".npmrc"),
+    join(npmHome, ".npmrc"),
+    ...npmConfigs,
     runtimeHome,
     codexSecurityCredentialHome({}),
     join(defaultHome, "auth.json"),

@@ -532,17 +532,29 @@ async function repositoryFiles(
   return { files, submodules: [], nestedRepositories: [], skipWorktree: [] };
 }
 
+type ScaInputDiscovery = Pick<
+  ScaCoverage,
+  "inputs" | "configFiles" | "limitations"
+> & {
+  localReferences: DependencyLocalReference[];
+  diagnostics: string[];
+};
+
+class ScaInputDiscoveryError extends Error {
+  constructor(
+    error: unknown,
+    readonly discovery: ScaInputDiscovery,
+  ) {
+    super(errorMessage(error), { cause: error });
+  }
+}
+
 /** Select effective lockfiles before invoking OSV, which itself gives shrinkwrap precedence. */
 export async function discoverScaInputs(
   repositoryPath: string,
   environment: Record<string, string | undefined> = process.env,
   signal?: AbortSignal,
-): Promise<
-  Pick<ScaCoverage, "inputs" | "configFiles" | "limitations"> & {
-    localReferences: DependencyLocalReference[];
-    diagnostics: string[];
-  }
-> {
+): Promise<ScaInputDiscovery> {
   const repository = await normalizeRepository(repositoryPath, signal);
   const { files, submodules, nestedRepositories, skipWorktree } =
     await repositoryFiles(repository, environment, signal);
@@ -687,43 +699,56 @@ export async function discoverScaInputs(
       .filter((input) => input.status === "scanned")
       .map((input) => dirname(join(repository, input.path))),
   );
-  for (const directory of directories) {
-    const path = join(directory, "osv-scanner.toml");
-    const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return null;
-      throw error;
-    });
-    if (metadata === null) continue;
-    if (
-      !metadata.isFile() ||
-      relativePathIsOutside(relative(repository, await realpath(path)))
-    )
-      throw new Error(
-        `OSV configuration must be a regular file within the selected repository: ${path}`,
+  try {
+    for (const directory of directories) {
+      const path = join(directory, "osv-scanner.toml");
+      const metadata = await lstat(path).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return null;
+          throw error;
+        },
       );
-    const content = await readFile(path);
-    configFiles.push({
-      path: slash(relative(repository, path)),
-      sha256: digest(content),
-    });
-    let config: Record<string, unknown>;
-    try {
-      config = parseToml(content.toString("utf8"));
-    } catch (error) {
-      diagnostics.push(
-        `Unable to parse OSV configuration ${slash(relative(repository, path))}: ${errorMessage(error)}`,
-      );
-      continue;
+      if (metadata === null) continue;
+      if (
+        !metadata.isFile() ||
+        relativePathIsOutside(relative(repository, await realpath(path)))
+      )
+        throw new Error(
+          `OSV configuration must be a regular file within the selected repository: ${path}`,
+        );
+      const content = await readFile(path);
+      configFiles.push({
+        path: slash(relative(repository, path)),
+        sha256: digest(content),
+      });
+      let config: Record<string, unknown>;
+      try {
+        config = parseToml(content.toString("utf8"));
+      } catch (error) {
+        diagnostics.push(
+          `Unable to parse OSV configuration ${slash(relative(repository, path))}: ${errorMessage(error)}`,
+        );
+        continue;
+      }
+      const overrides = caseInsensitiveField(config, "packageoverrides");
+      if (
+        caseInsensitiveField(config, "ignoredvulns") !== undefined ||
+        overrides !== undefined
+      )
+        limitations.push(
+          `OSV exclusions/overrides are configured in ${slash(relative(repository, path))}; results are evaluated after these settings. Exact suppressed counts are unavailable.`,
+        );
     }
-    const overrides = caseInsensitiveField(config, "packageoverrides");
-    if (
-      caseInsensitiveField(config, "ignoredvulns") !== undefined ||
-      overrides !== undefined
-    )
-      limitations.push(
-        `OSV exclusions/overrides are configured in ${slash(relative(repository, path))}; results are evaluated after these settings. Exact suppressed counts are unavailable.`,
-      );
+  } catch (error) {
+    throw new ScaInputDiscoveryError(error, {
+      inputs,
+      configFiles,
+      limitations,
+      localReferences,
+      diagnostics,
+    });
   }
+
   return {
     inputs,
     configFiles,
@@ -1333,6 +1358,12 @@ export async function runOsvScan(
     await persistAggregate();
     return result;
   } catch (error) {
+    if (error instanceof ScaInputDiscoveryError) {
+      const { localReferences, diagnostics, ...coverage } = error.discovery;
+      Object.assign(result.coverage, coverage);
+      result.coverage.unresolvedPackages = localReferences.length;
+      result.diagnostics.push(...diagnostics);
+    }
     // A later process may fail or be cancelled after writing valid JSON. Preserve
     // those facts alongside every earlier invocation rather than overwriting them.
     if (pending !== null) {

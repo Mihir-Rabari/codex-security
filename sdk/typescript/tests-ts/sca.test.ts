@@ -8,7 +8,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
@@ -914,6 +914,15 @@ process.exit(0);
       homeVariable,
       configuredGitHubHome,
     });
+    const npmFiles = [
+      join(f.selectedUserHome, ".npmrc"),
+      join(dirname(f.repository), "registry [user] #.npmrc"),
+      join(dirname(f.repository), "lowercase-registry.npmrc"),
+    ];
+    Object.assign(f.environment, {
+      NPM_CONFIG_USERCONFIG: npmFiles[1],
+      npm_config_userconfig: npmFiles[2],
+    });
     await using security = f.client;
     const result = await security.scanDependencies({
       repositoryPath: f.repository,
@@ -933,6 +942,7 @@ process.exit(0);
       "hosts.yml",
     );
     const privateFiles = [
+      ...npmFiles,
       selectedSsh,
       selectedGitHub,
       join(f.selectedUserHome, ".config", "gh", "hosts.yml"),
@@ -978,6 +988,8 @@ process.exit(0);
       ".": "deny",
     });
     for (const path of [
+      ...npmFiles,
+      join(homedir(), ".npmrc"),
       join(homedir(), ".codex", "auth.json"),
       join(homedir(), ".codex", ".credentials.json"),
       join(homedir(), ".codex", "config.toml"),
@@ -986,6 +998,8 @@ process.exit(0);
       expect(filesystem[path]).toEqual({ ".": "deny" });
     }
     expect(filesystem[f.ambientHome]).toBeUndefined();
+    expect(options.env!["NPM_CONFIG_USERCONFIG"]).toBe(npmFiles[1]);
+    expect(options.env!["npm_config_userconfig"]).toBe(npmFiles[2]);
 
     const source = join(f.repository, "usage.txt");
     const configArgs = [
@@ -1035,6 +1049,102 @@ process.exit(0);
     );
   },
 );
+
+test.each([
+  "relative",
+  "home",
+  "environment",
+  "empty-reference",
+  "case-reference",
+  "relative-home",
+] as const)(
+  "dependency triage resolves %s npm credential paths in each scan's child profile",
+  async (shape) => {
+    const fixtures = await Promise.all([
+      fixture({ homeVariable: "HOME" }),
+      fixture({ homeVariable: "HOME" }),
+    ]);
+    await using first = fixtures[0]!.client;
+    await using second = fixtures[1]!.client;
+    const configured =
+      shape === "relative"
+        ? " ../registry [user].npmrc "
+        : shape === "empty-reference"
+          ? "${HOME}/registry${NPM_SUFFIX}.npmrc"
+          : shape === "case-reference"
+            ? "${NPM_REFERENCE}/registry.npmrc"
+            : shape === "environment"
+              ? " ${HOME}/registry.npmrc "
+              : " ~/registry.npmrc ";
+    for (const f of fixtures) {
+      Object.assign(f.environment, {
+        npm_config_userconfig: configured,
+        NPM_SUFFIX: "",
+        npm_reference: f.selectedUserHome,
+      });
+      if (shape === "relative-home")
+        Object.assign(f.environment, { HOME: "../relative-home" });
+    }
+    await Promise.all(
+      fixtures.map((f) =>
+        f.client.scanDependencies({
+          repositoryPath: f.repository,
+          outputDir: f.outputDir,
+        }),
+      ),
+    );
+    const expected = fixtures.map((f) =>
+      shape === "relative"
+        ? resolve(f.outputDir, "../registry [user].npmrc")
+        : shape === "relative-home"
+          ? resolve(f.outputDir, "../relative-home/registry.npmrc")
+          : shape === "case-reference" && process.platform !== "win32"
+            ? resolve(f.outputDir, "${NPM_REFERENCE}/registry.npmrc")
+            : join(f.selectedUserHome, "registry.npmrc"),
+    );
+    for (const [index, f] of fixtures.entries()) {
+      const options = f.captured.codex!;
+      const permissions = parseToml(
+        options.configOverrides!.find((value) =>
+          value.startsWith("permissions.codex_security_dependencies="),
+        )!,
+      )["permissions"] as Record<string, JsonObject>;
+      const filesystem = permissions["codex_security_dependencies"]![
+        "filesystem"
+      ] as JsonObject;
+      expect(filesystem[expected[index]!]).toEqual({ ".": "deny" });
+      expect(filesystem[expected[1 - index]!]).toBeUndefined();
+      expect(options.env!["npm_config_userconfig"]).toBe(configured);
+      expect(f.captured.thread!.workingDirectory).toBe(f.outputDir);
+      expect(filesystem[f.repository]).toBeUndefined();
+    }
+  },
+);
+
+test("dependency triage distinguishes npm's home from a USERPROFILE override on POSIX", async () => {
+  const f = await fixture({ homeVariable: "USERPROFILE" });
+  Object.assign(f.environment, { npm_config_userconfig: "~/registry.npmrc" });
+  await using security = f.client;
+  await security.scanDependencies({
+    repositoryPath: f.repository,
+    outputDir: f.outputDir,
+  });
+  const options = f.captured.codex!;
+  const permissions = parseToml(
+    options.configOverrides!.find((value) =>
+      value.startsWith("permissions.codex_security_dependencies="),
+    )!,
+  )["permissions"] as Record<string, JsonObject>;
+  const filesystem = permissions["codex_security_dependencies"]![
+    "filesystem"
+  ] as JsonObject;
+  const npmHome = process.platform === "win32" ? f.selectedUserHome : homedir();
+  expect(filesystem[join(npmHome, "registry.npmrc")]).toEqual({ ".": "deny" });
+  expect(filesystem[join(f.selectedUserHome, ".npmrc")]).toEqual({
+    ".": "deny",
+  });
+  expect(filesystem[join(homedir(), ".npmrc")]).toEqual({ ".": "deny" });
+});
 
 test("dependency triage disables inherited MCP servers and keeps the linked native launcher", async () => {
   const mcpConfig =
