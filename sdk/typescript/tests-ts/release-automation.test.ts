@@ -346,6 +346,42 @@ function workflowStepShell(workflow: string, stepName: string): string {
     .join("\n");
 }
 
+function runReleaseLabels(
+  title: string,
+  routes: readonly string[],
+  setup: readonly string[] = [],
+) {
+  const mock = [
+    ...setup,
+    "gh() {",
+    '  if [[ "$1" != "api" ]]; then return 64; fi',
+    "  shift",
+    "  local method=GET",
+    '  if [[ "${1:-}" == "--method" ]]; then',
+    '    method="$2"',
+    "    shift 2",
+    "  fi",
+    '  local endpoint="$1"',
+    "  shift",
+    '  case "$method $endpoint" in',
+    '    "GET repos/test/codex-security/issues/17")',
+    "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
+    "      ;;",
+    ...routes,
+    "  esac",
+    "}",
+  ].join("\n");
+  const script = workflowStepShell(
+    releaseLabelsWorkflow,
+    "Categorize pull request without checking out its code",
+  );
+  return runShell(`${mock}\n${script}`, {
+    GITHUB_REPOSITORY: "test/codex-security",
+    MOCK_PR_TITLE: title,
+    PR_NUMBER: "17",
+  });
+}
+
 async function evaluateWorkflowCondition(
   condition: string,
   values: Record<string, string>,
@@ -3869,27 +3905,12 @@ describe("GitHub release workflow safeguards", () => {
     "fix: preserve a trailing line feed\n",
     "fix: preserve a trailing carriage return\r",
   ])("rejects nonconventional pull request title %s", async (title) => {
-    const script = workflowStepShell(
-      releaseLabelsWorkflow,
-      "Categorize pull request without checking out its code",
-    );
-    const mock = [
-      "gh() {",
-      '  if [[ "$1" != "api" ]]; then return 64; fi',
-      "  shift",
-      '  if [[ "$1" == "repos/test/codex-security/issues/17" ]]; then',
-      "    printf '%s' \"$MOCK_PR_TITLE\" | base64",
-      "    return 0",
-      "  fi",
-      "  printf '%s\\n' 'unexpected label mutation'",
-      "  return 70",
-      "}",
-    ].join("\n");
-    const result = await runShell(`${mock}\n${script}`, {
-      GITHUB_REPOSITORY: "test/codex-security",
-      MOCK_PR_TITLE: title,
-      PR_NUMBER: "17",
-    });
+    const result = await runReleaseLabels(title, [
+      "    *)",
+      "      printf '%s\\n' 'unexpected label mutation'",
+      "      return 70",
+      "      ;;",
+    ]);
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(
@@ -3909,56 +3930,36 @@ describe("GitHub release workflow safeguards", () => {
   ])(
     "preserves a manually excluded release and reconciles its category after retitling to $title",
     async ({ title, expectedLabel }) => {
-      const script = workflowStepShell(
-        releaseLabelsWorkflow,
-        "Categorize pull request without checking out its code",
+      const result = await runReleaseLabels(
+        title,
+        [
+          '    "GET repos/test/codex-security/issues/17/labels")',
+          "      printf '%s\\n' enhancement skip-release-notes",
+          "      ;;",
+          '    "GET repos/test/codex-security/issues/17/timeline?per_page=100")',
+          "      printf '%b\\n' 'enhancement\\tgithub-actions[bot]' 'skip-release-notes\\tgithub-actions[bot]' 'skip-release-notes\\ttrusted-reviewer'",
+          "      ;;",
+          '    "DELETE repos/test/codex-security/issues/17/labels/enhancement")',
+          "      printf '%s\\n' 'removed a stale managed category'",
+          "      ;;",
+          '    "DELETE repos/test/codex-security/issues/17/labels/skip-release-notes")',
+          "      printf '%s\\n' 'removed a manually excluded release label'",
+          "      return 70",
+          "      ;;",
+          '    "POST repos/test/codex-security/issues/17/labels")',
+          "      printf '%s\\n' \"$@\"",
+          "      ;;",
+          "    *) return 65 ;;",
+        ],
+        [
+          "base64() {",
+          '  if [[ "${1:-}" == "--decode" ]]; then',
+          "    return 64",
+          "  fi",
+          '  command base64 "$@"',
+          "}",
+        ],
       );
-      const mock = [
-        "base64() {",
-        '  if [[ "${1:-}" == "--decode" ]]; then',
-        "    return 64",
-        "  fi",
-        '  command base64 "$@"',
-        "}",
-        "gh() {",
-        '  if [[ "$1" != "api" ]]; then return 64; fi',
-        "  shift",
-        "  local method=GET",
-        '  if [[ "${1:-}" == "--method" ]]; then',
-        '    method="$2"',
-        "    shift 2",
-        "  fi",
-        '  local endpoint="$1"',
-        "  shift",
-        '  case "$method $endpoint" in',
-        '    "GET repos/test/codex-security/issues/17")',
-        "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
-        "      ;;",
-        '    "GET repos/test/codex-security/issues/17/labels")',
-        "      printf '%s\\n' enhancement skip-release-notes",
-        "      ;;",
-        '    "GET repos/test/codex-security/issues/17/timeline?per_page=100")',
-        "      printf '%b\\n' 'enhancement\\tgithub-actions[bot]' 'skip-release-notes\\tgithub-actions[bot]' 'skip-release-notes\\ttrusted-reviewer'",
-        "      ;;",
-        '    "DELETE repos/test/codex-security/issues/17/labels/enhancement")',
-        "      printf '%s\\n' 'removed a stale managed category'",
-        "      ;;",
-        '    "DELETE repos/test/codex-security/issues/17/labels/skip-release-notes")',
-        "      printf '%s\\n' 'removed a manually excluded release label'",
-        "      return 70",
-        "      ;;",
-        '    "POST repos/test/codex-security/issues/17/labels")',
-        "      printf '%s\\n' \"$@\"",
-        "      ;;",
-        "    *) return 65 ;;",
-        "  esac",
-        "}",
-      ].join("\n");
-      const result = await runShell(`${mock}\n${script}`, {
-        GITHUB_REPOSITORY: "test/codex-security",
-        MOCK_PR_TITLE: title,
-        PR_NUMBER: "17",
-      });
 
       expect(result.status).toBe(0);
       expect(result.stdout).toContain(
@@ -3982,25 +3983,7 @@ describe("GitHub release workflow safeguards", () => {
   );
 
   test("preserves the latest unattributed skip label after earlier automation", async () => {
-    const script = workflowStepShell(
-      releaseLabelsWorkflow,
-      "Categorize pull request without checking out its code",
-    );
-    const mock = [
-      "gh() {",
-      '  if [[ "$1" != "api" ]]; then return 64; fi',
-      "  shift",
-      "  local method=GET",
-      '  if [[ "${1:-}" == "--method" ]]; then',
-      '    method="$2"',
-      "    shift 2",
-      "  fi",
-      '  local endpoint="$1"',
-      "  shift",
-      '  case "$method $endpoint" in',
-      '    "GET repos/test/codex-security/issues/17")',
-      "      printf '%s' 'feat: customer-visible change' | base64",
-      "      ;;",
+    const result = await runReleaseLabels("feat: customer-visible change", [
       '    "GET repos/test/codex-security/issues/17/labels")',
       "      printf '%s\\n' skip-release-notes",
       "      ;;",
@@ -4019,13 +4002,7 @@ describe("GitHub release workflow safeguards", () => {
       "      printf '%s\\n' \"$@\"",
       "      ;;",
       "    *) return 65 ;;",
-      "  esac",
-      "}",
-    ].join("\n");
-    const result = await runShell(`${mock}\n${script}`, {
-      GITHUB_REPOSITORY: "test/codex-security",
-      PR_NUMBER: "17",
-    });
+    ]);
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(
@@ -4046,25 +4023,7 @@ describe("GitHub release workflow safeguards", () => {
   ])(
     "reconciles an automatic skip label after retitling to $title",
     async ({ title, label }) => {
-      const script = workflowStepShell(
-        releaseLabelsWorkflow,
-        "Categorize pull request without checking out its code",
-      );
-      const mock = [
-        "gh() {",
-        '  if [[ "$1" != "api" ]]; then return 64; fi',
-        "  shift",
-        "  local method=GET",
-        '  if [[ "${1:-}" == "--method" ]]; then',
-        '    method="$2"',
-        "    shift 2",
-        "  fi",
-        '  local endpoint="$1"',
-        "  shift",
-        '  case "$method $endpoint" in',
-        '    "GET repos/test/codex-security/issues/17")',
-        "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
-        "      ;;",
+      const result = await runReleaseLabels(title, [
         '    "GET repos/test/codex-security/issues/17/labels")',
         "      printf '%s\\n' skip-release-notes",
         "      ;;",
@@ -4078,14 +4037,7 @@ describe("GitHub release workflow safeguards", () => {
         "      printf '%s\\n' \"$@\"",
         "      ;;",
         "    *) return 65 ;;",
-        "  esac",
-        "}",
-      ].join("\n");
-      const result = await runShell(`${mock}\n${script}`, {
-        GITHUB_REPOSITORY: "test/codex-security",
-        MOCK_PR_TITLE: title,
-        PR_NUMBER: "17",
-      });
+      ]);
 
       expect(result.status).toBe(0);
       expect(result.stdout).toContain(
@@ -4120,25 +4072,7 @@ describe("GitHub release workflow safeguards", () => {
       label: "breaking-change",
     },
   ])("categorizes breaking-change title $title", async ({ title, label }) => {
-    const script = workflowStepShell(
-      releaseLabelsWorkflow,
-      "Categorize pull request without checking out its code",
-    );
-    const mock = [
-      "gh() {",
-      '  if [[ "$1" != "api" ]]; then return 64; fi',
-      "  shift",
-      "  local method=GET",
-      '  if [[ "${1:-}" == "--method" ]]; then',
-      '    method="$2"',
-      "    shift 2",
-      "  fi",
-      '  local endpoint="$1"',
-      "  shift",
-      '  case "$method $endpoint" in',
-      '    "GET repos/test/codex-security/issues/17")',
-      "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
-      "      ;;",
+    const result = await runReleaseLabels(title, [
       '    "GET repos/test/codex-security/issues/17/labels")',
       "      return 0",
       "      ;;",
@@ -4149,14 +4083,7 @@ describe("GitHub release workflow safeguards", () => {
       "      printf '%s\\n' \"$@\"",
       "      ;;",
       "    *) return 65 ;;",
-      "  esac",
-      "}",
-    ].join("\n");
-    const result = await runShell(`${mock}\n${script}`, {
-      GITHUB_REPOSITORY: "test/codex-security",
-      MOCK_PR_TITLE: title,
-      PR_NUMBER: "17",
-    });
+    ]);
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(`labels[]=${label}`);
@@ -4169,48 +4096,27 @@ describe("GitHub release workflow safeguards", () => {
   ])(
     "excludes %s and recovers from concurrent skip-label creation",
     async (title) => {
-      const script = workflowStepShell(
-        releaseLabelsWorkflow,
-        "Categorize pull request without checking out its code",
+      const result = await runReleaseLabels(
+        title,
+        [
+          '    "GET repos/test/codex-security/issues/17/labels")',
+          "      return 0",
+          "      ;;",
+          '    "GET repos/test/codex-security/labels/skip-release-notes")',
+          '      [[ "$skip_label_exists" == 1 ]]',
+          "      ;;",
+          '    "POST repos/test/codex-security/labels")',
+          "      skip_label_exists=1",
+          "      return 1",
+          "      ;;",
+          '    "POST repos/test/codex-security/issues/17/labels")',
+          '      if [[ "$skip_label_exists" != 1 ]]; then return 65; fi',
+          "      printf '%s\\n' 'applied skip-release-notes'",
+          "      ;;",
+          "    *) return 66 ;;",
+        ],
+        ["skip_label_exists=0"],
       );
-      const mock = [
-        "skip_label_exists=0",
-        "gh() {",
-        '  if [[ "$1" != "api" ]]; then return 64; fi',
-        "  shift",
-        "  local method=GET",
-        '  if [[ "${1:-}" == "--method" ]]; then',
-        '    method="$2"',
-        "    shift 2",
-        "  fi",
-        '  local endpoint="$1"',
-        '  case "$method $endpoint" in',
-        '    "GET repos/test/codex-security/issues/17")',
-        "      printf '%s' \"$MOCK_PR_TITLE\" | base64",
-        "      ;;",
-        '    "GET repos/test/codex-security/issues/17/labels")',
-        "      return 0",
-        "      ;;",
-        '    "GET repos/test/codex-security/labels/skip-release-notes")',
-        '      [[ "$skip_label_exists" == 1 ]]',
-        "      ;;",
-        '    "POST repos/test/codex-security/labels")',
-        "      skip_label_exists=1",
-        "      return 1",
-        "      ;;",
-        '    "POST repos/test/codex-security/issues/17/labels")',
-        '      if [[ "$skip_label_exists" != 1 ]]; then return 65; fi',
-        "      printf '%s\\n' 'applied skip-release-notes'",
-        "      ;;",
-        "    *) return 66 ;;",
-        "  esac",
-        "}",
-      ].join("\n");
-      const result = await runShell(`${mock}\n${script}`, {
-        GITHUB_REPOSITORY: "test/codex-security",
-        MOCK_PR_TITLE: title,
-        PR_NUMBER: "17",
-      });
 
       expect(result.status).toBe(0);
       expect(result.stdout).toContain("applied skip-release-notes");
