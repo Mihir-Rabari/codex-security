@@ -142,7 +142,8 @@ def test_non_utf8_git_subject_and_refs_remain_inspectable(tmp_path: Path) -> Non
     try:
         payload = {"id": "fixture", "action": "source", "repository": str(target)}
         before = api.finding_workflow(connection, payload, "2026-01-01T00:00:00Z")["source"]
-        git(target, "update-ref", os.fsdecode(b"refs/heads/caf\xe9"), oid)
+        # Packed refs preserve raw bytes without requiring a non-UTF-8 filename.
+        (target / ".git" / "packed-refs").write_bytes(oid.encode() + b" refs/heads/caf\xe9\n")
         after = api.finding_workflow(connection, payload, "2026-01-01T00:00:00Z")["source"]
         assert after["refsDigest"] != before["refsDigest"]
     finally:
