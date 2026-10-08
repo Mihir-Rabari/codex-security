@@ -811,8 +811,16 @@ async function testPreflightBindsExecutableAndHomeBeforeChangingCwd() {
     path.join(nonExecutableDirectory, "codex"),
     "not executable\n",
   );
-  await copyFile(fixture.executablePath, codexPath);
-  await chmod(codexPath, 0o755);
+  // A shell wrapper lets the OS select this file before Node loads the fixture.
+  const shellArguments = [process.execPath, fixture.executablePath]
+    .map((value) => `'${value.replaceAll("'", `'"'"'`)}'`)
+    .join(" ");
+  await writeFile(codexPath, `#!/bin/sh\nexec ${shellArguments} "$@"\n`, {
+    mode: 0o755,
+  });
+  await mkdir(path.join(binaryDirectory, "child"));
+  const executableLink = path.join(fixture.root, "executable-link");
+  await symlink(path.join(binaryDirectory, "child"), executableLink, "dir");
   await symlink(homeTargetChild, homeLink, "dir");
   const relativeHome = `${path.relative(originalCwd, homeLink)}/../home`;
   const expectedHome = await realpath(relativeHome);
@@ -831,36 +839,68 @@ async function testPreflightBindsExecutableAndHomeBeforeChangingCwd() {
     path.dirname(process.execPath),
   ].join(path.delimiter);
   try {
-    for (const [configured, expectedExecutable] of [
+    const defaultSearchPath = process.env.PATH;
+    for (const [configured, expectedExecutable, searchPath] of [
       [
         path.relative(originalCwd, fixture.executablePath),
         fixture.executablePath,
       ],
       [undefined, codexPath],
       ["codex", codexPath],
+      [`${executableLink}/../codex`, codexPath],
+      [`${path.relative(originalCwd, executableLink)}/../codex`, codexPath],
+      ...[
+        `${executableLink}/..`,
+        `${path.relative(originalCwd, executableLink)}/..`,
+      ].flatMap(
+        (entry) =>
+          [
+            [
+              undefined,
+              codexPath,
+              `${entry}${path.delimiter}${path.dirname(process.execPath)}`,
+            ],
+            [
+              "codex",
+              codexPath,
+              `${entry}${path.delimiter}${path.dirname(process.execPath)}`,
+            ],
+          ] as const,
+      ),
     ] as const) {
+      process.env.PATH = searchPath ?? defaultSearchPath;
       if (configured === undefined) delete process.env.CODEX_CLI_PATH;
       else process.env.CODEX_CLI_PATH = configured;
-      assert.equal(resolveCodexPath(), expectedExecutable);
-      const result = await runWorker(promptPath, workingDirectory);
+      assert.equal(
+        await realpath(resolveCodexPath()),
+        await realpath(expectedExecutable),
+      );
+      for (const kind of ["discovery", "dedup"] as const)
+        for (const resumeThreadId of [undefined, "resumed-thread"]) {
+          const result = await runWorker(promptPath, workingDirectory, {
+            kind,
+            resumeThreadId,
+          });
 
-      assert.equal(result.threadId, "fixture-thread-id");
-      const preflight = await readJson(fixture.preflightMarkerPath);
-      const invocation = await readJson(fixture.markerPath);
-      assert.equal(preflight.cwd, await realpath(workingDirectory));
-      assert.equal(invocation.cwd, originalCwd);
-      assert.equal(preflight.codexHome, expectedHome);
-      assert.equal(invocation.codexHome, expectedHome);
-      assert.equal(process.env.CODEX_HOME, relativeHome);
-      assert.deepEqual(preflight.requests, [
-        { method: "config/read", cwd: workingDirectory },
-        { method: "permissionProfile/list", cwd: workingDirectory },
-      ]);
-      assert.deepEqual(invocation.argv.slice(0, 2), [
-        "exec",
-        "--experimental-json",
-      ]);
-      assertFlagPair(invocation.argv, "--cd", workingDirectory);
+          assert.equal(result.threadId, resumeThreadId ?? "fixture-thread-id");
+          const preflight = await readJson(fixture.preflightMarkerPath);
+          const invocation = await readJson(fixture.markerPath);
+          assert.equal(preflight.cwd, await realpath(workingDirectory));
+          assert.equal(invocation.cwd, originalCwd);
+          assert.equal(preflight.codexHome, expectedHome);
+          assert.equal(invocation.codexHome, expectedHome);
+          assert.equal(process.env.CODEX_HOME, relativeHome);
+          assert.deepEqual(preflight.requests, [
+            { method: "config/read", cwd: workingDirectory },
+            { method: "permissionProfile/list", cwd: workingDirectory },
+          ]);
+          assert.deepEqual(invocation.argv.slice(0, 2), [
+            "exec",
+            "--experimental-json",
+          ]);
+          assertFlagPair(invocation.argv, "--cd", workingDirectory);
+          assertReadOnlyWorkerPolicy(invocation.argv);
+        }
     }
   } finally {
     restoreEnv("CODEX_CLI_PATH", previousCodexPath);
@@ -1032,6 +1072,8 @@ async function testOpenAiCredentialsReachWorker() {
           ? ""
           : process.env.LD_LIBRARY_PATH + path.delimiter) +
         path.join(fixture.root, "libraries"),
+      DYLD_LIBRARY_PATH: path.join(fixture.root, "dylibs"),
+      DYLD_FALLBACK_LIBRARY_PATH: path.join(fixture.root, "fallback-libraries"),
       CODEX_SECURITY_STATE_DIR: path.join(fixture.root, "state"),
       RUNNER_TRACKING_ID: "synthetic-worker-job",
     };
@@ -1264,6 +1306,7 @@ async function testWorkerRuntimeSettings() {
   ];
   const saved = [
     "PYTHON",
+    "CODEX_SECURITY_PYTHON_COMMAND",
     "PATH",
     "CODEX_SECURITY_GIT",
     "GIT_SSH_COMMAND",
@@ -1280,9 +1323,13 @@ async function testWorkerRuntimeSettings() {
     "SYNTHETIC_HEADER_VALUE",
     "CODEX_SQLITE_HOME",
     "XDG_CACHE_HOME",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
   ].map((name) => [name, process.env[name]] as const);
   const originalSpawn = childProcess.spawn;
   try {
+    process.env.CODEX_SECURITY_PYTHON_COMMAND = "stale-ambient-python";
     delete process.env.OPENAI_API_KEY;
     delete process.env.CODEX_API_KEY;
     delete process.env.SYNTHETIC_GATEWAY_KEY;
@@ -1378,6 +1425,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             index === 0
               ? undefined
               : {
+                  goals: index % 2 === 0,
                   shell_tool: index % 2 === 0,
                   unified_exec: false,
                   view_image: index % 2 !== 0,
@@ -1464,6 +1512,15 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             autoCompactTokenLimit:
               index === 0 ? undefined : 24_000 * (index + 1),
             windowsSandbox,
+            shellPolicy:
+              index === 0
+                ? undefined
+                : {
+                    inherit: index % 2 === 0 ? "core" : "none",
+                    include_only: ["PATH", "SYNTHETIC_INCLUDED"],
+                    exclude: ["SYNTHETIC_EXCLUDED"],
+                    set: { SYNTHETIC_SHELL_MARKER: `scan-${index}` },
+                  },
             webSearch,
             features,
             configuration: {
@@ -1520,6 +1577,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                         native_profile: entry.nativeProfile,
                         environment: entry.environment,
                         windows: { sandbox: entry.windowsSandbox },
+                        shell_environment_policy: entry.shellPolicy,
                         features: entry.features,
                       }),
                 },
@@ -1594,7 +1652,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               pluginRoot: path.join(fixture.root, `plugin-${index}`),
               repoRoot: fixture.root,
               scanId: `fixture-scan-${modelSettings.model ?? "inherited"}`,
-              pythonCommand: helperPython,
+              pythonCommand: `${helperPython}-${index} `,
             },
           }),
       );
@@ -1613,6 +1671,16 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 fixture.root,
                 `cache-${index} `,
               );
+              for (const name of [
+                "LD_LIBRARY_PATH",
+                "DYLD_LIBRARY_PATH",
+                "DYLD_FALLBACK_LIBRARY_PATH",
+              ]) {
+                process.env[name] = path.join(
+                  fixture.root,
+                  `libraries-${index}`,
+                );
+              }
               process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH =
                 workerConfigurations[index].deepPath;
               return executor.run(
@@ -1692,6 +1760,20 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerConfigurations[index].knowledgePath,
             );
             const invocation = await readJson(workerLaunch.markerPath);
+            for (const name of [
+              "LD_LIBRARY_PATH",
+              "DYLD_LIBRARY_PATH",
+              "DYLD_FALLBACK_LIBRARY_PATH",
+            ]) {
+              assert.equal(
+                workerLaunch.environment![name],
+                path.join(fixture.root, `libraries-${index}`),
+              );
+              assert.equal(
+                invocation.runtimeEnvironment[name],
+                workerLaunch.environment![name],
+              );
+            }
             assert.equal(
               invocation.knowledgePath,
               workerConfigurations[index].knowledgePath,
@@ -1803,8 +1885,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             }
             assert.equal(invocation.python, python);
             assertConfigOverrides(invocation.argv, {
-              "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND":
-                helperPython,
+              "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND": `${helperPython}-${index} `,
               "mcp_servers.cs_artifacts.args.0": path.join(
                 fixture.root,
                 `plugin-${index}`,
@@ -1820,6 +1901,20 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.equal(
               invocation.deepConfigPath,
               workerConfigurations[index].deepPath,
+            );
+            assert.deepEqual(
+              JSON.parse(
+                JSON.stringify(
+                  parseToml(
+                    invocation.argv
+                      .filter((arg: string) =>
+                        arg.startsWith("shell_environment_policy="),
+                      )
+                      .join("\n"),
+                  ),
+                ),
+              ).shell_environment_policy,
+              workerConfigurations[index].shellPolicy,
             );
             const workerFeatures = parseToml(
               invocation.argv
@@ -1943,7 +2038,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ),
                 writeFile(
                   entry.deepPath,
-                  '[worker_runtime.features]\nshell_tool = true\nunified_exec = true\nview_image = true\n[worker_runtime]\nopenai_base_url = "https://changed-snapshot.example.test/v1"\nweb_search = "live"\nmodel_provider = "changed"\nnative_profile = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\nmodel_context_window = 999000\nmodel_auto_compact_token_limit = 888000\n[worker_runtime.windows]\nsandbox = "changed"\n[worker_runtime.environment]\nSYNTHETIC_GATEWAY_KEY = "changed"\nSYNTHETIC_HEADER_VALUE = "changed"\n',
+                  '[worker_runtime.features]\nshell_tool = true\nunified_exec = true\nview_image = true\n[worker_runtime]\nopenai_base_url = "https://changed-snapshot.example.test/v1"\nweb_search = "live"\nmodel_provider = "changed"\nnative_profile = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\nmodel_context_window = 999000\nmodel_auto_compact_token_limit = 888000\n[worker_runtime.shell_environment_policy]\ninherit = "all"\n[worker_runtime.shell_environment_policy.set]\nSYNTHETIC_SHELL_MARKER = "changed"\n[worker_runtime.windows]\nsandbox = "changed"\n[worker_runtime.environment]\nSYNTHETIC_GATEWAY_KEY = "changed"\nSYNTHETIC_HEADER_VALUE = "changed"\n',
                 ),
               ]),
             ),
@@ -2870,7 +2965,7 @@ const profileIndex = process.argv.indexOf('--profile');
 const profileContents = profileIndex === -1 ? undefined : readFileSync(join(process.env.CODEX_HOME, process.argv[profileIndex + 1] + '.config.toml'), 'utf8');
 const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;
 const bedrockAuthentication = stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map((name) => [name, process.env[name]])) : undefined;
-const runtimeEnvironment = Object.fromEntries(['PATH', 'HOME', 'PYTHON', 'PYTHONUTF8', 'LD_LIBRARY_PATH', 'CODEX_SECURITY_STATE_DIR', 'RUNNER_TRACKING_ID'].map(name => [name, process.env[name]]));
+const runtimeEnvironment = Object.fromEntries(['PATH', 'HOME', 'PYTHON', 'PYTHONUTF8', 'LD_LIBRARY_PATH', 'DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'CODEX_SECURITY_STATE_DIR', 'RUNNER_TRACKING_ID'].map(name => [name, process.env[name]]));
 const pythonProbe = stdin.includes('CAPTURE_SYNTHETIC_PYTHON') ? spawnSync(process.env.PYTHON, ['-I', '-c', 'import json,os,sys; print(json.dumps([sys.prefix,os.environ.get("LD_LIBRARY_PATH")]))'], { encoding: 'utf8' }) : undefined;
 if (pythonProbe && pythonProbe.status !== 0) throw new Error(pythonProbe.stderr || String(pythonProbe.error));
 const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
