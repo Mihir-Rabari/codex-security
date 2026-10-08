@@ -112,7 +112,7 @@ test("group write retries the identical payload after a lost acknowledgement", a
     async (_url, init) => {
       bodies.push(init.body);
       if (bodies.length === 1) throw new TypeError("fetch failed");
-      return Response.json({ groups });
+      return Response.json({});
     },
     { wait: async () => {} },
   );

@@ -1572,7 +1572,6 @@ export async function runWorkbench(
       "find-potential-duplicates",
       "store-dedupe-groups",
       "list-dedupe-groups",
-      "dashboard",
     ].includes(arguments_[0] ?? "");
     const node =
       native && process.versions["bun"]
