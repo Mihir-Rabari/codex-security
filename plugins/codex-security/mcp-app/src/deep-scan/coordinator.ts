@@ -258,7 +258,6 @@ export class DeepScanCoordinator {
       await persistCancellation();
     } catch (error) {
       this.cancellationPersistence.failure = { error };
-      throw error;
     } finally {
       // Cleanup still inspects durable state and preserves results when the
       // process lost a committed response, then reports the persistence failure.
@@ -358,13 +357,17 @@ export class DeepScanCoordinator {
       }
       this.abortController.abort(message);
       await this.settleSchedulerWork();
+      if (this.canceled || this.externallyFailed) return;
       try {
-        this.state = await this.options.store.fail(
+        const failed = await this.options.store.fail(
           this.state.scanId,
           persistedMessage,
           "failed",
         );
+        if (this.canceled || this.externallyFailed) return;
+        this.state = failed;
       } catch (persistError) {
+        if (this.canceled || this.externallyFailed) return;
         this.state = {
           ...this.state,
           status: "failed",
@@ -571,9 +574,10 @@ export class DeepScanCoordinator {
         scanId: this.state.scanId,
         reason: errorKind(readError),
       });
-      if (!leaseLossConfirmed) return false;
+      if (!leaseLossConfirmed) return this.externallyFailed;
       current = this.state;
     }
+    if (this.externallyFailed || this.terminal) return this.externallyFailed;
     const replacementConfirmed =
       leaseLossConfirmed ||
       (current.status === "running" &&
@@ -645,8 +649,8 @@ export class DeepScanCoordinator {
       fs.readdir(this.artifacts.workersRoot),
       fs.readdir(this.artifacts.dedupRoot),
     ]);
-    let workerSequence = Math.max(
-      dispatched,
+    let workerSequence = [
+      BigInt(dispatched),
       ...discoveryLabels.map((label) =>
         workerLabelSequence(label, "discovery"),
       ),
@@ -658,16 +662,16 @@ export class DeepScanCoordinator {
             "discovery",
           ),
         ),
-    );
-    let reducerSequence = Math.max(
-      0,
+    ].reduce((maximum, value) => (value > maximum ? value : maximum), 0n);
+    let reducerSequence = [
+      0n,
       ...reducerLabels.map((label) => workerLabelSequence(label, "dedup")),
       ...(this.state.persistedWorkers ?? [])
         .filter((worker) => worker.kind === "dedup")
         .map((worker) =>
           workerLabelSequence(basename(dirname(worker.promptPath)), "dedup"),
         ),
-    );
+    ].reduce((maximum, value) => (value > maximum ? value : maximum), 0n);
     let stopReason: DeepScanTerminalReason | undefined;
     let lastReplaceableFailure:
       Extract<DiscoveryOutcome, { status: "failed" }> | undefined;
@@ -789,7 +793,7 @@ export class DeepScanCoordinator {
           dispatched < config.maxDiscoveryRuns
         ) {
           dispatched += 1;
-          workerSequence += 1;
+          workerSequence += 1n;
           const workerLabel = `discovery-${String(workerSequence).padStart(4, "0")}`;
           const workerId = randomUUID();
           const workerPromise = this.trackSchedulerWork(
@@ -811,7 +815,7 @@ export class DeepScanCoordinator {
         ) {
           const consumed = [...buffer].sort(compareCompletionSequence);
           buffer = [];
-          reducerSequence += 1;
+          reducerSequence += 1n;
           reducer = this.trackSchedulerWork(
             this.workers.runReducer({
               id: randomUUID(),
@@ -995,12 +999,21 @@ export class DeepScanCoordinator {
       .filter(
         (worker) => worker.kind === "dedup" && worker.status === "succeeded",
       )
-      .sort(
-        (left, right) =>
-          workerLabelSequence(basename(dirname(left.promptPath)), "dedup") -
-            workerLabelSequence(basename(dirname(right.promptPath)), "dedup") ||
-          left.id.localeCompare(right.id),
-      );
+      .sort((left, right) => {
+        const leftSequence = workerLabelSequence(
+          basename(dirname(left.promptPath)),
+          "dedup",
+        );
+        const rightSequence = workerLabelSequence(
+          basename(dirname(right.promptPath)),
+          "dedup",
+        );
+        return leftSequence < rightSequence
+          ? -1
+          : leftSequence > rightSequence
+            ? 1
+            : left.id.localeCompare(right.id);
+      });
     for (const worker of completedReducers) {
       if (!worker.resultManifestPath) {
         throw new Error(
@@ -1142,9 +1155,9 @@ function compareCompletionSequence(
 function workerLabelSequence(
   label: string,
   kind: "discovery" | "dedup",
-): number {
+): bigint {
   const match = label.match(new RegExp(`^${kind}-(\\d+)$`));
-  return match ? Number(match[1]) : 0;
+  return match ? BigInt(match[1]!) : 0n;
 }
 
 function cloneState(state: DeepScanRunState): DeepScanRunState {
