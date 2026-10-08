@@ -3157,7 +3157,7 @@ def finding_remediation_result(
 def patch_artifact_preview(
     scan_dir: Path, relative_path: str | None, expected_digest: str | None
 ) -> tuple[str | None, dict[str, int | bool] | None]:
-    return remediation.patch_artifact_preview(
+    return remediation_state.patch_artifact_preview(
         scan_dir, relative_path, expected_digest, open_scan_local_file
     )
 
