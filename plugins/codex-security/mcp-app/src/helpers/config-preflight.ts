@@ -110,7 +110,7 @@ function metadata(path: string) {
       : statSync(encodePath(path));
   } catch (error) {
     if (
-      ["ENOENT", "ENOTDIR"].includes(
+      ["ENOENT", "ENOTDIR", "ELOOP"].includes(
         (error as NodeJS.ErrnoException).code ?? "",
       )
     )
@@ -318,21 +318,24 @@ export function* projectAncestors(directory: string): Iterable<string> {
   }
 }
 
+function appendConfigPath(directory: string, suffix: string): string {
+  const parent = directory || ".";
+  // Keep relative spelling and symlink-sensitive ".." in configured paths.
+  return normalizePath(
+    parent +
+      (parent.endsWith(sep) || (windows && /^[a-z]:$/iu.test(parent))
+        ? ""
+        : sep) +
+      suffix,
+  );
+}
+
 function evaluate(values: Options): Table {
   const home = environmentValue("HOME");
   const path = (value: string) => normalizePath(expandHome(value, home));
   const configuredHome = environmentValue("CODEX_HOME");
   const codexHome = path(configuredHome?.trim() ? configuredHome : "~/.codex");
-  // Appending a filename must not collapse a symlink-sensitive ".." in CODEX_HOME.
-  const configFile = (name: string) =>
-    normalizePath(
-      codexHome +
-        (codexHome.endsWith(sep) || (windows && /^[a-z]:$/iu.test(codexHome))
-          ? ""
-          : sep) +
-        name,
-    );
-  const defaultConfig = configFile("config.toml");
+  const defaultConfig = appendConfigPath(codexHome, "config.toml");
   // Bundles replace import.meta.url with the installed helper filename.
   const filename = import.meta.url.startsWith("file:")
     ? fileURLToPath(import.meta.url)
@@ -371,7 +374,10 @@ function evaluate(values: Options): Table {
       throw new Error(
         `invalid config profile name ${diagnostic(explicitProfile)}; pass a plain name such as 'work'`,
       );
-    const candidate = configFile(`${explicitProfile}.config.toml`);
+    const candidate = appendConfigPath(
+      codexHome,
+      `${explicitProfile}.config.toml`,
+    );
     if (metadata(candidate)?.isFile()) profileLayer = candidate;
   }
   let discovery: Table | null = null;
@@ -381,7 +387,7 @@ function evaluate(values: Options): Table {
       layers.push({ path: normalizePath(file), config: readToml(file) });
   } else {
     const systemConfig = windows
-      ? join(
+      ? appendConfigPath(
           environmentValue("ProgramData") ?? "C:\\ProgramData",
           "OpenAI/Codex/config.toml",
         )
@@ -412,7 +418,7 @@ function evaluate(values: Options): Table {
                 ? windowsJoin(candidate, marker)
                 : isAbsolute(marker)
                   ? marker
-                  : join(candidate, marker),
+                  : appendConfigPath(candidate, marker),
             ),
           )
         ) {

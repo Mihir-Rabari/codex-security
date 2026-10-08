@@ -613,6 +613,30 @@ test("relative CODEX_HOME keeps its literal spelling and resolves from the helpe
   expect(capacity(result.payload!).actual).toBe(8);
 });
 
+test.skipIf(process.platform !== "win32")(
+  "drive-relative ProgramData retains its configured spelling and directory",
+  async () => {
+    const root = await temporaryDirectory(),
+      home = join(root, "home"),
+      config = join(root, "OpenAI", "Codex", "config.toml");
+    await mkdir(home);
+    await mkdir(join(root, "OpenAI", "Codex"), { recursive: true });
+    await writeFile(config, "[agents]\nmax_threads=8\n");
+    for (const programData of ["", root.slice(0, 2)]) {
+      const result = await run(
+        ["--profile", "security_scan", "--cwd", root, ...v1],
+        { CODEX_HOME: home, ProgramData: programData },
+        root,
+      );
+      expect(result.status).toBe(0);
+      expect(result.payload!.config_paths[0]).toBe(
+        `${programData}OpenAI\\Codex\\config.toml`,
+      );
+      expect(capacity(result.payload!).actual).toBe(8);
+    }
+  },
+);
+
 test.skipIf(process.platform === "win32")(
   "CODEX_HOME keeps symlink-parent resolution for base and profile files",
   async () => {
@@ -901,6 +925,83 @@ test("absolute project-root markers retain trusted cwd configuration", async () 
   expect(result.payload!.config_discovery?.["project_root"]).toBe(cwd);
   expect(capacity(result.payload!).actual).toBe(19);
 });
+
+test.skipIf(process.platform === "win32")(
+  "looping markers and optional profiles are absent probes, but explicit reads fail",
+  async () => {
+    const root = await temporaryDirectory(),
+      home = join(root, "home"),
+      repo = join(root, "repo"),
+      profile = join(home, "work.config.toml");
+    await mkdir(home);
+    await mkdir(join(repo, ".git"), { recursive: true });
+    await mkdir(join(repo, ".codex"));
+    await symlink("loop", join(repo, "loop"));
+    await symlink("work.config.toml", profile);
+    await writeFile(
+      join(home, "config.toml"),
+      stringifyToml({
+        project_root_markers: ["loop", ".git"],
+        projects: { [repo]: { trust_level: "trusted" } },
+      }),
+    );
+    await writeFile(
+      join(repo, ".codex/config.toml"),
+      "[agents]\nmax_threads=19\n",
+    );
+    const args = ["--profile", "security_scan", "--cwd", repo, ...v1];
+    for (const optionalProfile of [[], ["--codex-config-profile", "work"]]) {
+      const result = await run([...args, ...optionalProfile], {
+        CODEX_HOME: home,
+      });
+      expect(result.status).toBe(0);
+      expect(result.payload!.config_profile_path).toBeNull();
+      expect(result.payload!.config_discovery?.["project_root"]).toBe(repo);
+      expect(capacity(result.payload!).actual).toBe(19);
+    }
+    const explicit = await run([...args, "--config", profile], {
+      CODEX_HOME: home,
+    });
+    expect(explicit.status).toBe(2);
+    expect(explicit.payload!.status).toBe("error");
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "relative project markers preserve a symlink followed by a parent component",
+  async () => {
+    const root = await temporaryDirectory(),
+      home = join(root, "home"),
+      repo = join(root, "repo"),
+      cwd = join(repo, "child"),
+      destination = join(root, "destination");
+    await mkdir(home);
+    await mkdir(join(repo, ".git"), { recursive: true });
+    await mkdir(join(cwd, ".codex"), { recursive: true });
+    await mkdir(join(destination, "child"), { recursive: true });
+    await symlink(join(destination, "child"), join(cwd, "link"));
+    await writeFile(join(destination, "ROOT.marker"), "");
+    await writeFile(
+      join(home, "config.toml"),
+      stringifyToml({
+        project_root_markers: ["link/../ROOT.marker", ".git"],
+        agents: { max_threads: 3 },
+        projects: { [cwd]: { trust_level: "trusted" } },
+      }),
+    );
+    await writeFile(
+      join(cwd, ".codex/config.toml"),
+      "[agents]\nmax_threads=19\n",
+    );
+    const result = await run(
+      ["--profile", "security_scan", "--cwd", cwd, ...v1],
+      { CODEX_HOME: home },
+    );
+    expect(result.status).toBe(0);
+    expect(result.payload!.config_discovery?.["project_root"]).toBe(cwd);
+    expect(capacity(result.payload!).actual).toBe(19);
+  },
+);
 
 test("malformed TOML reports a structured error without changing the file", async () => {
   const result = await configured("[features\ngoals=true\n");
