@@ -3511,3 +3511,48 @@ def test_stopped_deep_preserves_published_candidate_state(
     )
     assert_candidate_state()
     assert (scan_dir / "scan-manifest.json").read_bytes() == sealed
+
+
+@pytest.mark.parametrize("imported_owner", [None, "imported", {"legacy": "imported"}])
+@pytest.mark.parametrize("existing_pending", [False, True])
+def test_public_worker_receipt_recovery_uses_actual_owner(
+    tmp_path: Path, imported_owner: object, existing_pending: bool
+) -> None:
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    worker_id, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    draft = json.loads(result_path.read_text())
+    draft.update(complete=True, findings=[])
+    candidate = {"evidence": "Synthetic candidate evidence."}
+    surface = {
+        "id": "candidate-decision",
+        "candidateId": "candidate-a",
+        "label": "Candidate A",
+        "disposition": "rejected",
+        "receiptRefs": ["artifacts/proof/missing.txt"],
+        "candidate": candidate,
+    }
+    if imported_owner is not None:
+        surface["sourceWorkerId"] = imported_owner
+    generic = {"id": "general-review", "reason": "Independent unfinished review."}
+    pending = {"candidateId": "candidate-a", "reason": "Saved candidate proof gap."}
+    draft["coverage"] = {
+        "completeness": "partial",
+        "surfaces": [surface],
+        "explicitExclusions": [],
+        "deferred": [generic, pending] if existing_pending else [generic],
+    }
+    result_path.write_text(json.dumps(draft))
+    original = result_path.read_bytes()
+    fail_deep_scan(state, codex_home, scan_id, message="Synthetic interruption.")
+    scan = get_scan(state, scan_id)["scan"]
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    assert scan["progress"]["candidates"]["unresolved"] == 1
+    assert generic in coverage["deferred"]
+    candidates = [row for row in coverage["deferred"] if row.get("candidateId") == "candidate-a"]
+    assert len(candidates) == 1
+    assert candidates[0]["sourceWorkerId"] == worker_id
+    assert candidate == candidates[0].get("candidate") or candidate in candidates[0].get(
+        "originalCandidates", []
+    )
+    assert any("Skipped malformed coverage receipt" in warning for warning in scan["warnings"])
+    assert result_path.read_bytes() == original

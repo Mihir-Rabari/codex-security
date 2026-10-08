@@ -1530,7 +1530,9 @@ def merge_saved_results(
                     projected["coverage"], draft["unresolvedCandidates"]
                 )
             if worker_id is not None:
-                projected = recover_candidate_receipts(projected, scan_dir, warnings, relative)
+                projected = recover_candidate_receipts(
+                    projected, scan_dir, warnings, relative, owner=worker_id
+                )
             sources.append((relative, projected, worker_id))
         except (ContractError, OSError, ValueError) as exc:
             if (scan_dir / relative).exists():

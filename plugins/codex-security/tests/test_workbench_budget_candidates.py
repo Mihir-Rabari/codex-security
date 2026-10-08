@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 from test_workbench_db import budget_scan_fixture, complete_budget_scan
-from workbench_test_support import run_workbench, write_completed_contract
+from workbench_test_support import BUDGET_COST, SCRIPT, run_workbench, write_completed_contract
 
 
 @pytest.mark.parametrize("variant", ["deduplicated", "distinct", "invalid"])
@@ -1476,4 +1479,102 @@ def test_public_budget_dismissal_archives_reopened_findings(
             and row.get("provenance", {}).get("candidateId") == candidate["candidate_id"]
             for row in history
         )
+    assert ledger.read_bytes() == original_ledger
+
+
+@pytest.mark.parametrize("decision", ["suppressed", "not_applicable"])
+@pytest.mark.parametrize("retry_evidence", ["unchanged", "new-phase", "receipt", "finding"])
+def test_public_budget_retry_retains_receipt_reopening(
+    tmp_path: Path, decision: str, retry_evidence: str
+) -> None:
+    state, target, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    candidate["validation"] = {
+        "disposition": decision,
+        "counterevidence_or_proof_gap": "Saved terminal decision.",
+    }
+    ledger.write_text(json.dumps(candidate) + "\n")
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    findings_path = scan_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    finding = findings["findings"][0]
+    finding["provenance"]["candidateId"] = candidate["candidate_id"]
+    findings["findings"] = []
+    findings_path.write_text(json.dumps(findings))
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    disposition = "rejected" if decision == "suppressed" else "not_applicable"
+    coverage.update(
+        completeness="complete",
+        surfaces=[
+            {
+                "id": "candidate-review",
+                "candidateId": candidate["candidate_id"],
+                "label": "Saved candidate decision",
+                "disposition": disposition,
+                "receiptRefs": ["artifacts/proof/missing.txt"],
+            }
+        ],
+        deferred=[],
+    )
+    coverage_path.write_text(json.dumps(coverage))
+    # Interrupt the public command after its real draft writes, before sealing.
+    wrapper = (
+        "import os, runpy, sys\n"
+        "script = sys.argv[1]; sys.argv = sys.argv[1:]\n"
+        "def interrupt(frame, event, arg):\n"
+        "    if event == 'call' and frame.f_code.co_name == 'complete_scan_locked':\n"
+        "        os._exit(75)\n"
+        "    return interrupt\n"
+        "sys.settrace(interrupt)\n"
+        "runpy.run_path(script, run_name='__main__')\n"
+    )
+    args = [
+        str(SCRIPT),
+        "complete-budget-exhausted-scan",
+        "--scan-id",
+        scan_id,
+        "--cost-json",
+        json.dumps(BUDGET_COST),
+        "--message",
+        "Synthetic budget stop.",
+    ]
+    for _ in range(2):
+        interrupted = subprocess.run(
+            [sys.executable, "-B", "-c", wrapper, *args],
+            env={**os.environ, "CODEX_SECURITY_STATE_DIR": str(state)},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert interrupted.returncode == 75, interrupted.stderr
+        pending = json.loads(coverage_path.read_text())
+        assert pending["surfaces"][0]["disposition"] == "needs_follow_up"
+        assert any(
+            row.get("candidateId") == candidate["candidate_id"] for row in pending["deferred"]
+        )
+    if retry_evidence == "new-phase":
+        candidate["validation"]["counterevidence_or_proof_gap"] = "New terminal evidence."
+        ledger.write_text(json.dumps(candidate) + "\n")
+    elif retry_evidence == "receipt":
+        path = scan_dir / "artifacts/proof/replacement.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("Synthetic replacement receipt.\n")
+        pending["surfaces"][0].update(
+            disposition=disposition, receiptRefs=["artifacts/proof/replacement.txt"]
+        )
+        coverage_path.write_text(json.dumps(pending))
+    elif retry_evidence == "finding":
+        findings["findings"] = [finding]
+        findings_path.write_text(json.dumps(findings))
+    original_ledger = ledger.read_bytes()
+    completed = complete_budget_scan(state, scan_id)["scan"]
+    saved = json.loads(coverage_path.read_text())
+    assert completed["progress"]["candidates"]["unresolved"] == int(retry_evidence == "unchanged")
+    assert completed["findingCount"] == int(retry_evidence == "finding")
+    assert bool(
+        [row for row in saved["deferred"] if row.get("candidateId") == candidate["candidate_id"]]
+    ) is (retry_evidence == "unchanged")
     assert ledger.read_bytes() == original_ledger

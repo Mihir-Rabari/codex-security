@@ -52,6 +52,7 @@ def recover_candidate_receipts(
     warnings: list[str],
     source: str | None = None,
     *,
+    owner: str | None = None,
     reopened: set[tuple[str | None, str]] | None = None,
 ) -> dict[str, Any] | None:
     if parent is None:
@@ -122,13 +123,12 @@ def recover_candidate_receipts(
             if invalid:
                 row["disposition"] = "needs_follow_up"
                 coverage["completeness"] = "partial"
-                if isinstance(row.get("candidateId"), str):
+                if (key := coverage_candidate_key(row, owner)) is not None:
                     pending = next(
                         (
                             item
                             for item in coverage["deferred"]
-                            if isinstance(item, dict)
-                            and coverage_candidate_key(item) == coverage_candidate_key(row)
+                            if isinstance(item, dict) and coverage_candidate_key(item, owner) == key
                         ),
                         None,
                     )
@@ -396,6 +396,24 @@ def preserve_budget_candidates(
         and item.get("disposition") in ("rejected", "not_applicable")
         and (field != "surfaces" or not generated_surface(item))
     }
+    # A retry can read the recovered draft after the invalid receipt was removed.
+    # Keep that reopening tied to the ledger decision it invalidated; a new phase
+    # or an independent saved terminal decision can still resolve the candidate.
+    receipt_reopened = set(receipt_reopened or ())
+    candidates_by_key = {(None, candidate["candidate_id"]): candidate for candidate in candidates}
+    for item in coverage["deferred"]:
+        if not isinstance(item, dict):
+            continue
+        key = coverage_candidate_key(item)
+        candidate = candidates_by_key.get(key)
+        if candidate is None:
+            continue
+        phase = _diff_candidate_phase_snapshot(candidate)
+        if key in receipt_reopened:
+            item["receiptReopenedDecision"] = copy.deepcopy(phase)
+        elif item.get("receiptReopenedDecision") == phase:
+            receipt_reopened.add(key)
+
     dispositions = {
         (None, candidate["candidate_id"]): (
             "reported"
@@ -403,7 +421,7 @@ def preserve_budget_candidates(
             else terminal_decisions.get((None, candidate["candidate_id"]))
             or (
                 diff_candidate_disposition(candidate)
-                if (None, candidate["candidate_id"]) not in (receipt_reopened or ())
+                if (None, candidate["candidate_id"]) not in receipt_reopened
                 else None
             )
             or "needs_follow_up"
