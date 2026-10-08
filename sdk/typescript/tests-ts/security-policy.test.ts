@@ -1108,19 +1108,49 @@ describe("security policy preview", () => {
     expect(diff.match(/No newline at end of file/gu)).toHaveLength(2);
   });
 
-  test("reports an early diff subprocess exit without an unhandled stdin error", async () => {
-    const name =
-      "reports an early diff subprocess exit without an unhandled stdin error";
-    if (runTestInSubprocess(import.meta.path, name)) return;
+  test("preserves Node diff process errors ahead of failed input writes", async () => {
     const f = await fixture();
     const draft = await f.generate();
-    const node = nodeCommand().command;
-    await expect(
-      securityPolicyDiff(
-        { ...draft, content: `# Policy\n${"x".repeat(900_000)}` },
-        node,
+    const source = new URL("../src/security-policy.ts", import.meta.url);
+    const built = await Bun.build({
+      entrypoints: [fileURLToPath(source)],
+      target: "node",
+      format: "esm",
+      define: { "import.meta.url": JSON.stringify(source.href) },
+    });
+    expect(built.success).toBe(true);
+    const module = join(f.root, "policy.mjs");
+    await writeFile(module, await built.outputs[0]!.text());
+    const ignoreInput = join(f.root, "ignore-input");
+    if (process.platform !== "win32")
+      await writeFile(ignoreInput, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    const result = JSON.parse(
+      execFileSync(
+        nodeCommand().command,
+        [
+          "--input-type=module",
+          "--eval",
+          `
+import { readFileSync } from "node:fs";
+const { securityPolicyDiff } = await import(process.argv[1]);
+const draft = JSON.parse(readFileSync(0, "utf8"));
+const failures = [];
+for (const [interpreter, size] of [[process.execPath, 100], [process.execPath, 900000], [process.argv[2], 900000]].filter(([interpreter]) => interpreter)) {
+  try { await securityPolicyDiff({ ...draft, content: '# Policy\\n' + 'x'.repeat(size) }, interpreter); failures.push(null); }
+  catch (error) { failures.push({ code: error.code, message: error.message }); }
+}
+console.log(JSON.stringify(failures));`,
+          pathToFileURL(module).href,
+          process.platform === "win32" ? "" : ignoreInput,
+        ],
+        { encoding: "utf8", input: JSON.stringify(draft) },
       ),
-    ).rejects.toThrow();
+    );
+    for (const failure of result.slice(0, 2)) {
+      expect(failure.code).toBe(9);
+      expect(failure.message).toContain("bad option: -I");
+    }
+    if (process.platform !== "win32") expect(result[2].code).toBe("EPIPE");
     expect(await readdir(f.repository)).toEqual([]);
   });
 
