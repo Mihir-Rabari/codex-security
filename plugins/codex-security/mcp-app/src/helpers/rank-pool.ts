@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual as same } from "node:util";
 import { basename, dirname } from "node:path";
 import { mkdir, readFile, writeFile } from "./helper-files";
 import { formatDiagnostic, object, parseJson } from "./json";
@@ -28,9 +29,6 @@ interface Worker {
   output_shards: string[];
   slot: number;
 }
-const same = (left: string[], right: string[]) =>
-  left.length === right.length &&
-  left.every((name, index) => name === right[index]);
 
 function requirePlanDirectory(plan: string, directory: string): void {
   const expected = childPath(dirname(plan), "rank_shards");
