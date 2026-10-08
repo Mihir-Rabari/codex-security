@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sqlite3
 import subprocess
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -171,6 +173,27 @@ def test_dirty_submodule_warning_preserves_the_changed_target_detail(tmp_path: P
     assert "Dirty Git submodules" in warning
     assert "child" in warning
     assert "results were saved" in warning
+
+
+def test_disabled_git_source_snapshot_does_not_inspect_refs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = load_script("workbench_finding_workflows")
+    (tmp_path / "source.py").write_text("print('fixture')\n")
+
+    def unexpected_git(*args, **kwargs):
+        pytest.fail("disabled Git must not inspect revisions or refs")
+
+    monkeypatch.setattr(api, "git_revision", unexpected_git)
+    monkeypatch.setattr(api, "git_bytes", unexpected_git)
+    with closing(sqlite3.connect(":memory:")) as connection:
+        source = api.finding_workflow(
+            connection,
+            {"id": "fixture", "action": "source", "repository": str(tmp_path), "gitDisabled": True},
+            "2026-01-01T00:00:00Z",
+        )["source"]
+    assert source["revision"] == "unversioned"
+    assert source["refsDigest"] == hashlib.sha256(b"").hexdigest()
 
 
 @pytest.mark.parametrize("mode", ["revisions", "local-patch"])

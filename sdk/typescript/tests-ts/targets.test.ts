@@ -27,6 +27,7 @@ import {
   enclosingGitWorktreeRoot,
   gitMarkerRoot,
   isGitMetadataDirectory,
+  gitProtectionRoots,
 } from "../src/targets.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
@@ -716,6 +717,20 @@ test("finds Git boundaries through directory aliases and file inputs", async () 
   expect(await gitMarkerRoot(alias, undefined, "nearest")).toBe(nested);
   expect(await gitMarkerRoot(alias, undefined, "outermost")).toBe(repo);
   expect(
+    await gitMarkerRoot(
+      join(alias, "removed", "child"),
+      undefined,
+      "outermost",
+    ),
+  ).toBe(repo);
+  expect(
+    await gitMarkerRoot(
+      join(alias, "context.md", "child"),
+      undefined,
+      "outermost",
+    ),
+  ).toBe(repo);
+  expect(
     await gitMarkerRoot(join(alias, "context.md"), undefined, "outermost"),
   ).toBe(repo);
 });
@@ -747,4 +762,21 @@ test("invalid diff refs retain the Git diagnostic", async () => {
   await expect(
     normalizeTarget(repo, DiffTarget.refs({ base: "missing-fixture-ref" })),
   ).rejects.toThrow(original.stderr.trim());
+});
+
+test("executable protection retains lexical and canonical checkout roots", async () => {
+  const lexical = await repository();
+  const canonical = await repository("destination");
+  const alias = join(lexical, "linked-target");
+  await symlink(
+    canonical,
+    alias,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  expect(await gitProtectionRoots(alias)).toEqual(
+    expect.arrayContaining([lexical, canonical]),
+  );
+  expect(await gitProtectionRoots(join(alias, "missing", "child"))).toEqual(
+    expect.arrayContaining([lexical, canonical]),
+  );
 });

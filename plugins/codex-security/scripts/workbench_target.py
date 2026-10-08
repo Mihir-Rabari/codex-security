@@ -712,20 +712,22 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     return sorted({str(path): path for path in paths}.values(), key=str)
 
 
-def source_directory_snapshot_paths(target: Path) -> list[Path]:
+def source_directory_snapshot_paths(target: Path, excluded: tuple[Path, ...] = ()) -> list[Path]:
     paths: list[Path] = []
     for directory, directories, files in os.walk(target, topdown=True, followlinks=False):
         parent = Path(directory)
         for name in directories[:]:
-            if name == ".git":
+            path = parent / name
+            if name == ".git" or path in excluded:
                 directories.remove(name)
                 continue
-            path = parent / name
             paths.append(path)
             # Name-surrogate reparse points include Windows directory junctions.
             if getattr(path.lstat(), "st_reparse_tag", 0) & 0x20000000:
                 directories.remove(name)
-        paths.extend(parent / name for name in files if name != ".git")
+        paths.extend(
+            parent / name for name in files if name != ".git" and parent / name not in excluded
+        )
     return sorted(paths)
 
 
@@ -736,7 +738,7 @@ def directory_content_digest(
         path.relative_to(target) for path in excluded if path.is_relative_to(target)
     ]
     paths = (
-        source_directory_snapshot_paths(target)
+        source_directory_snapshot_paths(target, excluded)
         if include_ignored
         else git_directory_snapshot_paths(target)
     )
