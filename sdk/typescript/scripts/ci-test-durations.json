@@ -4,7 +4,8 @@
     "https://github.com/openai/codex-security/actions/runs/33227512538",
     "https://github.com/openai/codex-security/actions/runs/33233690024",
     "https://github.com/openai/codex-security/actions/runs/37420072376",
-    "https://github.com/openai/codex-security/actions/runs/37472306800"
+    "https://github.com/openai/codex-security/actions/runs/37472306800",
+    "https://github.com/openai/codex-security/actions/runs/37758805985"
   ],
   "unix": {
     "api-attribution-concurrency.test.ts": 1.552,
@@ -175,7 +176,7 @@
     "workflow-quality.test.ts": 0.197
   },
   "windows": {
-    "api-attribution-concurrency.test.ts": 27.364,
+    "api-attribution-concurrency.test.ts": 89.503,
     "api-credentials.test.ts": 76.223,
     "api-cyber-access.test.ts": 0.442,
     "api-environment.test.ts": 0.0,
@@ -277,7 +278,7 @@
     "linear.test.ts": 0.003,
     "mcp-launcher.test.ts": 3.656,
     "mock-scan.test.ts": 28.689,
-    "multiscan.test.ts": 71.201,
+    "multiscan.test.ts": 550.213,
     "package-provenance.test.ts": 0.001,
     "package-public-content.test.ts": 0.003,
     "package-smoke-timeouts.test.ts": 0.0,
@@ -304,12 +305,12 @@
     "repository-findings.test.ts": 0.359,
     "result.test.ts": 0.006,
     "runtime-plugin-reuse.test.ts": 0.846,
-    "runtime.test.ts": 157.186,
+    "runtime.test.ts": 199.012,
     "sandbox-probe.test.ts": 0.001,
     "sarif.test.ts": 1.437,
     "scan-activity.test.ts": 0.007,
     "scan-comparison.property.test.ts": 0.65,
-    "scan-comparison.test.ts": 8.199,
+    "scan-comparison.test.ts": 146.33,
     "scan-dashboard.test.ts": 0.096,
     "scan-history-renderer.test.ts": 0.006,
     "scan-logs.test.ts": 0.35,

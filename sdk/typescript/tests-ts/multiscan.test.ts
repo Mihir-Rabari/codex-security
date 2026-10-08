@@ -4715,9 +4715,11 @@ test("qualified campaign recovers its report from an unrelated Python invocation
   });
   const initial = await runMultiscan(campaign);
   const ledger = await readFile(initial.resultsPath, "utf8");
+  const invocationDirectory = join(paths.root, "python-invocation");
+  await mkdir(invocationDirectory);
   const originalDirectory = process.cwd();
   try {
-    process.chdir(dirname(await realpath(PYTHON)));
+    process.chdir(invocationDirectory);
     expect(await runMultiscan(campaign)).toMatchObject({
       completed: 1,
       skipped: 1,
