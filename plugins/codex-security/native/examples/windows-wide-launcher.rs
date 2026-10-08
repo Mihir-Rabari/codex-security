@@ -230,7 +230,14 @@ fn main() -> std::io::Result<()> {
                 ));
             }
         }
-        let inventory_scopes = repo.join("inventory-scopes.json");
+        // Keep the Node 20 ABI proof independent of its win32.relative bug for
+        // case-folding expansions such as İ. The SDK tests inventory on supported Node versions.
+        let inventory_repo = root.join(&cwds[0]).join(raw("inventory-", 0xdc80));
+        let inventory_scope = inventory_repo.join(&scopes[0]);
+        fs::create_dir_all(&inventory_scope)?;
+        fs::write(inventory_scope.join("SECURITY.md"), "scope raw\n")?;
+        let inventory_output = inventory_repo.join(&output_name);
+        let inventory_scopes = inventory_repo.join("inventory-scopes.json");
         fs::write(&inventory_scopes, r#"["scope-\udfff"]"#)?;
         let scoped_expected = "{\"path\":\"scope-\\udfff/SECURITY.md\"}\r\n";
         let ranked_expected = concat!(
@@ -245,25 +252,28 @@ fn main() -> std::io::Result<()> {
                 command,
                 &[
                     "--repo".into(),
-                    repo.clone(),
+                    inventory_repo.clone(),
                     "--scopes-file".into(),
                     inventory_scopes.clone(),
                     "--out".into(),
-                    output.clone(),
+                    inventory_output.clone(),
                 ],
             )?;
+            let actual = fs::read(&inventory_output);
             if !generated.status.success()
                 || !generated.stderr.is_empty()
-                || fs::read(&output)? != expected.as_bytes()
+                || !actual
+                    .as_ref()
+                    .is_ok_and(|bytes| bytes == expected.as_bytes())
             {
                 return Err(io::Error::other(format!(
-                    "Wide inventory helper failed: {}",
-                    String::from_utf8_lossy(&generated.stderr),
+                    "Wide inventory helper {command} failed: status={}, stdout={:?}, stderr={:?}, expected={:?}, actual={actual:?}",
+                    generated.status, generated.stdout, generated.stderr, expected.as_bytes(),
                 )));
             }
         }
         fs::remove_file(&output)?;
-        fs::remove_file(inventory_scopes)?;
+        fs::remove_dir_all(inventory_repo)?;
         let identity_root = root.join("İroot");
         let sibling = root.join("i\u{307}root");
         fs::create_dir(&identity_root)?;

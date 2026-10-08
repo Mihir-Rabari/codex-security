@@ -954,3 +954,23 @@ test.skipIf(process.platform === "win32")(
     expect(JSON.parse(readFileSync(f.out, "utf8")).path).toBe("source.py");
   },
 );
+
+test("inventory preserves scoped names beneath dotted-I repository names", () => {
+  const f = fixture();
+  f.write("scope/source.py", "kept\n");
+  const repository = join(f.root, "İrepository");
+  renameSync(f.repo, repository);
+  const scopes = join(f.root, "scopes.json");
+  writeFileSync(scopes, JSON.stringify(["scope"]));
+  for (const command of ["make-repo-scope-input", "make-repo-rank-input"]) {
+    const rows = f.rows(command, [
+      "--repo",
+      repository,
+      "--scopes-file",
+      scopes,
+    ]);
+    expect(rows.map((row) => row.path)).toEqual(["scope/source.py"]);
+    if (command === "make-repo-rank-input")
+      expect(rows[0]).toMatchObject({ area: "scope", preview: "kept" });
+  }
+});
