@@ -28,6 +28,12 @@ export async function runAppServerWorker(
 ): Promise<{ threadId: string }> {
   const { request } = options;
   if (request.signal.aborted) throw abortError(request.signal.reason);
+  const cyberAccessProgram =
+    options.cyberAccessProgram === "daybreak_blue"
+      ? "daybreakBlue"
+      : options.cyberAccessProgram === "daybreak_red"
+        ? "daybreakRed"
+        : options.cyberAccessProgram;
   const args = [
     ...options.configOverrides.flatMap((value) => ["--config", value]),
     ...(options.providerConfigOverrides ?? []).flatMap((value) => [
@@ -271,9 +277,7 @@ export async function runAppServerWorker(
     const started = await rpc("turn/start", {
       threadId,
       input: [{ type: "text", text: options.input, text_elements: [] }],
-      ...(options.cyberAccessProgram === undefined
-        ? {}
-        : { cyberAccessProgram: options.cyberAccessProgram }),
+      ...(cyberAccessProgram === undefined ? {} : { cyberAccessProgram }),
     });
     const startedTurn = asRecord(started.turn);
     if (typeof startedTurn?.id !== "string")

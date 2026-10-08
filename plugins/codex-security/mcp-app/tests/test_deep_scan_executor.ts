@@ -2011,7 +2011,7 @@ async function testWorkerCyberAccessSettings() {
   const cases: {
     name: string;
     configuration: string;
-    program?: string;
+    nativeProgram?: string;
     serviceTier?: string;
     features?: Record<string, boolean>;
     configPath?: string;
@@ -2023,18 +2023,24 @@ async function testWorkerCyberAccessSettings() {
       configuration:
         'service_tier = "fast"\n[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = true\n',
       serviceTier: "fast",
-      program: "daybreak_blue",
+      nativeProgram: "daybreakBlue",
       features: {
         api_key_cyber_access_programs: true,
         api_key_model_discovery: true,
       },
     },
     {
+      name: "red",
+      configuration:
+        '[codex_security]\ncyber_access_program = "daybreak_red"\n',
+      nativeProgram: "daybreakRed",
+    },
+    {
       name: "explicit-false",
       configuration:
         'service_tier = "flex"\n[codex_security]\ncyber_access_program = "daybreak_blue"\n[features]\napi_key_cyber_access_programs = false\napi_key_model_discovery = false\n',
       serviceTier: "flex",
-      program: "daybreak_blue",
+      nativeProgram: "daybreakBlue",
       features: {
         api_key_cyber_access_programs: false,
         api_key_model_discovery: false,
@@ -2045,7 +2051,7 @@ async function testWorkerCyberAccessSettings() {
       configuration:
         'service_tier = "flex"\nprofile = "cloud.production"\n[profiles."cloud.production"]\nservice_tier = "fast"\n[codex_security]\ncyber_access_program = "standard"\n[features]\napi_key_cyber_access_programs = true\napi_key_model_discovery = false\n',
       serviceTier: "fast",
-      program: "standard",
+      nativeProgram: "standard",
       features: {
         api_key_cyber_access_programs: true,
         api_key_model_discovery: false,
@@ -2122,7 +2128,12 @@ async function testWorkerCyberAccessSettings() {
         );
         const workerLaunches = await recordedWorkerLaunches(launches);
         assert.equal(workerLaunches.length, cases.length);
-        for (const { name, program, serviceTier, features = {} } of cases) {
+        for (const {
+          name,
+          nativeProgram,
+          serviceTier,
+          features = {},
+        } of cases) {
           const launch = workerLaunches.find(
             ({ invocation }) => invocation.thread.params.model === name,
           );
@@ -2135,7 +2146,10 @@ async function testWorkerCyberAccessSettings() {
               ? []
               : [`service_tier=${JSON.stringify(serviceTier)}`],
           );
-          assert.equal(invocation.turn.params.cyberAccessProgram, program);
+          assert.equal(
+            invocation.turn.params.cyberAccessProgram,
+            nativeProgram,
+          );
           assertConfigOverrides(invocation.argv, {
             "features.api_key_cyber_access_programs":
               features.api_key_cyber_access_programs,
