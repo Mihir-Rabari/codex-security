@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import sqlite3
 import subprocess
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -57,7 +59,9 @@ def test_check_scan_target_matches_recorded_contents(tmp_path: Path, kind: str) 
 
 
 @pytest.mark.parametrize("kind", ["repository", "refs"])
-def test_check_scan_target_rejects_changed_revision(tmp_path: Path, kind: str) -> None:
+def test_check_scan_target_rejects_changed_revision(
+    tmp_path: Path, kind: str, workbench_api
+) -> None:
     repository = tmp_path / "repository"
     initialize_git_repository(repository)
     state_dir = tmp_path / "state"
@@ -81,6 +85,14 @@ def test_check_scan_target_rejects_changed_revision(tmp_path: Path, kind: str) -
     )
     assert changed["returncode"] != 0
     assert "Repository HEAD changed" in changed["stderr"]
+    assert "new scan" in changed["stderr"].lower()
+    with closing(sqlite3.connect(state_dir / "workbench.sqlite3")) as connection:
+        connection.row_factory = sqlite3.Row
+        stored_scan = connection.execute(
+            "SELECT * FROM scans WHERE id = ?", (scan["scanId"],)
+        ).fetchone()
+    with pytest.raises(SystemExit, match="Regenerate the remediation patch"):
+        workbench_api["remediation_checkout_snapshot"](stored_scan)
 
 
 def test_check_scan_target_rejects_replaced_checkout(tmp_path: Path) -> None:
@@ -99,3 +111,39 @@ def test_check_scan_target_rejects_replaced_checkout(tmp_path: Path) -> None:
     )
     assert changed["returncode"] != 0
     assert "checkout path was replaced" in changed["stderr"]
+
+
+def test_check_scan_target_accepts_legacy_revision_only_git_scan(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_repository(repository)
+    state_dir = tmp_path / "state"
+    (tmp_path / "results").mkdir(mode=0o700)
+    scan = create_cli_scan(state_dir, tmp_path / "results", repository, complete=False)
+    with closing(sqlite3.connect(state_dir / "workbench.sqlite3")) as connection:
+        connection.execute(
+            "UPDATE scans SET target_snapshot_digest = NULL WHERE id = ?", (scan["scanId"],)
+        )
+        connection.commit()
+    command = ("get-scan", "--scan-id", scan["scanId"], "--check-target")
+    assert run_workbench(state_dir, *command)["scan"]["scanId"] == scan["scanId"]
+
+    # Revision-only records cannot compare content against an unrecorded digest.
+    source = repository / "README.md"
+    original = source.read_bytes()
+    source.write_text("Changed working-tree content.\n")
+    assert run_workbench(state_dir, *command)["scan"]["scanId"] == scan["scanId"]
+    source.write_bytes(original)
+
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-qm", "New revision"], cwd=repository, check=True
+    )
+    changed = run_workbench(state_dir, *command, check=False)
+    assert changed["returncode"] != 0
+    assert "Repository HEAD changed" in changed["stderr"]
+
+    repository.rename(tmp_path / "original")
+    repository.mkdir()
+    source.write_bytes(original)
+    replaced = run_workbench(state_dir, *command, check=False)
+    assert replaced["returncode"] != 0
+    assert "checkout path was replaced" in replaced["stderr"]
