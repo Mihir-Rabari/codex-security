@@ -1,5 +1,5 @@
 import { cp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { join, parse } from "node:path";
+import { join, parse, win32 } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -556,6 +556,83 @@ test("discovery canonicalizes aliases before checking project trust", async () =
   expect(result.payload!.config_discovery?.["project_root"]).toBe(repo);
   expect(capacity(result.payload!).actual).toBe(9);
 });
+
+test.skipIf(process.platform !== "win32")(
+  "project trust recognizes ordinary and namespaced spellings of the same directory",
+  async () => {
+    const root = await temporaryDirectory(),
+      home = join(root, "home"),
+      repo = join(root, "repo");
+    await mkdir(home);
+    await mkdir(join(repo, ".git"), { recursive: true });
+    await mkdir(join(repo, ".codex"));
+    await writeFile(
+      join(repo, ".codex/config.toml"),
+      "[agents]\nmax_threads=9\n",
+    );
+    const namespaced = win32.toNamespacedPath(repo);
+    for (const [key, cwd] of [
+      [namespaced, repo],
+      [repo, namespaced],
+    ] as const) {
+      await writeFile(
+        join(home, "config.toml"),
+        stringifyToml({
+          agents: { max_threads: 3 },
+          projects: { [key]: { trust_level: "trusted" } },
+        }),
+      );
+      const result = await run(
+        ["--profile", "security_scan", "--cwd", cwd, ...v1],
+        { CODEX_HOME: home },
+      );
+      expect(result.status).toBe(0);
+      expect(result.payload!.config_discovery?.["project_root"]).toBe(cwd);
+      expect(result.payload!.config_discovery?.["project_layers_loaded"]).toBe(
+        true,
+      );
+      expect(capacity(result.payload!).actual).toBe(9);
+    }
+  },
+);
+
+test.skipIf(process.platform !== "win32")(
+  "project trust keeps a raw extended directory distinct from its ordinary sibling",
+  async () => {
+    const root = await temporaryDirectory(),
+      home = join(root, "home"),
+      repo = join(root, "repo"),
+      raw = `${win32.toNamespacedPath(repo)}. `;
+    await mkdir(home);
+    await mkdir(join(repo, ".git"), { recursive: true });
+    await mkdir(join(repo, ".codex"));
+    await mkdir(raw);
+    try {
+      await writeFile(
+        join(home, "config.toml"),
+        stringifyToml({
+          agents: { max_threads: 3 },
+          projects: { [raw]: { trust_level: "trusted" } },
+        }),
+      );
+      await writeFile(
+        join(repo, ".codex/config.toml"),
+        "[agents]\nmax_threads=9\n",
+      );
+      const result = await run(
+        ["--profile", "security_scan", "--cwd", repo, ...v1],
+        { CODEX_HOME: home },
+      );
+      expect(result.status).toBe(0);
+      expect(result.payload!.config_discovery?.["project_layers_loaded"]).toBe(
+        false,
+      );
+      expect(capacity(result.payload!).actual).toBe(3);
+    } finally {
+      await rm(raw, { recursive: true, force: true });
+    }
+  },
+);
 
 test.skipIf(process.platform !== "win32")(
   "unresolved saved project aliases do not block a trusted local project",

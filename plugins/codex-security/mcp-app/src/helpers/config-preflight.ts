@@ -427,17 +427,22 @@ function evaluate(values: Options): Table {
     for (const layer of layers.toReversed()) {
       if (!isTable(layer.config.projects)) continue;
       let project = layer.config.projects[root];
-      if (!isTable(project) && windows)
+      if (!isTable(project) && windows) {
+        const files = windowsFiles();
+        const rootIdentity = files.identity(encodePath(root));
         project = Object.entries(layer.config.projects).find(([name]) => {
           try {
+            const identity = files.identity(encodePath(name));
             return (
-              resolvedPathText(name, false).toLowerCase() === root.toLowerCase()
+              identity.volume === rootIdentity.volume &&
+              identity.fileId.equals(rootIdentity.fileId)
             );
           } catch {
             // Unavailable saved projects do not affect trust for this directory.
             return false;
           }
         })?.[1];
+      }
       if (isTable(project) && typeof project.trust_level === "string") {
         trust = project.trust_level;
         break;
