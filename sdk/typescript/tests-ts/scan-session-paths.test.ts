@@ -21,7 +21,9 @@ async function fixture(label: string, response = "selected") {
   const directory = join(root, "scan");
   const state = join(root, "workbench");
   await Promise.all(
-    [home, sqliteHome, directory, state].map((path) => mkdir(path)),
+    [home, sqliteHome, directory, state].map((path) =>
+      mkdir(path, { mode: 0o700 }),
+    ),
   );
   const ids = [
     "root",
