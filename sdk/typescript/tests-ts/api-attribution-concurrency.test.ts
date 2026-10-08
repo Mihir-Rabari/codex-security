@@ -17,14 +17,19 @@ afterEach(fixtures.cleanup);
 
 describe("delegated scan attribution", () => {
   test.each([
-    ["standard", true, false],
-    ["deep", true, false],
-    ["standard", false, false],
-    ["standard", false, true],
-    ["deep", false, true],
+    ["standard", true, false, "root"],
+    ["deep", true, false, "profile-override"],
+    ["standard", false, false, "unset"],
+    ["deep", false, false, "profile-only"],
+    ["deep", true, false, "root"],
+    ["deep", true, false, "profile-fallback"],
+    ["deep", true, false, "unset"],
+    ["standard", true, false, "unset"],
+    ["standard", false, true, "unset"],
+    ["deep", false, true, "unset"],
   ] as const)(
-    "keeps overlapping CLI and SDK %s scans attributed with Cyber selection %p and explicit models %p",
-    async (mode, selectProgram, selectModel) => {
+    "keeps overlapping CLI and SDK %s scans attributed with Cyber selection %p, explicit models %p and %s endpoint",
+    async (mode, selectProgram, selectModel, endpointSource) => {
       const root = await fixtures.temporaryDirectory();
       const repository = join(root, "repository");
       const ambientHome = join(root, "ambient-home");
@@ -48,6 +53,21 @@ describe("delegated scan attribution", () => {
               : "gpt-5.6-sol"
             : undefined;
           const program = surface === "cli" ? programs[0] : programs[1];
+          const endpoint =
+            endpointSource === "unset"
+              ? undefined
+              : `https://synthetic-user:synthetic-password@${surface}.example.test/v1?token=synthetic-${surface}-token`;
+          const rootEndpoint =
+            endpointSource === "profile-only"
+              ? undefined
+              : endpointSource === "profile-override"
+                ? "https://overridden.example.test/v1"
+                : endpoint;
+          const profileEndpoint =
+            endpointSource === "profile-only" ||
+            endpointSource === "profile-override"
+              ? endpoint
+              : undefined;
           const features = selectProgram
             ? {
                 api_key_cyber_access_programs: surface === "cli",
@@ -71,14 +91,27 @@ describe("delegated scan attribution", () => {
           return new InternalSecurity(
             {
               pluginPath: PLUGIN_ROOT,
-              ...(surface === "sdk" || model !== undefined
-                ? {
-                    codexOverrides: {
-                      ...(surface === "sdk" ? { features } : {}),
-                      ...(model === undefined ? {} : { model }),
-                    },
-                  }
-                : {}),
+              codexOverrides: {
+                ...(rootEndpoint === undefined
+                  ? {}
+                  : { openai_base_url: rootEndpoint }),
+                ...(endpointSource.startsWith("profile-")
+                  ? {
+                      profile: "selected",
+                      profiles: {
+                        selected:
+                          profileEndpoint === undefined
+                            ? {}
+                            : { openai_base_url: profileEndpoint },
+                        unselected: {
+                          openai_base_url: "https://unused.example.test/v1",
+                        },
+                      },
+                    }
+                  : {}),
+                ...(surface === "sdk" ? { features } : {}),
+                ...(model === undefined ? {} : { model }),
+              },
             },
             {
               environment: {
@@ -155,6 +188,9 @@ describe("delegated scan attribution", () => {
                       expect(options.env).not.toHaveProperty("OPENAI_API_KEY");
                       expect(options.apiKey).toBe(`synthetic-${surface}-key`);
                       expect(turnOptions?.cyberAccessProgram).toBe(program);
+                      expect(options.config?.["openai_base_url"]).toBe(
+                        endpoint,
+                      );
                       expect(options.config).toMatchObject({
                         features,
                         ...(model === undefined ? {} : { model }),
@@ -174,10 +210,31 @@ describe("delegated scan attribution", () => {
                       configPaths.add(configPath!);
                       const initialConfig = await readFile(configPath!, "utf8");
                       const runtimeConfig = parseToml(initialConfig);
+                      if (mode === "deep") {
+                        const deepConfigPath =
+                          options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
+                        expect(deepConfigPath).toBeString();
+                        const deepConfig = parseToml(
+                          await readFile(deepConfigPath!, "utf8"),
+                        );
+                        const workerRuntime = deepConfig[
+                          "worker_runtime"
+                        ] as Record<string, unknown>;
+                        if (endpoint === undefined)
+                          expect(workerRuntime).not.toHaveProperty(
+                            "openai_base_url",
+                          );
+                        else
+                          expect(workerRuntime["openai_base_url"]).toBe(
+                            endpoint,
+                          );
+                      }
                       expect(runtimeConfig).toMatchObject({
                         features,
                         ...(model === undefined ? {} : { model }),
                       });
+                      expect(initialConfig).not.toContain("openai_base_url");
+                      expect(initialConfig).not.toContain("synthetic-password");
                       if (program === undefined) {
                         expect(runtimeConfig).not.toHaveProperty(
                           "codex_security",
@@ -204,6 +261,12 @@ describe("delegated scan attribution", () => {
                       );
                       expect(sharedConfig).not.toHaveProperty("model");
                       expect(sharedConfig).not.toHaveProperty("codex_security");
+                      expect(JSON.stringify(sharedConfig)).not.toContain(
+                        "openai_base_url",
+                      );
+                      expect(JSON.stringify(sharedConfig)).not.toContain(
+                        "synthetic-password",
+                      );
                       expect(sharedConfig["features"] ?? {}).not.toHaveProperty(
                         "api_key_cyber_access_programs",
                       );
