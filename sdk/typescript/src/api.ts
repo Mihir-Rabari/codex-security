@@ -806,7 +806,7 @@ export class CodexSecurity {
     }
     const configuration = await mergedCodexConfig(
       this.config,
-      configuredCodexHome(this.#dependencies.environment),
+      scanCodexHome(this.#dependencies.environment),
     );
     const model = scanModelConfiguration(configuration);
     const modelProvider = scanModelProvider(configuration);
@@ -1653,7 +1653,7 @@ export class CodexSecurity {
         if (isExternalModelProvider(provider)) {
           const fileProfile = await readCodexFileProfile(
             effectiveConfig,
-            configuredCodexHome(this.#dependencies.environment),
+            scanCodexHome(this.#dependencies.environment),
           );
           const providers = fileProfile["model_providers"];
           if (isRecord(providers) && isRecord(providers[provider])) {
@@ -2920,9 +2920,9 @@ export class CodexSecurity {
       const requestedConfig = resolveCommandAuthConfig(
         await mergedCodexConfig(
           this.config,
-          configuredCodexHome(this.#dependencies.environment),
+          scanCodexHome(this.#dependencies.environment),
         ),
-        configuredCodexHome(this.#dependencies.environment),
+        scanCodexHome(this.#dependencies.environment),
       );
       const commandAuth = hasCommandAuth(requestedConfig);
       const modelProvider = scanModelProvider(requestedConfig);
@@ -3169,7 +3169,7 @@ export class CodexSecurity {
       config ??
         (await mergedCodexConfig(
           this.config,
-          configuredCodexHome(this.#dependencies.environment),
+          scanCodexHome(this.#dependencies.environment),
         )),
     );
   }
@@ -3226,7 +3226,7 @@ export class CodexSecurity {
     policyCodexConfig(
       await mergedCodexConfig(
         this.config,
-        configuredCodexHome(this.#dependencies.environment),
+        scanCodexHome(this.#dependencies.environment),
       ),
     );
     const sources = await inspectSecurityPolicySources(target, signal);
@@ -3332,7 +3332,7 @@ export class CodexSecurity {
       const { model } = scanModelConfiguration(
         await mergedCodexConfig(
           this.config,
-          configuredCodexHome(this.#dependencies.environment),
+          scanCodexHome(this.#dependencies.environment),
         ),
       );
       const workbenchOptions: WorkbenchCommandOptions = {

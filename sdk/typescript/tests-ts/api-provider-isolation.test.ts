@@ -280,6 +280,7 @@ test.each([
           await writeFile(
             join(sourceHome, `review-${index}.config.toml`),
             stringifyToml({
+              model: "gpt-5.6-terra",
               model_provider: "openrouter",
               model_providers: {
                 openrouter: provider,
@@ -359,7 +360,9 @@ test.each([
             },
             {
               environment: {
-                CODEX_HOME: sourceHome,
+                [selection === "file custom only"
+                  ? "codex_home"
+                  : "CODEX_HOME"]: sourceHome,
                 CODEX_SECURITY_STATE_DIR: state,
                 OPENAI_API_KEY: "synthetic-account-key",
                 ...(selection === "file custom only"
@@ -415,6 +418,8 @@ test.each([
                       agents: resolvedAgents,
                       web_search: webSearch,
                     });
+                    if (fileProfile)
+                      expect(options.config!["model"]).toBe("gpt-5.6-terra");
                     expect(options.config!["agents"]).toEqual(
                       fileProfile ? resolvedAgents : agents,
                     );
@@ -498,6 +503,16 @@ test.each([
             },
           ),
         );
+      }
+      if (selection.startsWith("file ")) {
+        for (const client of clients) {
+          expect(
+            await client.preflight(repository, { mode: "deep" }),
+          ).toMatchObject({
+            model: "gpt-5.6-terra",
+            modelProvider: "openrouter",
+          });
+        }
       }
       // A's snapshot exists before B updates the shared credential home.
       runs.push(clients[0]!.run(repository, { mode: "deep" }));

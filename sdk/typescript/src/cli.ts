@@ -3368,7 +3368,7 @@ export async function main(
             options.effort,
             options.provider,
             undefined,
-            configuredCodexHome(dependencies.environment),
+            scanCodexHome(dependencies.environment),
           );
           const outcome = await withTerminalErrorsHandled(errorOutput, () =>
             runPolicyCommand(
@@ -3404,7 +3404,7 @@ export async function main(
                 chooseAuthentication: async (config, auth, signal) => {
                   const effectiveConfig = await mergedCodexConfig(
                     config,
-                    configuredCodexHome(dependencies.environment),
+                    scanCodexHome(dependencies.environment),
                   );
                   if (hasCommandAuth(effectiveConfig)) return auth;
                   return await chooseInteractiveAuthentication(
@@ -3650,7 +3650,7 @@ export async function main(
                 options.effort,
                 options.provider,
                 project?.input.codex,
-                configuredCodexHome(dependencies.environment),
+                scanCodexHome(dependencies.environment),
               ),
             },
             directory,
@@ -4189,7 +4189,7 @@ export async function main(
                 options.effort,
                 options.provider,
                 project?.input.codex,
-                configuredCodexHome(dependencies.environment),
+                scanCodexHome(dependencies.environment),
               ),
             },
             directory,
@@ -4228,7 +4228,7 @@ export async function main(
               model: scanModelConfiguration(
                 await mergedCodexConfig(
                   config,
-                  configuredCodexHome(dependencies.environment),
+                  scanCodexHome(dependencies.environment),
                 ),
               ),
               mode: settings.mode,
@@ -4526,7 +4526,7 @@ export async function main(
                   options.effort,
                   options.provider,
                   project?.input.codex,
-                  configuredCodexHome(dependencies.environment),
+                  scanCodexHome(dependencies.environment),
                 ),
               ),
               pluginPath: options.pluginPath,
@@ -5691,7 +5691,7 @@ export async function main(
         const resolved = resolveScanSettings(project, {}, directory);
         const codex = await mergedCodexConfig(
           resolved.config,
-          configuredCodexHome(dependencies.environment),
+          scanCodexHome(dependencies.environment),
         );
         const deep =
           resolved.options.mode === "deep"
@@ -7402,7 +7402,7 @@ async function runSkill(
               : { model_providers: { [provider]: providerConfiguration } }),
           },
     ),
-    configuredCodexHome(options.environment ?? dependencies.environment),
+    scanCodexHome(options.environment ?? dependencies.environment),
   );
   const directory = options.directory ?? dependencies.currentDirectory();
   const contents: Array<string | Finding> = [...(options.findings ?? [])];
@@ -8235,7 +8235,7 @@ async function executeScan(
         !isJsonObject(inlineProfiles[selectedProfileName] ?? null))
         ? await mergedCodexConfig(
             config,
-            configuredCodexHome(dependencies.environment),
+            scanCodexHome(dependencies.environment),
           )
         : { ...DEFAULT_CODEX_CONFIG, ...config.codexOverrides };
     ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
