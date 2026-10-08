@@ -8,131 +8,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { bashCommand, runCommand } from "./support/shell.js";
 
-type ReleaseMetadata = Record<string, unknown>;
-
-type ReleaseAutomation = {
-  parseReviewedReleaseNotes: (version: string, notes: string) => string;
-  extractHistoricalReleaseSummary: (notes: string) => string | null;
-  resolveReleaseSummary: (
-    version: string,
-    taggedNotes: string | undefined,
-    existingNotes: string | undefined,
-  ) => string | null;
-  composeReleaseNotes: (
-    generatedNotes: string,
-    releaseSummary: string | null,
-  ) => string;
-  releaseVersion: (packageJson: ReleaseMetadata) => string;
-  releaseTagVersion: (
-    refType: string,
-    ref: string,
-    refName: string,
-    packageJson: ReleaseMetadata,
-  ) => string;
-  compareReleaseVersions: (left: string, right: string) => -1 | 0 | 1;
-  requireReleaseIncrease: (version: string, previousVersion: string) => string;
-  initialPublishedVersions: (
-    version: string,
-    registryError: unknown,
-  ) => string[];
-  publishedReleaseMode: (
-    version: string,
-    publishedVersions: unknown,
-  ) => "publish" | "recover";
-  requirePublishedReleaseIncrease: (
-    version: string,
-    publishedVersions: unknown,
-  ) => string;
-  releaseHistory: (
-    tag: string,
-    history: {
-      registryVersions: string[];
-      githubReleaseTags: string[];
-      reachableTags: string[];
-    },
-  ) => { previousTag: string | null; makeLatest: boolean };
-  verifyPublishedRelease: (
-    metadata: ReleaseMetadata,
-    archive: Uint8Array,
-    expected: { version: string; gitHead: string },
-  ) => {
-    version: string;
-    gitHead: string;
-    integrity: string;
-    sha256: string;
-  };
-  verifyGitHubPublishedRelease: (
-    metadata: ReleaseMetadata,
-    archive: Uint8Array,
-    expected: {
-      version: string;
-      gitHead: string;
-      repository: string;
-      runId: string;
-    },
-    provenance: {
-      version: string;
-      gitHead: string;
-      repository: string;
-      runId: string;
-      sha512: string;
-    },
-  ) => {
-    version: string;
-    gitHead: string;
-    integrity: string;
-    sha256: string;
-  };
-  verifySignatureAudit: (
-    report: ReleaseMetadata,
-    archive: Uint8Array,
-    expected: {
-      version: string;
-      gitHead: string;
-      repository: string;
-      runId: string;
-    },
-  ) => {
-    version: string;
-    gitHead: string;
-    repository: string;
-    runId: string;
-    sha512: string;
-  };
-  verifyRecoveredSignatureAudit: (
-    report: ReleaseMetadata,
-    archive: Uint8Array,
-    expected: {
-      version: string;
-      gitHead: string;
-      repository: string;
-    },
-  ) => {
-    version: string;
-    gitHead: string;
-    repository: string;
-    runId: string;
-    sha512: string;
-  };
-  verifyGitHubRelease: (
-    release: ReleaseMetadata,
-    archive: Uint8Array,
-    expectedTag: string,
-    assetName: string,
-    downloadedArchive?: Uint8Array,
-  ) => { tag: string; asset: string; digest: string };
-};
-
-const automationScript = new URL(
-  "../scripts/release-automation.mjs",
-  import.meta.url,
-);
-const {
+import {
+  type ReleaseMetadata,
   parseReviewedReleaseNotes,
   extractHistoricalReleaseSummary,
   resolveReleaseSummary,
@@ -150,7 +32,12 @@ const {
   verifySignatureAudit,
   verifyRecoveredSignatureAudit,
   verifyGitHubRelease,
-} = (await import(automationScript.href)) as ReleaseAutomation;
+} from "../scripts/release-automation.mjs";
+
+const automationScript = new URL(
+  "../scripts/release-automation.mjs",
+  import.meta.url,
+);
 
 const releaseCommit = "1e03c89ad22d2df5ae65b146be1483b3608572a9";
 const releaseRun = "30481596229";
@@ -159,11 +46,14 @@ const releaseWorkflowTimeout = process.platform === "win32" ? 20_000 : 10_000;
 
 const bash = bashCommand();
 
-function runShell(script: string, env: NodeJS.ProcessEnv, cwd?: string) {
+function runShell(
+  script: string,
+  env: NodeJS.ProcessEnv,
+  options: { cwd?: string; timeout?: number } = {},
+) {
   return runCommand(bash, ["-c", script], {
-    cwd,
+    ...options,
     env: { ...process.env, ...env },
-    timeout: 10_000,
   });
 }
 
@@ -420,6 +310,14 @@ function signatureExpected() {
   };
 }
 
+function verifySignatureFixture(options: SignatureAuditFixture = {}) {
+  return verifySignatureAudit(
+    signatureAudit(options),
+    archive,
+    signatureExpected(),
+  );
+}
+
 function workflowStepShell(workflow: string, stepName: string): string {
   const stepMarker = `      - name: ${stepName}\n`;
   const stepStart = workflow.indexOf(stepMarker);
@@ -448,30 +346,50 @@ function workflowStepShell(workflow: string, stepName: string): string {
     .join("\n");
 }
 
-function evaluateWorkflowCondition(
+async function evaluateWorkflowCondition(
   condition: string,
   values: Record<string, string>,
-): boolean {
-  let expression = condition
-    .replace(/^\$\{\{\s*/u, "")
-    .replace(/\s*\}\}$/u, "");
-  for (const [identifier, value] of Object.entries(values).sort(
-    ([left], [right]) => right.length - left.length,
-  )) {
-    if (!/^[a-z0-9_/-]+$/u.test(value)) {
-      throw new Error(`Unsafe workflow test value: ${value}`);
-    }
-    expression = expression.replaceAll(identifier, `'${value}'`);
-  }
-  if (!/^[\s()'/a-z0-9_!=&|-]+$/u.test(expression)) {
-    throw new Error(`Unsupported workflow condition: ${condition}`);
-  }
+): Promise<boolean> {
+  return (await evaluateWorkflowConditions([{ condition, values }]))[0]!;
+}
 
-  const result = spawnSync(bash, ["-c", `[[ ${expression} ]]`]);
-  if (result.status !== 0 && result.status !== 1) {
-    throw new Error(`Could not evaluate workflow condition: ${condition}`);
+async function evaluateWorkflowConditions(
+  conditions: Array<{ condition: string; values: Record<string, string> }>,
+): Promise<boolean[]> {
+  const expressions = conditions.map(({ condition, values }) => {
+    let expression = condition
+      .replace(/^\$\{\{\s*/u, "")
+      .replace(/\s*\}\}$/u, "");
+    for (const [identifier, value] of Object.entries(values).sort(
+      ([left], [right]) => right.length - left.length,
+    )) {
+      if (!/^[a-z0-9_/-]+$/u.test(value)) {
+        throw new Error(`Unsafe workflow test value: ${value}`);
+      }
+      expression = expression.replaceAll(identifier, `'${value}'`);
+    }
+    if (!/^[\s()'/a-z0-9_!=&|-]+$/u.test(expression)) {
+      throw new Error(`Unsupported workflow condition: ${condition}`);
+    }
+    return `[[ ${expression} ]]
+result=$?
+if [[ $result != 0 && $result != 1 ]]; then exit "$result"; fi
+printf '%s\n' "$result"`;
+  });
+  const result = await runCommand(bash, [], {
+    input: expressions.join("\n"),
+    timeout: 30_000,
+  });
+  if (result.status !== 0) {
+    throw new Error(
+      `Could not evaluate workflow conditions (status ${result.status}, signal ${result.signal}):\n${result.stderr}`,
+      { cause: result.error },
+    );
   }
-  return result.status === 0;
+  return result.stdout
+    .trimEnd()
+    .split("\n")
+    .map((status) => status === "0");
 }
 
 describe("reviewed release note helpers", () => {
@@ -1119,9 +1037,7 @@ describe("GitHub release publication verification", () => {
 
 describe("cryptographically verified npm provenance", () => {
   test("binds the verified bundle to the exact archive, source, and run", () => {
-    expect(
-      verifySignatureAudit(signatureAudit(), archive, signatureExpected()),
-    ).toEqual({
+    expect(verifySignatureFixture()).toEqual({
       version: "0.1.2",
       gitHead: releaseCommit,
       repository: releaseRepository,
@@ -1149,13 +1065,7 @@ describe("cryptographically verified npm provenance", () => {
   test.each(["", "0", "01", "not-a-number", "1/extra", "1?attempt=2"])(
     "rejects the malformed protected workflow run attempt %j",
     (attempt) => {
-      expect(() =>
-        verifySignatureAudit(
-          signatureAudit({ attempt }),
-          archive,
-          signatureExpected(),
-        ),
-      ).toThrow(
+      expect(() => verifySignatureFixture({ attempt })).toThrow(
         "Verified SLSA provenance must identify the successful release run.",
       );
       expect(() =>
@@ -1209,13 +1119,7 @@ describe("cryptographically verified npm provenance", () => {
   });
 
   test("accepts the real Fulcio certificate in the legacy chain format", () => {
-    expect(
-      verifySignatureAudit(
-        signatureAudit({ certificateLocation: "chain" }),
-        archive,
-        signatureExpected(),
-      ),
-    ).toEqual({
+    expect(verifySignatureFixture({ certificateLocation: "chain" })).toEqual({
       version: "0.1.2",
       gitHead: releaseCommit,
       repository: releaseRepository,
@@ -1226,13 +1130,9 @@ describe("cryptographically verified npm provenance", () => {
 
   test("rejects missing and malformed Fulcio signing certificates", () => {
     for (const signingCertificate of [null, "not-base64"]) {
-      expect(() =>
-        verifySignatureAudit(
-          signatureAudit({ signingCertificate }),
-          archive,
-          signatureExpected(),
-        ),
-      ).toThrow("The verified Fulcio signing certificate is invalid.");
+      expect(() => verifySignatureFixture({ signingCertificate })).toThrow(
+        "The verified Fulcio signing certificate is invalid.",
+      );
     }
   });
 
@@ -1247,13 +1147,9 @@ describe("cryptographically verified npm provenance", () => {
 
     for (const certificate of invalidCertificates) {
       expect(() =>
-        verifySignatureAudit(
-          signatureAudit({
-            signingCertificate: certificate.toString("base64"),
-          }),
-          archive,
-          signatureExpected(),
-        ),
+        verifySignatureFixture({
+          signingCertificate: certificate.toString("base64"),
+        }),
       ).toThrow("The verified Fulcio signing certificate is invalid.");
     }
   });
@@ -1401,13 +1297,7 @@ describe("cryptographically verified npm provenance", () => {
         "Verified SLSA provenance must use a GitHub-hosted release runner.",
     },
   ])("$name", ({ options, message }) => {
-    expect(() =>
-      verifySignatureAudit(
-        signatureAudit(options()),
-        archive,
-        signatureExpected(),
-      ),
-    ).toThrow(message);
+    expect(() => verifySignatureFixture(options())).toThrow(message);
   });
 
   test("rejects malformed attestation bundle collections safely", () => {
@@ -1430,15 +1320,21 @@ describe("cryptographically verified npm provenance", () => {
 });
 
 describe("idempotent GitHub release verification", () => {
+  function verifyGitHubReleaseFixture(
+    release: ReleaseMetadata,
+    downloadedArchive?: Uint8Array,
+  ) {
+    return verifyGitHubRelease(
+      release,
+      archive,
+      "npm-v0.1.2",
+      "openai-codex-security-0.1.2.tgz",
+      downloadedArchive,
+    );
+  }
+
   test("accepts the already-published exact verified release asset", () => {
-    expect(
-      verifyGitHubRelease(
-        githubRelease(),
-        archive,
-        "npm-v0.1.2",
-        "openai-codex-security-0.1.2.tgz",
-      ),
-    ).toEqual({
+    expect(verifyGitHubReleaseFixture(githubRelease())).toEqual({
       tag: "npm-v0.1.2",
       asset: "openai-codex-security-0.1.2.tgz",
       digest,
@@ -1449,14 +1345,11 @@ describe("idempotent GitHub release verification", () => {
     const release = githubRelease();
 
     expect(
-      verifyGitHubRelease(
+      verifyGitHubReleaseFixture(
         {
           ...release,
           assets: [{ name: "openai-codex-security-0.1.2.tgz" }],
         },
-        archive,
-        "npm-v0.1.2",
-        "openai-codex-security-0.1.2.tgz",
         archive,
       ),
     ).toEqual({
@@ -1468,15 +1361,10 @@ describe("idempotent GitHub release verification", () => {
 
   test("rejects a digestless release asset without its downloaded bytes", () => {
     expect(() =>
-      verifyGitHubRelease(
-        {
-          ...githubRelease(),
-          assets: [{ name: "openai-codex-security-0.1.2.tgz" }],
-        },
-        archive,
-        "npm-v0.1.2",
-        "openai-codex-security-0.1.2.tgz",
-      ),
+      verifyGitHubReleaseFixture({
+        ...githubRelease(),
+        assets: [{ name: "openai-codex-security-0.1.2.tgz" }],
+      }),
     ).toThrow(
       "Existing GitHub Release asset must match the verified npm artifact.",
     );
@@ -1484,14 +1372,11 @@ describe("idempotent GitHub release verification", () => {
 
   test("rejects downloaded release bytes that differ from the npm archive", () => {
     expect(() =>
-      verifyGitHubRelease(
+      verifyGitHubReleaseFixture(
         {
           ...githubRelease(),
           assets: [{ name: "openai-codex-security-0.1.2.tgz" }],
         },
-        archive,
-        "npm-v0.1.2",
-        "openai-codex-security-0.1.2.tgz",
         Buffer.from("different downloaded GitHub release"),
       ),
     ).toThrow(
@@ -1501,42 +1386,30 @@ describe("idempotent GitHub release verification", () => {
 
   test("rejects a GitHub release for another tag", () => {
     expect(() =>
-      verifyGitHubRelease(
-        { ...githubRelease(), tag_name: "npm-v0.1.1" },
-        archive,
-        "npm-v0.1.2",
-        "openai-codex-security-0.1.2.tgz",
-      ),
+      verifyGitHubReleaseFixture({
+        ...githubRelease(),
+        tag_name: "npm-v0.1.1",
+      }),
     ).toThrow("Existing GitHub Release must match the release tag.");
   });
 
   test("rejects a draft or prerelease", () => {
     expect(() =>
-      verifyGitHubRelease(
-        { ...githubRelease(), draft: true },
-        archive,
-        "npm-v0.1.2",
-        "openai-codex-security-0.1.2.tgz",
-      ),
+      verifyGitHubReleaseFixture({ ...githubRelease(), draft: true }),
     ).toThrow("Existing GitHub Release must be published and stable.");
   });
 
   test("rejects a missing or different GitHub release artifact", () => {
     expect(() =>
-      verifyGitHubRelease(
-        {
-          ...githubRelease(),
-          assets: [
-            {
-              name: "openai-codex-security-0.1.2.tgz",
-              digest: "sha256:incorrect",
-            },
-          ],
-        },
-        archive,
-        "npm-v0.1.2",
-        "openai-codex-security-0.1.2.tgz",
-      ),
+      verifyGitHubReleaseFixture({
+        ...githubRelease(),
+        assets: [
+          {
+            name: "openai-codex-security-0.1.2.tgz",
+            digest: "sha256:incorrect",
+          },
+        ],
+      }),
     ).toThrow(
       "Existing GitHub Release asset must match the verified npm artifact.",
     );
@@ -1545,12 +1418,7 @@ describe("idempotent GitHub release verification", () => {
   test("rejects malformed GitHub release assets safely", () => {
     for (const assets of [null, {}, [null]]) {
       expect(() =>
-        verifyGitHubRelease(
-          { ...githubRelease(), assets },
-          archive,
-          "npm-v0.1.2",
-          "openai-codex-security-0.1.2.tgz",
-        ),
+        verifyGitHubReleaseFixture({ ...githubRelease(), assets }),
       ).toThrow(
         "Existing GitHub Release asset must match the verified npm artifact.",
       );
@@ -1561,15 +1429,10 @@ describe("idempotent GitHub release verification", () => {
     const release = githubRelease();
 
     expect(
-      verifyGitHubRelease(
-        {
-          ...release,
-          assets: [null, ...(release["assets"] as ReleaseMetadata[])],
-        },
-        archive,
-        "npm-v0.1.2",
-        "openai-codex-security-0.1.2.tgz",
-      ),
+      verifyGitHubReleaseFixture({
+        ...release,
+        assets: [null, ...(release["assets"] as ReleaseMetadata[])],
+      }),
     ).toEqual({
       tag: "npm-v0.1.2",
       asset: "openai-codex-security-0.1.2.tgz",
@@ -1697,7 +1560,7 @@ describe("GitHub release workflow safeguards", () => {
           MOCK_RELEASE_SUMMARY: summary,
           RELEASE_VERSION: "0.1.6",
         },
-        fileURLToPath(new URL("../../../", import.meta.url)),
+        { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
       );
 
       expect(result.status).toBe(status);
@@ -1770,12 +1633,12 @@ describe("GitHub release workflow safeguards", () => {
       headBranch: "none",
       expected: true,
     },
-  ])("gates release cutting for $name", (scenario) => {
+  ])("gates release cutting for $name", async (scenario) => {
     const workflow = Bun.YAML.parse(releaseCutWorkflow) as {
       jobs: { cut: { if: string } };
     };
     expect(
-      evaluateWorkflowCondition(workflow.jobs.cut.if, {
+      await evaluateWorkflowCondition(workflow.jobs.cut.if, {
         "github.event.workflow_run.conclusion": scenario.conclusion,
         "github.event.workflow_run.head_branch": scenario.headBranch,
         "github.event.workflow_run.event": scenario.sourceEvent,
@@ -1808,7 +1671,7 @@ describe("GitHub release workflow safeguards", () => {
         GITHUB_REF: "refs/heads/main",
         GITHUB_SHA: releaseCommit,
       },
-      fileURLToPath(new URL("../../../", import.meta.url)),
+      { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
     );
 
     expect(result.status).toBe(1);
@@ -1955,7 +1818,7 @@ describe("GitHub release workflow safeguards", () => {
             MOCK_TAGGED_ANCESTOR: String(taggedAncestor),
             RELEASE_SHA: releaseCommit,
           },
-          fileURLToPath(new URL("../../../", import.meta.url)),
+          { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
         );
 
         expect(result.stderr).toBe("");
@@ -2024,7 +1887,7 @@ describe("GitHub release workflow safeguards", () => {
         MOCK_RELEASE_SUMMARY: summary,
         RELEASE_SHA: releaseCommit,
       },
-      fileURLToPath(new URL("../../../", import.meta.url)),
+      { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
     );
 
     expect(result.status).toBe(1);
@@ -2115,7 +1978,7 @@ describe("GitHub release workflow safeguards", () => {
           }),
           MOCK_RELEASE_VERSION: version,
         },
-        fileURLToPath(new URL("../../../", import.meta.url)),
+        { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
       );
 
       expect(result.status).toBe(status);
@@ -2150,16 +2013,16 @@ describe("GitHub release workflow safeguards", () => {
       "  printf 'created tag at %s\\n' \"$RELEASE_SHA\"",
       "}",
     ].join("\n");
-    const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
-      env: {
-        ...process.env,
+    const result = await runShell(
+      `${mock}\n${script}`,
+      {
         GITHUB_REPOSITORY: "test/codex-security",
         GITHUB_SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         RELEASE_SHA: releaseCommit,
         RELEASE_TAG: "npm-v0.1.2",
       },
-      timeout: releaseWorkflowTimeout,
-    });
+      { timeout: releaseWorkflowTimeout },
+    );
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(`created tag at ${releaseCommit}`);
@@ -2218,17 +2081,17 @@ describe("GitHub release workflow safeguards", () => {
         "  printf 'created exact release tag\\n'",
         "}",
       ].join("\n");
-      const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
-        env: {
-          ...process.env,
+      const result = await runShell(
+        `${mock}\n${script}`,
+        {
           GITHUB_REPOSITORY: "test/codex-security",
           GITHUB_SHA: releaseCommit,
           MOCK_LOOKUP_HTTP_STATUS: lookupHttpStatus,
           MOCK_LOOKUP_RESPONSE: lookupResponse,
           RELEASE_TAG: "npm-v0.1.2",
         },
-        timeout: releaseWorkflowTimeout,
-      });
+        { timeout: releaseWorkflowTimeout },
+      );
 
       expect(result.status).toBe(status);
       if (status === 0) {
@@ -2294,9 +2157,9 @@ describe("GitHub release workflow safeguards", () => {
         "  esac",
         "}",
       ].join("\n");
-      const result = await runCommand(bash, ["-c", `${mock}\n${script}`], {
-        env: {
-          ...process.env,
+      const result = await runShell(
+        `${mock}\n${script}`,
+        {
           GITHUB_REPOSITORY: "test/codex-security",
           GITHUB_SHA: releaseCommit,
           MOCK_PEELED_COMMIT: peeledCommit,
@@ -2304,8 +2167,8 @@ describe("GitHub release workflow safeguards", () => {
           MOCK_TAG_TYPE: tagType,
           RELEASE_TAG: "npm-v0.1.2",
         },
-        timeout: releaseWorkflowTimeout,
-      });
+        { timeout: releaseWorkflowTimeout },
+      );
 
       expect(result.status).toBe(status);
       if (status === 0) {
@@ -2425,7 +2288,7 @@ describe("GitHub release workflow safeguards", () => {
         GITHUB_REF_TYPE: "tag",
         GITHUB_SHA: releaseCommit,
       },
-      fileURLToPath(new URL("../../../", import.meta.url)),
+      { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
     );
 
     expect(result.status).toBe(1);
@@ -2452,7 +2315,7 @@ describe("GitHub release workflow safeguards", () => {
         GITHUB_REF_TYPE: "tag",
         GITHUB_SHA: releaseCommit,
       },
-      fileURLToPath(new URL("../../../", import.meta.url)),
+      { cwd: fileURLToPath(new URL("../../../", import.meta.url)) },
     );
 
     expect(result.status).toBe(0);
@@ -2562,16 +2425,16 @@ describe("GitHub release workflow safeguards", () => {
           '  printf "wait\\n" >> "$MOCK_CALL_LOG"',
           "}",
         ].join("\n");
-        const result = await runCommand(bash, ["-c", `${mocks}\n${script}`], {
-          env: {
-            ...process.env,
+        const result = await runShell(
+          `${mocks}\n${script}`,
+          {
             MOCK_CALL_LOG: callLog,
             MOCK_MISSING_ATTEMPTS: String(missingAttempts),
             MOCK_ERROR_CODE: errorCode,
             RELEASE_VERSION: "0.1.2",
           },
-          timeout: releaseWorkflowTimeout,
-        });
+          { timeout: releaseWorkflowTimeout },
+        );
         const events = readFileSync(callLog, "utf8").split("\n");
         expect(result.status).toBe(status);
         expect(events.filter((event) => event === "query")).toHaveLength(calls);
@@ -2644,7 +2507,9 @@ describe("GitHub release workflow safeguards", () => {
         githubReleaseWorkflow,
         "Resolve the successful protected release",
       );
-      const root = mkdtempSync(join(tmpdir(), "codex-security-release-wait-"));
+      const root = mkdtempSync(
+        join(tmpdir(), "codex-security-release-wait-$(echo literal)-'-"),
+      );
       const state = join(root, "release-state");
       const sleeps = join(root, "release-sleeps");
       const mocks = [
@@ -2666,7 +2531,7 @@ describe("GitHub release workflow safeguards", () => {
         "    *) return 65 ;;",
         "  esac",
         "}",
-        `sleep() { printf '%s\\n' "$1" >> "${sleeps}"; }`,
+        'sleep() { printf "%s\\n" "$1" >> "$MOCK_SLEEP_LOG"; }',
       ].join("\n");
 
       try {
@@ -2676,6 +2541,7 @@ describe("GitHub release workflow safeguards", () => {
           INPUT_RUN_ID: releaseRun,
           INPUT_TAG: "npm-v0.1.2",
           MOCK_RUN_STATE: state,
+          MOCK_SLEEP_LOG: sleeps,
         });
 
         expect(result.status).toBe(0);
@@ -3179,7 +3045,7 @@ describe("GitHub release workflow safeguards", () => {
             RELEASE_TAG: "npm-v0.1.2",
             RELEASE_VERSION: "0.1.2",
           },
-          workspace,
+          { cwd: workspace },
         );
 
         expect(result.status).toBe(status);
@@ -3770,7 +3636,7 @@ describe("GitHub release workflow safeguards", () => {
     expect(nodeCiWorkflow).toContain("needs: validate-title");
   });
 
-  test("keeps required contexts stable for every change", () => {
+  test("keeps required contexts stable for every change", async () => {
     const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
       concurrency: {
         group: string;
@@ -3828,6 +3694,12 @@ describe("GitHub release workflow safeguards", () => {
           name ===
           `Require every ${job === "windows" ? "Windows" : "Unix"} coverage job`,
       );
+    const conditionCases: Array<{
+      condition: string;
+      values: Record<string, string>;
+      expected: boolean;
+      message: string;
+    }> = [];
     for (const [validation, upstream, gateFailure] of [
       ["success", "success", false],
       ["success", "skipped", true],
@@ -3846,10 +3718,12 @@ describe("GitHub release workflow safeguards", () => {
         "needs.windows-verify.result": upstream,
       };
       for (const job of ["required-test", "windows"]) {
-        expect(
-          evaluateWorkflowCondition(coverageGate(job)?.if ?? "", values),
-          `${job}: ${validation}/${upstream}`,
-        ).toBe(gateFailure);
+        conditionCases.push({
+          condition: coverageGate(job)?.if ?? "",
+          values,
+          expected: gateFailure,
+          message: `${job}: ${validation}/${upstream}`,
+        });
       }
     }
 
@@ -3873,8 +3747,9 @@ describe("GitHub release workflow safeguards", () => {
     })) {
       for (const dependency of dependencies) {
         for (const result of ["failure", "cancelled", "skipped"]) {
-          expect(
-            evaluateWorkflowCondition(coverageGate(gate)?.if ?? "", {
+          conditionCases.push({
+            condition: coverageGate(gate)?.if ?? "",
+            values: {
               "needs.validate-title.result": "success",
               ...Object.fromEntries(
                 dependencies.map((job) => [
@@ -3882,12 +3757,18 @@ describe("GitHub release workflow safeguards", () => {
                   job === dependency ? result : "success",
                 ]),
               ),
-            }),
-            `${gate}: ${dependency}/${result}`,
-          ).toBe(true);
+            },
+            expected: true,
+            message: `${gate}: ${dependency}/${result}`,
+          });
         }
       }
       expect(coverageGate(gate)?.run).toBe("exit 1");
+    }
+
+    const conditions = await evaluateWorkflowConditions(conditionCases);
+    for (const [index, item] of conditionCases.entries()) {
+      expect(conditions[index], item.message).toBe(item.expected);
     }
 
     const renderName = (template: string, values: Record<string, string>) => {
@@ -4057,7 +3938,7 @@ describe("GitHub release workflow safeguards", () => {
         "      printf '%s\\n' enhancement skip-release-notes",
         "      ;;",
         '    "GET repos/test/codex-security/issues/17/timeline?per_page=100")',
-        "      printf '%s\\n' 'github-actions[bot]' 'trusted-reviewer'",
+        "      printf '%b\\n' 'enhancement\\tgithub-actions[bot]' 'skip-release-notes\\tgithub-actions[bot]' 'skip-release-notes\\ttrusted-reviewer'",
         "      ;;",
         '    "DELETE repos/test/codex-security/issues/17/labels/enhancement")',
         "      printf '%s\\n' 'removed a stale managed category'",
@@ -4125,9 +4006,9 @@ describe("GitHub release workflow safeguards", () => {
       "      ;;",
       '    "GET repos/test/codex-security/issues/17/timeline?per_page=100")',
       '      if [[ "$*" == *"__unattributed__"* ]]; then',
-      "        printf '%s\\n' 'github-actions[bot]' '__unattributed__'",
+      "        printf '%b\\n' 'skip-release-notes\\tgithub-actions[bot]' 'skip-release-notes\\t__unattributed__'",
       "      else",
-      "        printf '%s\\n' 'github-actions[bot]' ''",
+      "        printf '%b\\n' 'skip-release-notes\\tgithub-actions[bot]' 'skip-release-notes\\t'",
       "      fi",
       "      ;;",
       '    "DELETE repos/test/codex-security/issues/17/labels/skip-release-notes")',
@@ -4188,7 +4069,7 @@ describe("GitHub release workflow safeguards", () => {
         "      printf '%s\\n' skip-release-notes",
         "      ;;",
         '    "GET repos/test/codex-security/issues/17/timeline?per_page=100")',
-        "      printf '%s\\n' 'github-actions[bot]'",
+        "      printf '%b\\n' 'skip-release-notes\\tgithub-actions[bot]'",
         "      ;;",
         '    "DELETE repos/test/codex-security/issues/17/labels/skip-release-notes")',
         "      printf '%s\\n' 'removed automatically applied skip-release-notes'",
@@ -4349,3 +4230,122 @@ describe("GitHub release workflow safeguards", () => {
     expect(result.stderr).toContain("GitHub release JSON from stdin");
   });
 });
+
+test.skipIf(process.platform === "win32")(
+  "preserves manual release categories while replacing stale automated labels",
+  async () => {
+    const script = workflowStepShell(
+      releaseLabelsWorkflow,
+      "Categorize pull request without checking out its code",
+    );
+    const fixture = `gh() {
+    case "$*" in
+      "api repos/test/codex-security/issues/17 --jq "*) printf '%s' 'feat: synthetic feature' | base64 ;;
+      "api repos/test/codex-security/issues/17/labels --jq "*) printf '%s\\n' breaking-change bug ;;
+      "api repos/test/codex-security/issues/17/timeline?per_page=100 "*) printf '%b\\n' 'breaking-change\\tsynthetic-reviewer' 'bug\\tgithub-actions[bot]' ;;
+      "api --method DELETE repos/test/codex-security/issues/17/labels/bug --silent") echo removed-stale-bug ;;
+      "api --method DELETE "*) echo removed-manual-label; return 70 ;;
+      "api --method POST repos/test/codex-security/issues/17/labels "*) printf '%s\\n' "$*" ;;
+      "api repos/test/codex-security/labels/enhancement --silent") return 0 ;;
+      *) echo "Unexpected request: $*" >&2; return 65 ;;
+    esac
+  }`;
+    const result = await runCommand(bash, ["-c", `${fixture}\n${script}`], {
+      env: {
+        ...process.env,
+        GITHUB_REPOSITORY: "test/codex-security",
+        PR_NUMBER: "17",
+      },
+      timeout: 10_000,
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(
+      "Preserving existing breaking-change label.",
+    );
+    expect(result.stdout).toContain("removed-stale-bug");
+    expect(result.stdout).not.toContain("labels[]=enhancement");
+    expect(result.stdout).not.toContain("removed-manual-label");
+  },
+);
+
+test("imports maintainer utilities from Node stdin and eval modules", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "maintainer-stdin-"));
+  const packageRoot = resolve(import.meta.dir, "..");
+  try {
+    const build = await runCommand(
+      "node",
+      [
+        join(packageRoot, "node_modules", "typescript", "bin", "tsc"),
+        "--project",
+        join(packageRoot, "tsconfig.ci.json"),
+        "--outDir",
+        workspace,
+      ],
+      { timeout: 30_000 },
+    );
+    expect(build.status, build.stdout + build.stderr).toBe(0);
+    const checker = pathToFileURL(
+      join(workspace, "plugins/codex-security/native/check.mjs"),
+    ).href;
+    const source = `import { releaseVersion } from "./scripts/release-automation.mjs"; import { buildBundledPlugin } from "./scripts/build-plugin.mjs"; import { buildMcpApp } from "../../plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs"; import { checkPrivatePaths } from ${JSON.stringify(checker)}; console.log(typeof releaseVersion, typeof buildBundledPlugin, typeof buildMcpApp, typeof checkPrivatePaths);`;
+    for (const args of [
+      ["--input-type=module", "-"],
+      ["--input-type=module", "--eval", source, "synthetic-virtual-entrypoint"],
+    ]) {
+      const result = spawnSync("node", args, {
+        cwd: packageRoot,
+        input: source,
+        encoding: "utf8",
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout.trim()).toBe("function function function function");
+    }
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test.skipIf(process.platform === "win32").each([
+  {
+    title: "fix: synthetic correction",
+    manual: "documentation",
+    stale: "enhancement",
+  },
+  { title: "feat: synthetic feature", manual: "bug", stale: "documentation" },
+  { title: "feat: synthetic feature", manual: "bug", stale: "enhancement" },
+])(
+  "uses the manual $manual release category over stale $stale after retitling to $title",
+  async ({ title, manual, stale }) => {
+    const script = workflowStepShell(
+      releaseLabelsWorkflow,
+      "Categorize pull request without checking out its code",
+    );
+    const fixture = `gh() {
+    case "$*" in
+      "api repos/test/codex-security/issues/17 --jq "*) printf '%s' "$MOCK_PR_TITLE" | base64 ;;
+      "api repos/test/codex-security/issues/17/labels --jq "*) printf '%s\\n' "$MANUAL_LABEL" "$STALE_LABEL" ;;
+      "api repos/test/codex-security/issues/17/timeline?per_page=100 "*) printf '%s\\t%s\\n' "$MANUAL_LABEL" synthetic-reviewer "$STALE_LABEL" 'github-actions[bot]' ;;
+      "api --method DELETE repos/test/codex-security/issues/17/labels/$STALE_LABEL --silent") echo removed-stale-label ;;
+      "api --method DELETE "*) echo removed-manual-label; return 70 ;;
+      "api --method POST "*) echo added-automatic-category ;;
+      *) return 65 ;;
+    esac
+  }`;
+    const result = await runCommand(bash, ["-c", `${fixture}\n${script}`], {
+      env: {
+        ...process.env,
+        GITHUB_REPOSITORY: "test/codex-security",
+        PR_NUMBER: "17",
+        MOCK_PR_TITLE: title,
+        MANUAL_LABEL: manual,
+        STALE_LABEL: stale,
+      },
+      timeout: 10_000,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain(`Preserving existing ${manual} label.`);
+    expect(result.stdout).toContain("removed-stale-label");
+    expect(result.stdout).not.toContain("removed-manual-label");
+    expect(result.stdout).not.toContain("added-automatic-category");
+  },
+);

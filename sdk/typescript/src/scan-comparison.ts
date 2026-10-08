@@ -1,6 +1,5 @@
 import { existsSync } from "node:fs";
 import { isRecord } from "./record.js";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   Codex,
@@ -11,6 +10,7 @@ import {
   type TurnOptions,
 } from "@openai/codex-sdk";
 import { z } from "incur";
+import { parse, stringify } from "smol-toml";
 import type { CodexSecuritySurface, ScanAuthMode } from "./api.js";
 import {
   accountStatus,
@@ -51,7 +51,6 @@ import {
 import {
   codexSecurityCredentialHome,
   executablePathForSpawn,
-  expandHome,
   prepareCodexSecurityCredentialHome,
   resolveCodexCommand,
   runCodexCommand,
@@ -565,7 +564,7 @@ async function startReadOnlyCodexThread(
   const homeExecutionConfig = resolveCodexProfile(homeConfig);
   normalizeLegacyWindowsSandboxOverride(homeExecutionConfig);
   const providerConfig = resolveCommandAuthConfig(
-    deepMerge(homeConfig, config ?? {}),
+    deepMerge(homeConfig, parse(stringify(config ?? {})) as JsonObject),
     configuredCodexHome(source),
   );
   const suppliedConfig = resolveCodexProfile(
@@ -1005,9 +1004,7 @@ function comparisonPrompt(
 }
 
 function characterCount(value: string): number {
-  let count = 0;
-  for (const _character of value) count += 1;
-  return count;
+  return value[Symbol.iterator]().reduce((count) => count + 1, 0);
 }
 
 function cataloguePages(input: CataloguePage): CataloguePage[] {
@@ -1224,11 +1221,7 @@ export async function comparisonEnvironment(
     );
     if (status.authenticated) return storedEnvironment;
   }
-  const configuredHome = environmentEntry(environment, "CODEX_HOME")?.trim();
-  const codexHome = configuredHome
-    ? expandHome(configuredHome, environment)
-    : join(homedir(), ".codex");
-  if (existsSync(join(codexHome, "auth.json"))) {
+  if (existsSync(join(home, "auth.json"))) {
     return withoutOpenAiApiKeys(environment);
   }
   return environment;
