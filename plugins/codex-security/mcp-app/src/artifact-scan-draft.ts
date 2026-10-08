@@ -465,7 +465,10 @@ async function preserveScanDraft(
     context.layout === "worker"
       ? await readArchivedWorkerCheckpoints(context)
       : [];
-  const receiptReopened = new Map<string, JsonObject>();
+  const receiptReopened = new Map<
+    string,
+    { pending: JsonObject; source: SavedScanDraft }
+  >();
   for (const source of archived) {
     const recovered = await recoverWorkerCandidateReceipts(
       source.input.coverage,
@@ -483,7 +486,7 @@ async function preserveScanDraft(
         !currentOutcomes.has(key) &&
         !receiptReopened.has(key)
       )
-        receiptReopened.set(key, pending);
+        receiptReopened.set(key, { pending, source });
     }
   }
   if (previous) {
@@ -502,6 +505,7 @@ async function preserveScanDraft(
   for (const [index, source] of savedSources.entries())
     source.input = refreshed[index]!;
   const sources = savedSources.map(({ input }) => input);
+  const sourceOrder = new Map(sources.map((source, index) => [source, index]));
   // Older checkpoints can omit IDs already assigned in their published output.
   const savedDeferred = sources.flatMap(
     (source) => source.coverage.deferred as JsonObject[],
@@ -774,7 +778,7 @@ async function preserveScanDraft(
     );
   });
 
-  for (const source of sources) {
+  for (const [sourceIndex, source] of sources.entries()) {
     const deferred = result.coverage.deferred as JsonObject[];
     const dispositions = [
       ...(result.coverage.surfaces as JsonObject[]),
@@ -850,12 +854,23 @@ async function preserveScanDraft(
       }
     }
     for (const finding of source.findings) {
+      const matches = result.findings.filter((current) =>
+        sameSavedFinding(current, finding, owner),
+      );
       const candidateId = findingKey(finding);
+      const recovered =
+        candidateId === undefined
+          ? undefined
+          : receiptReopened.get(candidateId);
       const disposition =
         candidateId === undefined
           ? undefined
           : (dispositions.find((item) => coverageKey(item) === candidateId) ??
-            receiptReopened.get(candidateId));
+            (recovered &&
+            matches.length === 0 &&
+            sourceIndex >= sourceOrder.get(recovered.source.input)!
+              ? recovered.pending
+              : undefined));
       if (disposition) {
         if (isObject(disposition.finding)) {
           if (isObject(disposition.finding.provenance))
@@ -870,9 +885,6 @@ async function preserveScanDraft(
         } else disposition.finding = structuredClone(finding);
         continue;
       }
-      const matches = result.findings.filter((current) =>
-        sameSavedFinding(current, finding, owner),
-      );
       if (
         matches.length === 1 &&
         source.findings.filter((current) =>

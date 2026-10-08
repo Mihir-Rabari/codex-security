@@ -214,6 +214,12 @@ for (const scenario of [
   "archive-valid",
   "archive-missing-no-finding",
   "archive-confirmed",
+  "archive-confirmed-repeat",
+  "archive-confirmed-no-prior-repeat",
+  "archive-confirmed-rearchived-repeat",
+  "archive-missing-repeat",
+  "archive-confirmed-reopened-repeat",
+  "archive-rejected-repeat",
 ]) {
   test(`public worker state reaches reducer and SDK: ${scenario}`, async () => {
     const f = await fixture();
@@ -255,7 +261,10 @@ for (const scenario of [
         ),
       );
     } else {
-      if (scenario !== "archive-missing-no-finding")
+      if (
+        scenario !== "archive-missing-no-finding" &&
+        !scenario.includes("no-prior")
+      )
         await write(f.draft({}, [finding()], false));
       await mkdir(join(workerRoot, "artifacts/proof"), { recursive: true });
       await writeFile(
@@ -287,7 +296,7 @@ for (const scenario of [
       await write(
         f.draft(
           { completeness: "complete" },
-          scenario === "archive-confirmed"
+          scenario.startsWith("archive-confirmed")
             ? [
                 {
                   ...finding(),
@@ -297,6 +306,48 @@ for (const scenario of [
             : [],
         ),
       );
+    }
+    if (scenario === "archive-confirmed-reopened-repeat")
+      await write(
+        f.draft({
+          deferred: [
+            {
+              id: "new-gap",
+              candidateId: "candidate-one",
+              reason: "A newer explicit proof gap.",
+            },
+          ],
+        }),
+      );
+    if (scenario === "archive-rejected-repeat") {
+      await mkdir(join(workerRoot, "artifacts/proof"), { recursive: true });
+      await writeFile(
+        join(workerRoot, "artifacts/proof/replacement.txt"),
+        "New reviewed decision.\n",
+      );
+      await write(
+        f.draft({
+          completeness: "complete",
+          surfaces: [
+            {
+              id: "new-decision",
+              candidateId: "candidate-one",
+              label: "New reviewed decision",
+              disposition: "rejected",
+              receiptRefs: ["artifacts/proof/replacement.txt"],
+            },
+          ],
+        }),
+      );
+    }
+    if (scenario === "archive-confirmed-rearchived-repeat") {
+      const archive = join(workerRoot, "../attempts/attempt-02");
+      await f.api.artifacts.archiveDirectory(workerRoot, archive);
+      await f.remember(archive);
+    }
+    if (scenario.endsWith("repeat")) {
+      await write(f.draft({ completeness: "complete" }));
+      await write(f.draft({ completeness: "complete" }));
     }
     await f.remember(workerRoot);
     const validated = await f.api.validation.validateDiscoveryArtifacts(
@@ -327,9 +378,12 @@ for (const scenario of [
     const expectedPending =
       scenario === "confirmation-pending" ||
       scenario === "archive-missing" ||
+      scenario === "archive-missing-repeat" ||
+      scenario === "archive-confirmed-reopened-repeat" ||
       scenario === "archive-missing-no-finding";
     const expectedFindings =
-      scenario.startsWith("confirmation") || scenario === "archive-confirmed"
+      scenario.startsWith("confirmation") ||
+      scenario.startsWith("archive-confirmed")
         ? 1
         : 0;
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -355,6 +409,10 @@ for (const scenario of [
     const sdk = await f.complete();
     expect(sdk.findings.findings.length).toBe(expectedFindings);
     expect(sdk.unresolvedCandidates.length).toBe(Number(expectedPending));
+    if (scenario.startsWith("archive-confirmed"))
+      expect(sdk.findings.findings[0]!.summary).toBe(
+        "Newly confirmed after resumed review.",
+      );
     if (scenario === "archive-missing")
       expect(JSON.stringify(sdk.unresolvedCandidates)).toContain(
         "Original synthetic evidence",
@@ -496,6 +554,254 @@ for (const decision of ["pending", "suppressed", "not_applicable"]) {
           (row) => row.disposition === "needs_follow_up",
         ),
       ).toBe(resolution === "none");
+      await f.unchanged();
+    });
+  }
+}
+
+for (const candidateId of ["", "   ", "candidate-one"]) {
+  for (const missing of [false, true]) {
+    test(`archived worker surface metadata remains readable: ${JSON.stringify(candidateId)}, missing=${missing}`, async () => {
+      const f = await fixture();
+      const workerRoot = join(
+        f.parent.root,
+        "artifacts/deep_discovery/workers/worker-one/output",
+      );
+      await mkdir(workerRoot, { recursive: true });
+      const context = {
+        root: workerRoot,
+        repoRoot: f.repoRoot,
+        scanId: f.scanId,
+        layout: "worker",
+        scope: ".",
+      };
+      const write = (input: Row) =>
+        f.api.draft.recordCodexSecurityWorkerScanDraft(context, input);
+      await mkdir(join(workerRoot, "artifacts/proof"), { recursive: true });
+      await writeFile(
+        join(workerRoot, "artifacts/proof/decision.txt"),
+        "Synthetic decision evidence.\n",
+      );
+      await write(
+        f.draft(
+          {
+            surfaces: [
+              {
+                id: "decision",
+                candidateId,
+                label: "Reviewed surface",
+                disposition: "rejected",
+                receiptRefs: ["artifacts/proof/decision.txt"],
+              },
+            ],
+          },
+          [],
+          false,
+        ),
+      );
+      const archive = join(workerRoot, "../attempts/attempt-01");
+      await f.api.artifacts.archiveDirectory(workerRoot, archive);
+      if (missing) await unlink(join(archive, "artifacts/proof/decision.txt"));
+      await f.remember(archive);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await write(f.draft({ completeness: "complete" }));
+        const output = await f.json(join(workerRoot, "result.json"));
+        expect(
+          output.coverage.surfaces.some(
+            (surface: Row) => surface["candidateId"] === candidateId,
+          ),
+        ).toBe(true);
+        expect(
+          output.coverage.surfaces.some(
+            (surface: Row) => surface["disposition"] === "needs_follow_up",
+          ),
+        ).toBe(missing);
+        await f.api.validation.validateDiscoveryArtifacts(
+          { workersRoot: workerRoot },
+          join(workerRoot, "result.json"),
+          f.scanId,
+        );
+        const reducerRoot = join(
+          f.parent.root,
+          "artifacts/deep_discovery/dedup/reducer/output",
+        );
+        await mkdir(reducerRoot, { recursive: true });
+        const inputs = await f.api.reducer.getCodexSecurityDeepReducerInputs({
+          root: reducerRoot,
+          repoRoot: f.repoRoot,
+          scanId: f.scanId,
+          layout: "reducer",
+          deepReducer: {
+            scanRoot: f.parent.root,
+            claimedWorkers: [
+              { id: "worker-one", resultPath: join(workerRoot, "result.json") },
+            ],
+          },
+        });
+        expect(inputs.discoveries).toHaveLength(1);
+      }
+      await f.unchanged();
+    });
+  }
+}
+
+for (const decision of ["suppressed", "not_applicable"]) {
+  for (const [termination, resolution] of [
+    ["fail-scan", "none"],
+    ["cancel-scan", "none"],
+    ["complete-scan", "none"],
+    ["fail-scan", "receipt"],
+    ["fail-scan", "validation"],
+  ]) {
+    test(`explicit Diff reopening survives ${termination}: ${decision}, resolution=${resolution}`, async () => {
+      const f = await fixture(true);
+      const discovery = join(f.parent.root, "artifacts/02_discovery");
+      await mkdir(discovery, { recursive: true });
+      await writeFile(join(discovery, "in_scope_files.txt"), "app.py\n");
+      await f.api.discovery.recordCodexSecurityDiscoveryCandidates(
+        {
+          candidates: [
+            {
+              cwe_ids: [],
+              locations: [
+                {
+                  path: "app.py",
+                  start_line: 1,
+                  end_line: 1,
+                  role: "evidence",
+                },
+              ],
+              summary: "Synthetic review candidate",
+              evidence: "Synthetic evidence",
+            },
+          ],
+        },
+        f.parent,
+      );
+      const candidateId = (
+        await f.api.discovery.listCodexSecurityCandidates({}, f.parent)
+      ).rows[0].candidate_id;
+      await f.publish(
+        f.draft(
+          {
+            deferred: [
+              {
+                id: "original-gap",
+                candidateId,
+                reason: "Original review gap.",
+              },
+            ],
+          },
+          [],
+          false,
+        ),
+      );
+      const validation = {
+        disposition: decision,
+        method: "Static inspection",
+        confidence: "high",
+        confidence_rationale: "Synthetic evidence",
+        rubric: "Synthetic criterion",
+        evidence: "Candidate dismissed.",
+        counterevidence_or_proof_gap: "Independent terminal validation.",
+        remaining_uncertainty: "",
+      };
+      await f.api.validate.recordCodexSecurityCandidateValidations(f.parent, {
+        validations: [{ candidateId, validation }],
+      });
+      const ref = "artifacts/proof/decision.txt";
+      await mkdir(join(f.parent.root, "artifacts/proof"), { recursive: true });
+      await writeFile(
+        join(f.parent.root, ref),
+        "Synthetic terminal evidence.\n",
+      );
+      const surface = {
+        id: "decision",
+        candidateId,
+        label: "Reviewed candidate",
+        disposition: decision === "suppressed" ? "rejected" : "not_applicable",
+        receiptRefs: [ref],
+      };
+      await f.publish(
+        f.draft({ completeness: "complete", surfaces: [surface] }),
+      );
+      const candidate = JSON.parse(
+        (await readFile(join(discovery, "candidate_ledger.jsonl"), "utf8"))
+          .trim()
+          .split("\n")[0]!,
+      );
+      await f.publish(
+        f.draft({
+          deferred: [
+            {
+              id: "explicit-proof-gap",
+              candidateId,
+              candidate,
+              reason: "Additional evidence is needed after earlier rejection.",
+            },
+          ],
+        }),
+      );
+      expect(
+        (await f.json(join(f.parent.root, "coverage.json"))).deferred.some(
+          (row: Row) => row["candidateId"] === candidateId,
+        ),
+      ).toBe(true);
+      if (resolution === "receipt")
+        await f.publish(
+          f.draft({
+            completeness: "complete",
+            surfaces: [
+              { ...surface, notes: "New independent authored decision." },
+            ],
+          }),
+        );
+      if (resolution === "validation") {
+        await f.api.validate.recordCodexSecurityCandidateValidations(f.parent, {
+          validations: [
+            {
+              candidateId,
+              validation: {
+                ...validation,
+                evidence: "New independent terminal evidence.",
+              },
+            },
+          ],
+        });
+      }
+      await f.remember(join(f.parent.root, "checkpoints"));
+      if (termination === "complete-scan") {
+        await f.workbench(["prepare-scan-completion", "--scan-id", f.scanId]);
+        await f.complete();
+      } else {
+        await f.workbench([
+          termination!,
+          "--scan-id",
+          f.scanId,
+          ...(termination === "fail-scan"
+            ? ["--message", "Synthetic interruption."]
+            : []),
+        ]);
+        await f.workbench(["preserve-scan-results", "--scan-id", f.scanId]);
+        await f.workbench(["preserve-scan-results", "--scan-id", f.scanId]);
+      }
+      const contract = await loadContract(f.parent.root, {
+        pluginRoot: PLUGIN_ROOT,
+        expectedScanId: f.scanId,
+      });
+      const sdk = new ScanResult({
+        ...contract,
+        scanDir: f.parent.root,
+        threadId: "synthetic-worker-lifecycle",
+        turnResult: {},
+      });
+      expect(sdk.unresolvedCandidates.length).toBe(
+        Number(resolution === "none"),
+      );
+      if (resolution === "none")
+        expect(JSON.stringify(sdk.unresolvedCandidates)).toContain(
+          "Additional evidence is needed after earlier rejection.",
+        );
       await f.unchanged();
     });
   }

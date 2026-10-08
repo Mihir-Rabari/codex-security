@@ -967,7 +967,15 @@ def _stopped_diff_candidate_decisions(
                     **{k: v for k, v in previous.items() if k not in {"attack_path", "validation"}},
                     **candidate,
                 }
-                if decision is not None and (None, candidate_id) not in receipt_reopened:
+                unchanged_pending = (
+                    candidate_id in current_pending_ids
+                    and _diff_candidate_phase_snapshot(previous) == phase_snapshot
+                )
+                if (
+                    decision is not None
+                    and (None, candidate_id) not in receipt_reopened
+                    and not unchanged_pending
+                ):
                     decisions[candidate_id] = {
                         **generated.get(candidate_id, {}),
                         **decision,

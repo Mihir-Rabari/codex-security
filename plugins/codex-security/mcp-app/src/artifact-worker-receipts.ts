@@ -28,6 +28,10 @@ export async function recoverWorkerCandidateReceipts(
       )
     )
       continue;
+    const candidateId =
+      typeof surface.candidateId === "string" && surface.candidateId.trim()
+        ? surface.candidateId
+        : undefined;
     const retainedRefs: string[] = [];
     for (const ref of (surface.receiptRefs as string[] | undefined) ?? []) {
       let contents: Buffer;
@@ -40,15 +44,16 @@ export async function recoverWorkerCandidateReceipts(
           "Worker candidate receipt",
         );
       } catch (error) {
-        reopened.add(surface.candidateId as string);
+        if (candidateId !== undefined) reopened.add(candidateId);
         surface.disposition = "needs_follow_up";
         coverage.completeness = "partial";
-        let pending = deferred.find(
-          (item) => item.candidateId === surface.candidateId,
-        );
+        let pending =
+          candidateId === undefined
+            ? undefined
+            : deferred.find((item) => item.candidateId === candidateId);
         if (pending === undefined) {
           pending = {
-            candidateId: surface.candidateId,
+            ...(candidateId === undefined ? {} : { candidateId }),
             reason: error instanceof Error ? error.message : String(error),
             ...(typeof surface.id === "string"
               ? { surfaceIds: [surface.id] }
@@ -56,6 +61,8 @@ export async function recoverWorkerCandidateReceipts(
           };
           deferred.push(pending);
         }
+        // Generic surface metadata does not introduce a candidate identity.
+        if (candidateId === undefined) continue;
         for (const [field, archive] of [
           ["candidate", "originalCandidates"],
           ["finding", "previousFindings"],
