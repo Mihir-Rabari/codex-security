@@ -23,7 +23,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import {
   basename,
@@ -149,6 +149,7 @@ import {
 import {
   prepareKnowledgeBase,
   type PreparedKnowledgeBase,
+  type KnowledgeBaseSnapshot,
 } from "./knowledge-base.js";
 import { FindingWorkflow, workflowDigest } from "./finding-workflow.js";
 import {
@@ -197,6 +198,7 @@ import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import {
   canonicalConfigPath,
   acquireCodexSecurityCredentialHomeLock,
+  withCredentialHomeLock,
   bootstrapPlugin,
   bundledPluginRoot,
   cleanupSdkDirectory,
@@ -308,6 +310,8 @@ const DEEP_SCAN_CONFIG_PATH_ENVIRONMENT =
   "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH";
 
 export interface ScanOptions extends ScanSettings {
+  /** @internal Reuse the knowledge inputs bound to a bulk campaign manifest. */
+  knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   /** @internal Resume a CLI Deep Scan with its saved launch recipe. */
   resumeScanId?: string;
   /** Save synthetic Standard scan results without calling Codex or a model. */
@@ -1158,7 +1162,7 @@ export class CodexSecurity {
     );
     if (options.knowledgeBasePaths?.length) {
       const knowledgeBase = await prepareKnowledgeBase(
-        options.knowledgeBasePaths,
+        options.knowledgeBaseSnapshot ?? options.knowledgeBasePaths,
         options.signal,
       );
       await knowledgeBase.cleanup();
@@ -1651,7 +1655,7 @@ export class CodexSecurity {
       }
       if (options.knowledgeBasePaths?.length) {
         knowledgeBase = await prepareKnowledgeBase(
-          options.knowledgeBasePaths,
+          options.knowledgeBaseSnapshot ?? options.knowledgeBasePaths,
           signal,
         );
       }
@@ -1683,12 +1687,11 @@ export class CodexSecurity {
           modelProvider,
         ),
       };
-      for (const source of [repo, ...(knowledgeBase?.sources ?? [])]) {
-        git = await inspectTrustedExecutable(
-          "git",
-          git.environment,
-          (await gitMarkerRoot(source, signal, "outermost")) ?? source,
-        );
+      for (const root of [
+        (await gitMarkerRoot(repo, signal, "outermost")) ?? repo,
+        ...(knowledgeBase?.protectedRoots ?? []),
+      ]) {
+        git = await inspectTrustedExecutable("git", git.environment, root);
       }
       checkOpen();
       const scanOutputRoot =
@@ -2918,13 +2921,16 @@ export class CodexSecurity {
       }
       const authentication = await this.#authentication();
       this.#requireOpen();
-      const ambientHome =
-        environmentValue(this.#dependencies.environment, "CODEX_HOME") ??
-        join(homedir(), ".codex");
-      await initialCredentialsAvailable(
-        this.#dependencies.environment,
-        ambientHome,
+      const ambientHome = scanCodexHome(this.#dependencies.environment);
+      await withCredentialHomeLock(
         authentication.codexHome,
+        () =>
+          initialCredentialsAvailable(
+            this.#dependencies.environment,
+            ambientHome,
+            authentication.codexHome,
+          ),
+        this.#abortController.signal,
       );
       return await accountStatus(
         await this.#providerPreflightCommand(),
@@ -2938,12 +2944,21 @@ export class CodexSecurity {
     await this.#trackOperation(async () => {
       const authentication = await this.#authentication();
       this.#requireOpen();
-      await codexLogout(
-        await this.#providerPreflightCommand(),
-        authentication.environment,
+      await withCredentialHomeLock(
+        authentication.codexHome,
+        async () => {
+          await codexLogout(
+            await this.#providerPreflightCommand(),
+            authentication.environment,
+            this.#abortController.signal,
+          );
+          await setCodexSecurityCredentialLogout(
+            authentication.codexHome,
+            true,
+          );
+        },
         this.#abortController.signal,
       );
-      await setCodexSecurityCredentialLogout(authentication.codexHome, true);
       if (this.#runtime !== null) this.#runtime.credentialsAvailable = false;
       this.#runtimeCredentialSource = null;
       this.#requireOpen();
@@ -3340,9 +3355,7 @@ export class CodexSecurity {
         authentication.method === "stored_credentials" &&
         this.#runtimeCredentialSource === "api_key"
       ) {
-        const ambientHome =
-          environmentValue(this.#dependencies.environment, "CODEX_HOME") ??
-          join(homedir(), ".codex");
+        const ambientHome = scanCodexHome(this.#dependencies.environment);
         runtime.credentialsAvailable = await initialCredentialsAvailable(
           scanEnvironment,
           ambientHome,
@@ -3584,7 +3597,7 @@ export class CodexSecurity {
       });
       if (options.knowledgeBasePaths?.length) {
         const knowledgeBase = await prepareKnowledgeBase(
-          options.knowledgeBasePaths,
+          options.knowledgeBaseSnapshot ?? options.knowledgeBasePaths,
           signal,
         );
         await knowledgeBase.cleanup();
@@ -3882,13 +3895,7 @@ export class CodexSecurity {
             deepScanConfiguration: await resolveDeepScanConfig(
               deep,
               join(
-                expandHome(
-                  environmentValue(
-                    this.#dependencies.environment,
-                    "CODEX_HOME",
-                  ) ?? join(homedir(), ".codex"),
-                  this.#dependencies.environment,
-                ),
+                scanCodexHome(this.#dependencies.environment),
                 "codex-security",
                 "config.toml",
               ),
@@ -3937,12 +3944,7 @@ export class CodexSecurity {
         bootstrapWorkspace,
         signal,
       );
-      const nodeAmbientHome = join(homedir(), ".codex");
-      const configuredAmbientHome = environmentValue(
-        processEnvironment,
-        "CODEX_HOME",
-      );
-      const ambientHome = configuredAmbientHome ?? nodeAmbientHome;
+      const ambientHome = scanCodexHome(processEnvironment);
       const codexConfig = await preserveCodexSecurityPluginRegistration(
         codexHome,
         sharedCredentialCodexConfig(requestedConfig, codexHome),
@@ -4049,6 +4051,14 @@ export function createSecurity(
   config: CodexSecurityConfig = {},
 ): CodexSecurity {
   return new CodexSecurity(config);
+}
+
+// Scan settings accept case-insensitive environment keys on every platform.
+export function scanCodexHome(environment: ProcessEnvironment): string {
+  return configuredCodexHome({
+    ...environment,
+    CODEX_HOME: environmentValue(environment, "CODEX_HOME"),
+  });
 }
 
 export async function initialCredentialsAvailable(
