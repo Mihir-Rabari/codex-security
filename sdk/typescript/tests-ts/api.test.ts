@@ -3718,6 +3718,10 @@ describe("CodexSecurity orchestration", () => {
     async (code) => {
       if (process.platform === "win32")
         writeSync(2, `[api-log-retry] ${code}\n`);
+      const trace = (phase: string) => {
+        if (process.platform === "win32")
+          writeSync(2, `[api-log-retry] ${code} ${phase}\n`);
+      };
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const sessions = join(codexHome, "sessions");
       await mkdir(sessions);
@@ -3728,6 +3732,7 @@ describe("CodexSecurity orchestration", () => {
       await Promise.all(logs.map((path) => writeFile(path, "")));
       const denied = new Set([logs[0]!]);
       const attempts = new Map<string, number>();
+      const observedOpens = new Map<number, number>();
       let firstRepeated!: () => void;
       let secondRepeated!: () => void;
       const first = new Promise<void>((resolve) => {
@@ -3740,6 +3745,18 @@ describe("CodexSecurity orchestration", () => {
       const opening = spyOn(fsPromises, "open").mockImplementation(
         async (...args: Parameters<typeof fsPromises.open>) => {
           const path = String(args[0]);
+          const index = logs.findIndex(
+            (log) =>
+              basename(log).toLowerCase() === basename(path).toLowerCase(),
+          );
+          if (index !== -1) {
+            const count = (observedOpens.get(index) ?? 0) + 1;
+            observedOpens.set(index, count);
+            if (count <= 3)
+              trace(
+                `open.${index} attempt=${count} exact=${path === logs[index]} denied=${denied.has(path)}`,
+              );
+          }
           if (denied.has(path)) {
             const count = (attempts.get(path) ?? 0) + 1;
             attempts.set(path, count);
@@ -3750,7 +3767,10 @@ describe("CodexSecurity orchestration", () => {
               { code, syscall: "open", path },
             );
           }
-          return await open(...args);
+          if (index !== -1) trace(`open.${index}.delegate.begin`);
+          const file = await open(...args);
+          if (index !== -1) trace(`open.${index}.delegate.end`);
+          return file;
         },
       );
       const warnings: string[] = [];
@@ -3760,13 +3780,17 @@ describe("CodexSecurity orchestration", () => {
           startThread: () => ({
             id: null,
             async runStreamed() {
+              trace("runStreamed.enter");
               await copyCompletedScan(root);
               async function* events(): AsyncGenerator<ThreadEvent> {
                 yield { type: "thread.started", thread_id: "thread-1" };
+                trace("first.wait");
                 await first;
+                trace("first.ready");
                 denied.delete(logs[0]!);
                 denied.add(logs[1]!);
                 await second;
+                trace("second.ready");
                 denied.delete(logs[1]!);
                 for await (const event of completedEvents()) {
                   if (event.type !== "thread.started") yield event;
@@ -3777,6 +3801,7 @@ describe("CodexSecurity orchestration", () => {
           }),
         }),
       });
+      trace("fixture.ready");
       const operation = client.run(repository, {
         onActivity: () => {},
         onWarning: (warning) => warnings.push(warning),
@@ -3796,12 +3821,16 @@ describe("CodexSecurity orchestration", () => {
           else expect(messages).toHaveLength(1);
         }
       } finally {
+        trace("cleanup.begin");
         denied.clear();
         firstRepeated();
         secondRepeated();
         await operation.catch(() => {});
+        trace("operation.drained");
         await client.close();
+        trace("close.end");
         opening.mockRestore();
+        trace("spy.restored");
       }
     },
   );
