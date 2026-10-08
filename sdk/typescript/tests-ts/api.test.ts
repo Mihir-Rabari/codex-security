@@ -1952,9 +1952,14 @@ describe("CodexSecurity orchestration", () => {
         },
       );
 
-      await expect(client.run(repository)).rejects.toThrow(
-        `Set ${apiKey} to run a scan through ${name}.`,
-      );
+      for (const auth of ["auto", "api-key"] as const) {
+        await expect(client.preflight(repository, { auth })).rejects.toThrow(
+          `Set ${apiKey} to run a scan through ${name}.`,
+        );
+        await expect(client.run(repository, { auth })).rejects.toThrow(
+          `Set ${apiKey} to run a scan through ${name}.`,
+        );
+      }
       expect(prepareRuntime).not.toHaveBeenCalled();
       await client.close();
     },

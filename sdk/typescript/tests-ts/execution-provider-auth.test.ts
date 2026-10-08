@@ -107,11 +107,6 @@ test.each([
         const runtimeProviders = observations[0]!.config?.[
           "model_providers"
         ] as JsonObject;
-        const environmentKey = (runtimeProviders[providerName] as JsonObject)[
-          "env_key"
-        ] as string;
-        expect(typeof environmentKey).toBe("string");
-        expect(observations[0]!.env?.[environmentKey]).toBe(key);
         expect(Object.values(observations[0]!.env!)).not.toContain(
           `synthetic-${id === "first" ? "second" : "first"}`,
         );
@@ -119,8 +114,18 @@ test.each([
           [providerName]: {
             name: "Synthetic provider",
             base_url: "https://example.invalid/v1",
-            env_key:
-              kind === "env_key" ? "SYNTHETIC_PROVIDER_KEY" : environmentKey,
+            ...(kind === "env_key"
+              ? { env_key: "SYNTHETIC_PROVIDER_KEY" }
+              : {}),
+          },
+        });
+        expect(preparedConfig["model_providers"]).toEqual({
+          [providerName]: {
+            name: "Synthetic provider",
+            base_url: "https://example.invalid/v1",
+            ...(kind === "env_key"
+              ? { env_key: "SYNTHETIC_PROVIDER_KEY" }
+              : { experimental_bearer_token: key }),
           },
         });
         expect(JSON.stringify(observations[0]!.config)).not.toContain(key);

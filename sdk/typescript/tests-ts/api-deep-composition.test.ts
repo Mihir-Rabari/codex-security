@@ -2250,14 +2250,15 @@ test.each(["relative", "absolute", "profile"] as const)(
   },
 );
 
-test.each(["standard", "deep"] as const)(
+test.each(["standard", "deep", "primary"] as const)(
   "Deep worker observations retain shared numbering across fresh and resumed %s launches",
   async (mode) => {
-    const h = await fixture(undefined, false, true);
+    const h = await fixture(undefined, false, mode !== "primary");
     const observed: Array<{ kind: "observed"; worker: number }> = [];
     const sessions: Array<{ threadId: string; worker?: number }> = [];
     const options = {
       ...h.options,
+      subagents: mode === "primary" ? 0 : h.options.subagents,
       knowledgeBasePaths: undefined,
       onWorkerEvent: (event: { kind: "observed"; worker: number }) =>
         observed.push(event),
@@ -2269,6 +2270,10 @@ test.each(["standard", "deep"] as const)(
     await expect(first.run(h.repository, options)).rejects.toBeInstanceOf(
       ScanTransportClosedError,
     );
+    const firstEvents = {
+      observed: observed.splice(0),
+      sessions: sessions.splice(0),
+    };
     const [parentId] = [...h.records].find(([, row]) => row.mode === "deep")!;
     await using resumed = h.makeClient();
     await resumed.run(h.repository, {
@@ -2277,18 +2282,36 @@ test.each(["standard", "deep"] as const)(
       resumeScanId: parentId,
     });
     const selectedIds = new Set(
-      h.observedSubagents
-        .filter((row) => row.mode === mode)
-        .map((row) => row.id),
+      mode === "primary"
+        ? [...h.threadScans]
+            .filter(([, scanId]) => h.records.get(scanId)!.mode === "standard")
+            .map(([threadId]) => threadId)
+        : h.observedSubagents
+            .filter((row) => row.mode === mode)
+            .map((row) => row.id),
     );
-    const expected = new Set(
-      sessions
-        .filter((row) => selectedIds.has(row.threadId))
-        .map((row) => row.worker),
-    );
-    expect(expected.size).toBe(selectedIds.size);
-    expect(expected.size).toBeGreaterThan(0);
-    const delivered = new Set(observed.map((row) => row.worker));
-    for (const number of expected) expect(delivered.has(number!)).toBe(true);
+    const covered = new Set<string>();
+    for (const events of [firstEvents, { observed, sessions }]) {
+      const selected = events.sessions.filter((row) =>
+        selectedIds.has(row.threadId),
+      );
+      const threadIds = new Set(selected.map((row) => row.threadId));
+      for (const threadId of threadIds) {
+        covered.add(threadId);
+        const numbers = new Set(
+          selected
+            .filter((row) => row.threadId === threadId)
+            .map((row) => row.worker),
+        );
+        expect(numbers.size).toBe(1);
+        expect(numbers.has(undefined)).toBe(false);
+      }
+      const expected = new Set(selected.map((row) => row.worker));
+      expect(expected.size).toBe(threadIds.size);
+      const delivered = new Set(events.observed.map((row) => row.worker));
+      for (const number of expected) expect(delivered.has(number!)).toBe(true);
+    }
+    expect(covered).toEqual(selectedIds);
+    expect(covered.size).toBeGreaterThan(0);
   },
 );

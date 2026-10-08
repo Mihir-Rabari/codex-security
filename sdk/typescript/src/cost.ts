@@ -370,10 +370,10 @@ export class ScanCostTracker {
         threadId === this.#threadId
           ? this.#options.workerNumber?.(threadId)
           : this.workerNumber(threadId);
-      if (threadId !== this.#threadId && !this.#observedWorkers.has(threadId)) {
+      if (worker !== undefined && !this.#observedWorkers.has(threadId)) {
         this.#observedWorkers.add(threadId);
         if (this.#observingWorkers)
-          this.#options.onWorkerEvent?.({ kind: "observed", worker: worker! });
+          this.#options.onWorkerEvent?.({ kind: "observed", worker });
       }
       for (const event of session.events?.splice(0) ?? []) {
         // Live and archived copies share transcript positions. Keep repeated

@@ -822,6 +822,21 @@ export class CodexSecurity {
         ? await planOutputArchive(inputs.outputDir)
         : null;
     this.#requireOpen();
+    const authentication = scanAuthentication(
+      this.#dependencies.environment,
+      options.auth,
+      modelProvider,
+      hasCommandAuth(configuration),
+    );
+    if (
+      authentication.method === "stored_credentials" &&
+      isExternalModelProvider(modelProvider)
+    ) {
+      const provider = EXTERNAL_CODEX_PROVIDERS[modelProvider];
+      throw new AuthenticationRequiredError(
+        `Set ${provider.env_key} to run a scan through ${provider.name}.`,
+      );
+    }
     return {
       repository: inputs.repository,
       target: inputs.target,
@@ -835,12 +850,7 @@ export class CodexSecurity {
         : {}),
       outputDir: inputs.outputDir,
       ...(archiveDir === null ? {} : { archiveDir }),
-      authentication: scanAuthentication(
-        this.#dependencies.environment,
-        options.auth,
-        modelProvider,
-        hasCommandAuth(configuration),
-      ),
+      authentication,
       ...model,
       ...(typeof modelProvider === "string" ? { modelProvider } : {}),
       ...(options.maxCostUsd === undefined
