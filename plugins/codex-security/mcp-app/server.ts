@@ -2436,13 +2436,13 @@ async function executeWorkbenchWithStateSelection(
   args: string[],
   input?: string | Buffer,
 ): Promise<JsonObject> {
-  if (WORKBENCH_COMMANDS_WITHOUT_DATABASE.has(args[0] ?? "")) {
+  if (
+    WORKBENCH_COMMANDS_WITHOUT_DATABASE.has(args[0] ?? "") ||
+    CONFIGURED_WORKBENCH_STATE_DIR
+  ) {
     return await executeWorkbench(pythonCommand, args, undefined, input);
   }
-  if (CONFIGURED_WORKBENCH_STATE_DIR) {
-    return await executeWorkbench(pythonCommand, args, undefined, input);
-  }
-  if (fallbackWorkbenchStateDir) {
+  if (fallbackWorkbenchStateDir || persistentWorkbenchStateSucceeded) {
     return await executeWorkbench(
       pythonCommand,
       args,
@@ -2450,20 +2450,14 @@ async function executeWorkbenchWithStateSelection(
       input,
     );
   }
-  if (persistentWorkbenchStateSucceeded) {
-    return await executeWorkbench(pythonCommand, args, undefined, input);
-  }
   return await workbenchStateSelectionLock.run(async () => {
-    if (fallbackWorkbenchStateDir) {
+    if (fallbackWorkbenchStateDir || persistentWorkbenchStateSucceeded) {
       return await executeWorkbench(
         pythonCommand,
         args,
         await fallbackWorkbenchStateDir,
         input,
       );
-    }
-    if (persistentWorkbenchStateSucceeded) {
-      return await executeWorkbench(pythonCommand, args, undefined, input);
     }
     if (CONFIGURED_SCAN_ROOT) {
       const primary = await executeWorkbench(pythonCommand, [

@@ -14,6 +14,11 @@ from workbench_test_support import load_script, run_workbench, write_completed_c
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR = load_script("validate_scan_contract")
 SCHEMA = load_script("workbench_schema")
+RECEIPT_MIGRATION = next(
+    version
+    for version, name, _ in SCHEMA.MIGRATIONS
+    if name == "share finding issue receipts across trackers"
+)
 LINEAR = {"type": "linear", "teamId": "team-example"}
 JIRA = {"type": "jira", "cloudId": "site-example", "projectId": "10001"}
 
@@ -55,7 +60,10 @@ def legacy_database(path: Path, validated: dict, destination: dict) -> None:
     with closing(sqlite3.connect(path)) as connection:
         connection.row_factory = sqlite3.Row
         SCHEMA.apply_migrations(
-            connection, SCHEMA.MIGRATIONS[:-1], lambda: "2026-01-01T00:00:00Z", lambda _: None
+            connection,
+            tuple(migration for migration in SCHEMA.MIGRATIONS if migration[0] < RECEIPT_MIGRATION),
+            lambda: "2026-01-01T00:00:00Z",
+            lambda _: None,
         )
         receipt = receipt_for(validated)
         connection.execute(
@@ -144,7 +152,10 @@ def test_legacy_receipts_are_read_without_migration_and_preserved_on_upgrade(
     assert prepared["storeExists"] is True
     assert issues(state, scan_dir, "inspect", destination=destination) == inspected
     with closing(sqlite3.connect(path)) as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 47
+        assert (
+            connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+            == SCHEMA.MIGRATIONS[-1][0]
+        )
         assert (
             connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE name = 'finding_publications'"

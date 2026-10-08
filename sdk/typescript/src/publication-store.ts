@@ -86,9 +86,7 @@ async function findingIssues(
       scanDirectory: publication.scanDirectory,
       expectedScanId: publication.scanId,
       destination: publication.destination,
-      findingIds: (publication.sourceFindings ?? publication.issues).map(
-        ({ findingId }) => findingId,
-      ),
+      findingIds: publication.issues.map(({ findingId }) => findingId),
       requireHistory: true,
       ...(action === "record"
         ? {

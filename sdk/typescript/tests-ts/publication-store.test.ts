@@ -343,12 +343,15 @@ describe("read-only publication history", () => {
     expect(existsSync(missing.stateDirectory)).toBe(false);
 
     const fixture = await publicationFixture();
-    databaseRows(fixture, "DROP TABLE finding_issue_receipts");
-    databaseRows(
+    const version = databaseRows(
       fixture,
-      "DELETE FROM schema_migrations WHERE version >= ?",
-      [47],
-    );
+      "SELECT version FROM schema_migrations WHERE name = ?",
+      ["share finding issue receipts across trackers"],
+    )[0]!["version"];
+    databaseRows(fixture, "DROP TABLE finding_issue_receipts");
+    databaseRows(fixture, "DELETE FROM schema_migrations WHERE version >= ?", [
+      version,
+    ]);
     const database = join(fixture.stateDirectory, "workbench.sqlite3");
     const before = await readFile(database);
     const mode = (await stat(database)).mode;
@@ -366,7 +369,7 @@ describe("read-only publication history", () => {
       databaseRows(
         fixture,
         "SELECT version FROM schema_migrations WHERE version >= ?",
-        [47],
+        [version],
       ),
     ).toEqual([]);
     expect(
@@ -495,17 +498,10 @@ describe("read-only publication history", () => {
         {
           ...fixture.publication,
           issues: [fixture.publication.issues[0]!],
-          sourceFindings: fixture.publication.issues,
         },
         fixture.environment,
       ),
     ).resolves.toEqual([first]);
-    await expect(
-      inspectPublicationStore(
-        { ...fixture.publication, issues: [fixture.publication.issues[0]!] },
-        fixture.environment,
-      ),
-    ).rejects.toThrow(/finding|match/u);
   });
 
   test("includes committed associations that are still in the WAL", async () => {
@@ -541,6 +537,59 @@ describe("read-only publication history", () => {
 });
 
 describe("persisted finding publication associations", () => {
+  test("persists only the selected sealed findings while retaining complete scan history", async () => {
+    const fixture = await publicationFixture();
+    const first = publishedIssue(fixture.publication, 0);
+    const excluded = publishedIssue(fixture.publication, 1);
+    const selected = await prepareScanPublication(
+      fixture.publication.scanDirectory,
+      {
+        destination: "linear",
+        teamId: fixture.publication.destination.teamId,
+        projectId: fixture.publication.destination.projectId,
+        environment: fixture.environment,
+        findingIds: [first.findingId],
+      },
+    );
+
+    await expect(
+      inspectPublicationStore(selected, fixture.environment),
+    ).resolves.toEqual([]);
+    await preparePublicationStore(selected, fixture.environment);
+    await expect(
+      recordPublishedIssues(selected, [first, excluded], fixture.environment),
+    ).rejects.toThrow(/selected sealed findings/u);
+    expect(
+      databaseRows(
+        fixture,
+        "SELECT COUNT(*) AS count FROM finding_issue_receipts",
+      ),
+    ).toEqual([{ count: 0 }]);
+    await expect(
+      recordPublishedIssues(selected, [first], fixture.environment),
+    ).resolves.toEqual([first]);
+    await expect(
+      inspectPublicationStore(selected, fixture.environment),
+    ).resolves.toEqual([first]);
+
+    databaseRows(fixture, "DELETE FROM finding_occurrences WHERE id = ?", [
+      excluded.occurrenceId,
+    ]);
+    for (const action of [
+      () => inspectPublicationStore(selected, fixture.environment),
+      () => preparePublicationStore(selected, fixture.environment),
+      () => recordPublishedIssues(selected, [first], fixture.environment),
+    ]) {
+      await expect(action()).rejects.toThrow(/do not exactly match local/u);
+    }
+    expect(
+      databaseRows(
+        fixture,
+        "SELECT COUNT(*) AS count FROM finding_issue_receipts",
+      ),
+    ).toEqual([{ count: 1 }]);
+  });
+
   test("reads legacy Linear receipts without migration and preserves them when preparing shared history", async () => {
     const fixture = await publicationFixture({
       count: 1,
@@ -556,7 +605,8 @@ describe("persisted finding publication associations", () => {
         "from workbench_schema import MIGRATIONS, apply_migrations",
         "connection = sqlite3.connect(sys.argv[2])",
         "connection.row_factory = sqlite3.Row",
-        "apply_migrations(connection, tuple(item for item in MIGRATIONS if item[0] <= 42), lambda: '2026-08-01T00:00:00Z', lambda _: None)",
+        "receipt_version = next(version for version, name, _ in MIGRATIONS if name == 'share finding issue receipts across trackers')",
+        "apply_migrations(connection, tuple(item for item in MIGRATIONS if item[0] < receipt_version), lambda: '2026-08-01T00:00:00Z', lambda _: None)",
         "connection.close()",
       ].join("\n"),
       join(PLUGIN_ROOT, "scripts"),

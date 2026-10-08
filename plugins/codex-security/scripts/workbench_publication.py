@@ -189,10 +189,6 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
     ):
         raise SystemExit("Selected finding IDs must belong to the sealed scan.")
     selected = {finding_id: available[finding_id] for finding_id in finding_ids}
-    if require_history and selected != available:
-        raise SystemExit(
-            "The completed scan findings do not exactly match local Codex Security scan history."
-        )
     receipts = (
         validate_issue_receipts(payload.get("receipts"), selected)
         if payload["action"] == "record"
