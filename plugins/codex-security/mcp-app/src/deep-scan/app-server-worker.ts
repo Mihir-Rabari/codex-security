@@ -154,7 +154,9 @@ export async function runAppServerWorker(
           return;
         }
         const params = asRecord(message.params) ?? {};
-        if (message.method === "configWarning") {
+        if (message.method === "warning") {
+          options.onDiagnostic({ type: "error", message: params.message });
+        } else if (message.method === "configWarning") {
           options.onDiagnostic({ type: "error", message: params.summary });
         } else if (message.method === "error") {
           const error = asRecord(params.error);

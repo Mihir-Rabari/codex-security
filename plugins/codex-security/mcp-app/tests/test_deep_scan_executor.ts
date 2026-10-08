@@ -34,6 +34,7 @@ const executorSource = new URL("../src/deep-scan/executor.ts", import.meta.url);
 
 const {
   CodexSdkWorkerExecutor,
+  runAppServerWorker,
   resolveCodexPath,
   snapshotWorkerEnvironment,
   appendSafeItemDiagnostic,
@@ -47,7 +48,7 @@ const {
   stdin: {
     // Test the environment snapshot without adding a production export.
     contents: `${await readFile(executorSource, "utf8")}
-export { snapshotWorkerEnvironment, appendSafeItemDiagnostic };
+export { snapshotWorkerEnvironment, appendSafeItemDiagnostic, runAppServerWorker };
 export * from "./errors.js";`,
     loader: "ts",
     resolveDir: path.dirname(fileURLToPath(executorSource)),
@@ -99,6 +100,7 @@ try {
   if (process.platform !== "win32") {
     await testMissingParentSandboxFailsBeforeWorkerLaunch();
     await testDisallowedWorkerProfileFailsBeforeWorkerLaunch();
+    await testNativeWarningReachesDiagnosticCallback();
     await testRuntimePermissionProfileFallbackStopsAndDiscards();
     await testWorkerLaunchesWithoutGlobalCodex();
     await testPreflightBindsExecutableAndHomeBeforeChangingCwd();
@@ -3056,25 +3058,99 @@ async function testDisallowedWorkerProfileFailsBeforeWorkerLaunch() {
   );
 }
 
-async function testRuntimePermissionProfileFallbackStopsAndDiscards() {
-  for (const marker of [
-    "PERMISSION_PROFILE_FALLBACK_ITEM",
-    "PERMISSION_PROFILE_FALLBACK_EVENT",
-  ]) {
-    await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
-      await writeFile(promptPath, `${marker}\n`);
+async function testNativeWarningReachesDiagnosticCallback() {
+  const message =
+    "Synthetic native warning: keep punctuation and details unchanged.";
+  for (const kind of ["discovery", "dedup"] as const) {
+    for (const resumeThreadId of [undefined, "fixture-warning-resume"]) {
+      await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
+        const diagnostics: unknown[] = [];
+        const input = `NATIVE_WARNING\n${JSON.stringify(message)}\n`;
+        const result = await runAppServerWorker({
+          codexPath: fixture.executablePath,
+          environment: await snapshotWorkerEnvironment(),
+          configOverrides: [],
+          request: workerRequest(promptPath, workingDirectory, {
+            kind,
+            resumeThreadId,
+          }),
+          input,
+          onDiagnostic: (item: unknown) => diagnostics.push(item),
+        });
+        assert.equal(result.threadId, resumeThreadId ?? "fixture-thread-id");
+        assert.deepEqual(
+          diagnostics.filter(
+            (item) => (item as { type?: unknown })?.type === "error",
+          ),
+          [{ type: "error", message }],
+        );
+        const invocation = await readJson(fixture.markerPath);
+        assert.equal(
+          invocation.thread.method,
+          resumeThreadId ? "thread/resume" : "thread/start",
+        );
+        assert.equal(invocation.thread.params.threadId, resumeThreadId);
+        assert.equal(
+          invocation.thread.params.permissions,
+          "codex_security_deep_scan_worker",
+        );
+        assert.equal(invocation.turn.params.input[0].text, input);
+        assert.ok(
+          invocation.sequence.indexOf("terminal:completed") <
+            invocation.sequence.indexOf("eof"),
+        );
+        assert.equal(
+          await readFile(fixture.completionMarkerPath, "utf8"),
+          "flushed\n",
+        );
+        assert.throws(() => process.kill(invocation.pid, 0), { code: "ESRCH" });
+      });
+    }
+  }
+}
 
-      await assert.rejects(
-        runWorker(promptPath, workingDirectory),
-        (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-          error?.name === "DeepScanNonRetryableError" &&
-          error.message.includes("worker was stopped") &&
-          error.message.includes("results were discarded") &&
-          !error.message.includes("did not run"),
-      );
-      const invocation = await readJson(fixture.markerPath);
-      assert.equal(invocation.stdin, `${marker}\n`);
-    });
+async function testRuntimePermissionProfileFallbackStopsAndDiscards() {
+  for (const kind of ["discovery", "dedup"] as const) {
+    for (const resumeThreadId of [undefined, "fixture-fallback-resume"]) {
+      const markers = [
+        "PERMISSION_PROFILE_FALLBACK_ITEM",
+        "PERMISSION_PROFILE_FALLBACK_EVENT",
+        ...(resumeThreadId ? ["PERMISSION_PROFILE_FALLBACK_WARNING"] : []),
+      ];
+      for (const marker of markers) {
+        await withWorkerFixture(
+          async (fixture, promptPath, workingDirectory) => {
+            await writeFile(promptPath, `${marker}\n`);
+            await assert.rejects(
+              runWorker(promptPath, workingDirectory, { kind, resumeThreadId }),
+              (
+                error: NodeJS.ErrnoException & {
+                  cause?: NodeJS.ErrnoException;
+                },
+              ) =>
+                error?.name === "DeepScanNonRetryableError" &&
+                error.message.includes("worker was stopped") &&
+                error.message.includes("results were discarded") &&
+                !error.message.includes("did not run"),
+            );
+            const invocation = await readJson(fixture.markerPath);
+            assert.equal(invocation.stdin, `${marker}\n`);
+            assert.equal(
+              invocation.thread.method,
+              resumeThreadId ? "thread/resume" : "thread/start",
+            );
+            assert.equal(invocation.thread.params.threadId, resumeThreadId);
+            assert.equal(
+              await readFile(fixture.completionMarkerPath, "utf8"),
+              "flushed\n",
+            );
+            assert.throws(() => process.kill(invocation.pid, 0), {
+              code: "ESRCH",
+            });
+          },
+        );
+      }
+    }
   }
 }
 
@@ -3236,6 +3312,8 @@ if (stdin.includes('MALFORMED_COMMAND_EVENT')) {
 const permissionProfileFallbackWarning = 'Configured value for \`permission_profile\` is disallowed by requirements; falling back from \`codex_security_deep_scan_worker\` to required value \`:read-only\`.';
 if (stdin.includes('PERMISSION_PROFILE_FALLBACK_ITEM')) emit({ type: 'item.completed', item: { id: 'warning-1', type: 'error', message: permissionProfileFallbackWarning } });
 if (stdin.includes('PERMISSION_PROFILE_FALLBACK_EVENT')) emit({ type: 'error', message: permissionProfileFallbackWarning });
+if (stdin.includes('PERMISSION_PROFILE_FALLBACK_WARNING')) send({ method: 'warning', params: { threadId, message: permissionProfileFallbackWarning } });
+if (stdin.includes('NATIVE_WARNING')) send({ method: 'warning', params: { threadId, message: JSON.parse(stdin.split('\\n')[1]) } });
 if (stdin.includes('BLOCK_AFTER_START')) await new Promise(() => {});
 if (stdin.includes('RATE_LIMIT_CYBER_POLICY_ERROR')) { emit({ type: 'turn.failed', error: { message: '429 Too Many Requests: Request blocked by cyberPolicy.' } }); process.exit(0); }
 if (stdin.includes('CYBER_POLICY_ERROR')) { emit({ type: 'turn.failed', error: { message: 'Request blocked by cyberPolicy.' } }); process.exit(0); }
