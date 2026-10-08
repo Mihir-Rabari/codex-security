@@ -320,8 +320,11 @@ for (const {
               : selected,
           );
           args = commandArgs;
-          directory = options.env!["CODEX_SQLITE_HOME"];
-          expect(options.cwd).toBe(directory);
+          directory = options.cwd as string;
+          expect(options.env!["CODEX_SQLITE_HOME"]).toBeUndefined();
+          expect(
+            commandArgs.some((arg) => arg.startsWith("sqlite_home=")),
+          ).toBe(false);
           expect(environmentEntry(options.env!, "CODEX_HOME")).toBe(modelHome);
           child = spawn(
             process.execPath,
@@ -600,6 +603,216 @@ for (const {
     }
   });
 }
+
+test.each([
+  "default",
+  "environment",
+  "configuration",
+  "relative-environment",
+  "relative-configuration",
+  "configuration-over-environment",
+])(
+  "concurrent ephemeral reviews reuse %s native SQLite without deleting it",
+  async (selection) => {
+    await using f = await workflowFixture();
+    await mkdir(f.environment.CODEX_HOME, { recursive: true });
+    const sqliteHome =
+      selection === "default"
+        ? f.environment.CODEX_HOME
+        : join(f.root, "native-sqlite");
+    await mkdir(sqliteHome, { recursive: true });
+    const marker = join(sqliteHome, "existing-state");
+    const configured = selection.includes("configuration");
+    const inherited = selection.endsWith("environment");
+    const environmentHome =
+      selection === "configuration-over-environment"
+        ? join(f.root, "ignored-environment-state")
+        : sqliteHome;
+    await writeFile(marker, "Existing native state");
+    await writeFile(
+      join(f.environment.CODEX_HOME, "config.toml"),
+      stringify({
+        mcp_servers: { synthetic: { command: "synthetic-unused-command" } },
+        ...(configured
+          ? {
+              sqlite_home: selection.startsWith("relative")
+                ? relative(f.environment.CODEX_HOME, sqliteHome)
+                : sqliteHome,
+            }
+          : {}),
+      }),
+    );
+    const environment = {
+      ...f.environment,
+      OPENAI_API_KEY: "synthetic-review-key",
+      ...(inherited
+        ? {
+            CODEX_SQLITE_HOME: selection.startsWith("relative")
+              ? relative(process.cwd(), sqliteHome)
+              : environmentHome,
+          }
+        : {}),
+    };
+    const originalEnvironment = { ...environment };
+    const scratch: string[] = [];
+    let starts = 0;
+    const runner = new CodexReviewRunner(
+      environment,
+      (_command, args, options) => {
+        scratch.push(options.cwd as string);
+        expect(args.some((arg) => arg.startsWith("sqlite_home="))).toBe(false);
+        expect(
+          args.find((arg) =>
+            arg.startsWith("permissions.codex_security_review="),
+          ),
+        ).toContain(`${JSON.stringify(sqliteHome)}="deny"`);
+        expect(options.env!["CODEX_HOME"]).toBe(f.environment.CODEX_HOME);
+        expect(options.env!["CODEX_SQLITE_HOME"]).toBe(
+          inherited ? environmentHome : undefined,
+        );
+        return spawn(
+          process.execPath,
+          [
+            fixture,
+            "accepted-no-replay",
+            join(f.root, `sqlite-${starts++}.jsonl`),
+            f.repository,
+          ],
+          options,
+        );
+      },
+      undefined,
+      f.repository,
+    );
+    const review = {
+      stage: "pair-review" as const,
+      model: "synthetic-model",
+      effort: "high",
+      prompt: "Compare synthetic findings",
+      schema: {},
+      validate: () => ({ decision: "SAME" }),
+    };
+    await Promise.all([runner.run(review), runner.run(review)]);
+    expect(environment).toEqual(originalEnvironment);
+    expect(new Set(scratch).size).toBe(2);
+    expect(scratch.every((path) => !existsSync(path))).toBe(true);
+    expect(await readFile(marker, "utf8")).toBe("Existing native state");
+  },
+);
+
+test.each(["capture", "throw", "reject", "pending"])(
+  "native review diagnostics preserve messages and IDs without blocking on %s observers",
+  async (behavior) => {
+    await using f = await workflowFixture();
+    await mkdir(f.environment.CODEX_HOME);
+    await writeFile(
+      join(f.environment.CODEX_HOME, "config.toml"),
+      stringify({
+        mcp_servers: { synthetic: { command: "synthetic-unused-command" } },
+      }),
+    );
+    const events: import("../src/deduplication/diagnostics.js").DeduplicationDiagnostic[] =
+      [];
+    const runner = new CodexReviewRunner(
+      { ...f.environment, OPENAI_API_KEY: "synthetic-review-key" },
+      (_command, _args, options) =>
+        spawn(
+          process.execPath,
+          [
+            fixture,
+            "diagnostics",
+            join(f.root, "diagnostics.jsonl"),
+            f.repository,
+          ],
+          options,
+        ),
+      undefined,
+      f.repository,
+      undefined,
+      (event) => {
+        events.push(event);
+        if (behavior === "throw") throw new Error("Observer failed");
+        if (behavior === "reject")
+          return Promise.reject(new Error("Observer rejected"));
+        if (behavior === "pending") return new Promise<void>(() => {});
+      },
+    );
+    expect(
+      await runner.run({
+        stage: "pair-review",
+        model: "synthetic-model",
+        effort: "high",
+        prompt: "Compare synthetic findings",
+        schema: {},
+        validate: () => ({ decision: "SAME" }),
+      }),
+    ).toEqual({ decision: "SAME" });
+    expect(events[0]).toMatchObject({
+      event: "review.started",
+      stage: "pair-review",
+      model: "synthetic-model",
+      effort: "high",
+      attempt: 1,
+    });
+    expect(events.at(-1)?.event).toBe("review.completed");
+    expect(new Set(events.map((event) => event.reviewId)).size).toBe(1);
+    expect(
+      events
+        .filter((event) => event.event === "review.stderr")
+        .map((event) => event.message)
+        .join(""),
+    ).toBe("Native diagnostic: Bearer synthetic-review-key\n");
+    expect(
+      events
+        .filter((event) => event.event === "review.warning")
+        .map((event) => event.details),
+    ).toEqual([
+      {
+        method: "configWarning",
+        message: "Configured model fallback: synthetic-review-key",
+      },
+      {
+        method: "warning",
+        message: "Source lookup warning",
+        threadId: "review-thread",
+      },
+    ]);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "review.event",
+        details: {
+          method: "item/completed",
+          threadId: "review-thread",
+          turnId: "review-turn-1",
+          item: {
+            id: "command-1",
+            type: "commandExecution",
+            status: "completed",
+            exitCode: 7,
+            aggregatedOutput: "Source lookup failed: synthetic-review-key",
+          },
+        },
+      }),
+    );
+    expect(
+      events
+        .filter(
+          (event) => event.details?.["method"] === "thread/tokenUsage/updated",
+        )
+        .map((event) => event.details?.["threadId"]),
+    ).toEqual(["nested-review", "review-thread"]);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "review.submission",
+        details: expect.objectContaining({
+          threadId: "review-thread",
+          turnId: "review-turn-1",
+          accepted: true,
+        }),
+      }),
+    );
+  },
+);
 
 test.each([
   "cyber_policy",

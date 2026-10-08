@@ -221,6 +221,7 @@ const allowedFiles = new Set([
     "finding-dedupe-groups",
     "deduplication/deduplication-prompts",
     "deduplication/deduplication-reviewer",
+    "deduplication/diagnostics",
     "deduplication/scan",
     "deduplication/local",
     "deduplication/finding-schema",

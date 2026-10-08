@@ -459,21 +459,39 @@ exits successfully after saving the other accepted groups.
 By default, deduplication retrieves all candidate neighborhoods, screens them
 with `gpt-5.6-luna` at `xhigh`, then independently reviews nominated pairs with
 `gpt-5.6-sol` at `high`. The host's Codex `model` and `model_reasoning_effort`
-settings override these defaults for both stages. Provider selection uses the existing Codex configuration; embedding
-configuration is separate. Screening and pair-review permissions stay attached
-to their stages regardless of model name.
+settings override these defaults for both stages. Provider selection uses the
+existing Codex configuration; embedding configuration is separate. Screening
+and pair-review permissions stay attached to their stages regardless of model name.
+Accepted pairs form groups only when no reviewed `DISTINCT` decision or refusal
+contradicts the group. Saved-scan pair reviews return a decision and rationale;
+they do not generate replacement findings. The host chooses representatives
+from the original records. Host-provided records reviews retain their full
+merged-finding contract.
 
-A pair review can start after all screenings that cover
-it finish without a `DISTINCT` decision. Accepted pairs form groups only when
-no reviewed `DISTINCT` decision or refusal contradicts the group.
+Local reviews receive the stored repository associations separately from the
+finding text. When the current document matches a saved scan occurrence, this
+context also includes its recorded revision and working-tree snapshot digest;
+missing occurrence context is omitted rather than inferred from the current
+checkout. A file in the selected checkout can establish that checkout's
+current source; it cannot stand in for another repository or a historical
+revision. Matching paths or snippets alone do not establish a shared maintained
+control across repositories. The review does not gain permission to open other
+checkouts from their stored associations.
 
 The default concurrency is 8. Set `--concurrency N` or SDK `concurrency: N` to
 change it; use 1 for serial execution. Candidate retrieval uses that limit, and
 screenings and ready pair reviews share one worker pool. Results are combined
 in input order, independent of completion order.
 
-Reviews run on the SDK/CLI host using its Codex sign-in or environment API key;
-credentials are not sent to the findings service. Each review receives complete
+Reviews run on the SDK/CLI host using its Codex sign-in or environment API key.
+For the built-in OpenAI provider, an available `OPENAI_API_KEY` (or fallback
+`CODEX_API_KEY`) is also used to
+authenticate reviews, even when Codex is already signed in. The built-in
+embedding adapter uses the same key selection. An embedding-only key therefore
+does not select ChatGPT authentication for reviews. A custom SDK embedding
+adapter can own separate embedding credentials while reviews use the host's
+normal Codex authentication. Review credentials are not sent to the findings
+service. Each review receives complete
 original findings and may inspect the approved local checkout. Reviews preserve
 severity and priority rather than reassessing them. The baseline filesystem is
 read-only and excludes credentials and Codex state. Screening denies approval
@@ -481,11 +499,21 @@ requests; pair reviews use Codex's automatic approval reviewer. Web, plugins,
 and inherited MCP servers are disabled. Finding content and linked tickets do
 not authorize access to another target.
 
-Models must submit a validated decision. A session that ends without one gets
-one corrective turn. Invalid output and eligible transient failures can retry
-in fresh sessions, up to three sessions per review. Transient service failures
-allow up to three request attempts; HTTP retries honor `Retry-After`. Backoff
-occupies the job's concurrency slot.
+Reviews are ephemeral and reuse Codex's configured SQLite storage. They do not
+rebuild a temporary copy of the caller's session history for every pair. Explicit
+`sqlite_home` and `CODEX_SQLITE_HOME` settings remain effective, and the native
+state directory is excluded from the review's source access.
+
+The CLI reports preparation, review progress, and native warnings on stderr;
+JSON results remain on stdout. The existing `CODEX_SECURITY_LOG_LEVEL=debug`
+(or `LOG_LEVEL=debug`) includes structured review diagnostics with thread,
+turn, and command identifiers, command failures, and native token-usage events.
+Usage counters are cumulative per native thread; do not add every update.
+SDK callers can receive the same events through `onDiagnostic`. Observer
+failures do not interrupt reviews or discard completed results.
+
+Models must submit a validated decision. Invalid output and eligible transient
+failures are retried automatically; HTTP retries honor `Retry-After`.
 
 Cancellation, authentication/configuration errors, permanent HTTP errors, and
 required-source-access blockers are not retried. Refusals are not retried or

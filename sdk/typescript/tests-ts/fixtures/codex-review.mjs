@@ -166,7 +166,43 @@ for await (const line of createInterface({ input: process.stdin })) {
       });
     }
     if (scenario === "exit") process.exit(1);
-    if (scenario === "configured-model") {
+    if (scenario === "diagnostics") {
+      process.stderr.write("Native diagnostic: Bearer synthetic-review-key\n");
+      send({
+        method: "configWarning",
+        params: { message: "Configured model fallback: synthetic-review-key" },
+      });
+      send({
+        method: "warning",
+        params: { message: "Source lookup warning", threadId: "review-thread" },
+      });
+      send({
+        method: "item/completed",
+        params: {
+          threadId: "review-thread",
+          turnId,
+          item: {
+            id: "command-1",
+            type: "commandExecution",
+            status: "completed",
+            exitCode: 7,
+            aggregatedOutput: "Source lookup failed: synthetic-review-key",
+          },
+        },
+      });
+      for (const threadId of ["nested-review", "review-thread"])
+        send({
+          method: "thread/tokenUsage/updated",
+          params: {
+            threadId,
+            turnId,
+            tokenUsage: {
+              total: { inputTokens: 12, outputTokens: 3, totalTokens: 15 },
+            },
+          },
+        });
+      submit("valid", { decision: "SAME" });
+    } else if (scenario === "configured-model") {
       const decision = { decision: "DISTINCT", rationale: "Independent fixes" };
       submit(
         "valid",

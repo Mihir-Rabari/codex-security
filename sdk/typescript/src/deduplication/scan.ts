@@ -17,11 +17,14 @@ import {
   type DeduplicationResult,
 } from "./deduplication.js";
 import {
-  CodexDeduplicationReviewer,
+  CodexGroupingReviewer,
   type DeduplicationReviewer,
 } from "./deduplication-reviewer.js";
 import { FindingsClient, type FindingsRequest } from "../findings-client.js";
-import type { FindingSearchScope } from "../finding-retrieval.js";
+import type {
+  FindingSearchScope,
+  FindingSourceSnapshot,
+} from "../finding-retrieval.js";
 import {
   FindingWorkflow,
   workflowDestination,
@@ -34,8 +37,17 @@ import {
 } from "./checkpointed-review.js";
 import { normalizeRepository } from "../targets.js";
 import { LocalDeduplication, type FindingEmbeddingBinding } from "./local.js";
-import { readCodexHomeConfig } from "../auth.js";
+import { configuredCodexHome, readCodexHomeConfig } from "../auth.js";
 import { CodexSecurityError } from "../errors.js";
+import { comparisonEnvironment } from "../scan-comparison.js";
+import { isDeepStrictEqual } from "node:util";
+import { isRecord } from "../record.js";
+import { resolveCodexProfile, type JsonObject } from "../config.js";
+import { savedSourceContext } from "./deduplication-prompts.js";
+import {
+  emitDiagnostic,
+  type DeduplicationDiagnosticObserver,
+} from "./diagnostics.js";
 
 export interface DeduplicateScanOptions {
   /** Resume the named findings workflow; remote mode includes custom publication. */
@@ -48,6 +60,8 @@ export interface DeduplicateScanOptions {
   allRepositories?: boolean;
   /** Shared concurrency limit for deduplication jobs. Defaults to 8. */
   concurrency?: number;
+  /** Best-effort progress and native review diagnostics; observer failures are ignored. */
+  onDiagnostic?: DeduplicationDiagnosticObserver;
   signal?: AbortSignal;
 }
 
@@ -82,6 +96,7 @@ type DeduplicateScanDependencies = Partial<SavedScanDependencies> & {
   environment?: NodeJS.ProcessEnv;
   reviewer?: DeduplicationReviewer;
   reviewRunner?: Pick<CodexReviewRunner, "run">;
+  resolveReviewEnvironment?: typeof comparisonEnvironment;
   fetch?: FindingsRequest;
 };
 
@@ -236,10 +251,12 @@ async function deduplicateResolvedScan(
       await (
         workflow ?? new FindingWorkflow(scanId, environment)
       ).protectArtifacts(scanDirectory);
+      emitDiagnostic(options.onDiagnostic, { event: "preparation.started" });
       await local.prepare(
         contract.findings.findings,
         contract.manifest.scan.target.targetId,
       );
+      emitDiagnostic(options.onDiagnostic, { event: "preparation.completed" });
     }
     const saved = (await workflow?.get())?.stages.dedupe;
     if (saved?.pendingWrite) {
@@ -261,13 +278,29 @@ async function deduplicateResolvedScan(
       await client.storeDedupeGroups(saved.pendingWrite.groups);
       return saved.result as DeduplicateScanResult;
     }
+    const reviewEnvironment = dependencies.reviewer
+      ? environment
+      : await (dependencies.resolveReviewEnvironment ?? comparisonEnvironment)(
+          environment,
+          undefined,
+          options.signal,
+        );
+    const reviewConfiguration = dependencies.reviewer
+      ? {}
+      : await modelConfigurationForReview(
+          environment,
+          reviewEnvironment,
+          options.signal,
+        );
     const runner =
       dependencies.reviewRunner ??
       new CodexReviewRunner(
-        environment,
+        reviewEnvironment,
         undefined,
         options.signal,
         repositoryPath,
+        undefined,
+        options.onDiagnostic,
       );
     const source = workflow
       ? await workflow.sourceSnapshot(repositoryPath)
@@ -278,18 +311,61 @@ async function deduplicateResolvedScan(
           runner,
           source!,
           scope,
-          await reviewSettingsDigest(environment),
+          await reviewSettingsDigest(reviewEnvironment, reviewConfiguration),
+          options.onDiagnostic,
         )
       : undefined;
+    const sourceRepositories = new Map<string, readonly string[]>(
+      contract.findings.findings.map((finding) => [
+        finding.findingId,
+        [contract.manifest.scan.target.targetId],
+      ]),
+    );
+    const sourceSnapshots = new Map<string, FindingSourceSnapshot>();
     const deduplicator = new FindingDeduplicator(
       {
-        potentialDuplicates: (findingId) =>
-          client.potentialDuplicates(findingId, scope),
+        potentialDuplicates: async (findingId) => {
+          const neighborhood = await client.potentialDuplicates(
+            findingId,
+            scope,
+          );
+          for (const finding of [
+            neighborhood.finding,
+            ...neighborhood.potentialDuplicates,
+          ]) {
+            const repositories = Object.hasOwn(
+              neighborhood.repositoryIds ?? {},
+              finding.findingId,
+            )
+              ? neighborhood.repositoryIds![finding.findingId]
+              : undefined;
+            if (repositories !== undefined)
+              sourceRepositories.set(finding.findingId, repositories);
+            else if (scope.repositoryId !== undefined)
+              sourceRepositories.set(finding.findingId, [scope.repositoryId]);
+            const snapshot = Object.hasOwn(
+              neighborhood.sourceSnapshots ?? {},
+              finding.findingId,
+            )
+              ? neighborhood.sourceSnapshots![finding.findingId]
+              : undefined;
+            if (snapshot !== undefined)
+              sourceSnapshots.set(finding.findingId, snapshot);
+          }
+          return neighborhood;
+        },
       },
       dependencies.reviewer ??
-        new CodexDeduplicationReviewer(
+        new CodexGroupingReviewer(
           checkpoints ?? runner,
-          await readCodexHomeConfig(environment, options.signal),
+          reviewConfiguration,
+          (findings) =>
+            savedSourceContext(
+              contract.manifest.scan.target.targetId,
+              findings,
+              sourceRepositories,
+              sourceSnapshots,
+            ),
         ),
       options.signal,
       options.concurrency,
@@ -317,4 +393,46 @@ async function deduplicateResolvedScan(
     return result;
   };
   return workflow ? await workflow.run("dedupe", dedupe) : await dedupe();
+}
+
+async function modelConfigurationForReview(
+  source: NodeJS.ProcessEnv,
+  effective: NodeJS.ProcessEnv,
+  signal?: AbortSignal,
+): Promise<JsonObject> {
+  const selected = resolveCodexProfile(
+    await readCodexHomeConfig(effective, signal),
+  );
+  if (configuredCodexHome(source) === configuredCodexHome(effective))
+    return selected;
+  const ambient = resolveCodexProfile(
+    await readCodexHomeConfig(source, signal),
+  );
+  const providerIdentity = (config: JsonObject) => {
+    const provider = config["model_provider"] ?? "openai";
+    const definitions = config["model_providers"];
+    const definition =
+      typeof provider === "string" &&
+      isRecord(definitions) &&
+      isRecord(definitions[provider])
+        ? definitions[provider]
+        : undefined;
+    return {
+      provider,
+      baseUrl: definition?.["base_url"],
+      wireApi: definition?.["wire_api"] ?? "responses",
+      openaiBaseUrl:
+        provider === "openai" ? config["openai_base_url"] : undefined,
+    };
+  };
+  // A managed sign-in home can contain only authentication/runtime settings.
+  // Keep compatible caller model choices without crossing provider namespaces.
+  if (
+    isDeepStrictEqual(providerIdentity(ambient), providerIdentity(selected))
+  ) {
+    for (const key of ["model", "model_reasoning_effort"])
+      if (selected[key] === undefined && ambient[key] !== undefined)
+        selected[key] = ambient[key];
+  }
+  return selected;
 }
