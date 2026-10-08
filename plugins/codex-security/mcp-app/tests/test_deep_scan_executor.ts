@@ -1000,6 +1000,9 @@ async function testOpenAiCredentialsReachWorker() {
       accountResult: { account: { type: "chatgpt" }, requiresOpenaiAuth: true },
     },
     {
+      accountResult: { account: { type: "chatgpt" }, requiresOpenaiAuth: true },
+    },
+    {
       openai: "synthetic-provider-key",
       accountResult: { account: null, requiresOpenaiAuth: false },
     },
@@ -1293,6 +1296,7 @@ async function testWorkerRuntimeSettings() {
     "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_PLUGIN_ROOT",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    "CODEX_SECURITY_KNOWLEDGE_BASE",
     "OPENAI_API_KEY",
     "CODEX_API_KEY",
     "CODEX_SQLITE_HOME",
@@ -1452,6 +1456,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   },
                 };
           return {
+            knowledgePath: path.join(fixture.root, `knowledge-${index}`),
+            knowledgeDocuments: {
+              "1-architecture.md.txt": `Synthetic architecture for scan ${index}.`,
+            },
             path: entryPath,
             deepPath,
             nativeProfile,
@@ -1516,6 +1524,13 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
       await Promise.all(
         workerConfigurations.map((entry) =>
           Promise.all([
+            mkdir(entry.knowledgePath).then(() =>
+              Promise.all(
+                Object.entries(entry.knowledgeDocuments).map(([name, text]) =>
+                  writeFile(path.join(entry.knowledgePath, name), text),
+                ),
+              ),
+            ),
             writeFile(entry.path, stringifyToml(entry.configuration)),
             writeFile(
               entry.deepPath,
@@ -1637,6 +1652,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               );
               process.env.CODEX_SECURITY_CONFIG_PATH =
                 workerConfigurations[index].path;
+              process.env.CODEX_SECURITY_KNOWLEDGE_BASE =
+                workerConfigurations[index].knowledgePath;
               process.env.XDG_CACHE_HOME = path.join(
                 fixture.root,
                 `cache-${index} `,
@@ -1723,6 +1740,18 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 codex_security_deep_scan_worker:
                   workerConfigurations[index].permissionProfile,
               },
+            );
+            assert.equal(
+              workerLaunch.environment!.CODEX_SECURITY_KNOWLEDGE_BASE,
+              workerConfigurations[index].knowledgePath,
+            );
+            assert.equal(
+              invocation.knowledgePath,
+              workerConfigurations[index].knowledgePath,
+            );
+            assert.deepEqual(
+              invocation.knowledgeDocuments,
+              workerConfigurations[index].knowledgeDocuments,
             );
             assert.equal(invocation.codexHome, await realpath(codexHome));
             assert.equal(invocation.sqliteHome, sqliteHomes[index]);
@@ -3087,7 +3116,7 @@ async function fakeCodexFixture(
   await writeFile(
     scriptPath,
     `#!/usr/bin/env node
-import { readFileSync, renameSync, writeFileSync as writeReceiptFile } from "node:fs";
+import { readFileSync, readdirSync, renameSync, writeFileSync as writeReceiptFile } from "node:fs";
 const writeFileSync = (path, value) => { const pending = path + "." + process.pid + ".pending"; writeReceiptFile(pending, value); renameSync(pending, path); };
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
@@ -3123,8 +3152,10 @@ function capture() {
   const pythonProbe = stdin.includes('CAPTURE_SYNTHETIC_PYTHON') ? spawnSync(process.env.PYTHON, ['-I', '-c', 'import json,os,sys; print(json.dumps([sys.prefix,os.environ.get("LD_LIBRARY_PATH")]))'], { encoding: 'utf8' }) : undefined;
   if (pythonProbe && pythonProbe.status !== 0) throw new Error(pythonProbe.stderr || String(pythonProbe.error));
   const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
+  const knowledgePath = stdin.includes('synthetic worker configuration fixture') ? process.env.CODEX_SECURITY_KNOWLEDGE_BASE : undefined;
+  const knowledgeDocuments = knowledgePath === undefined ? undefined : Object.fromEntries(readdirSync(knowledgePath).map(name => [name, readFileSync(join(knowledgePath, name), 'utf8')]));
   writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({
-    ...environment, rpc, sequence, thread, turn, login, stdin, pid: process.pid,
+    ...environment, rpc, sequence, thread, turn, login, stdin, pid: process.pid, knowledgePath, knowledgeDocuments,
     python: process.env.PYTHON, pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment,
     originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE,
     ...(stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { openaiAuthentication: { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } } : {}),
