@@ -6597,8 +6597,9 @@ for (const mode of ["many scopes", "early restore exit"] as const) {
       const paths = await fixture();
       const source = await repository(paths.root, "stdin-snapshot-source");
       const names = Array.from(
-        { length: mode === "many scopes" ? 800 : 14000 },
-        (_, i) => `src/file_${i}_${"b".repeat(70)}.ts`,
+        { length: mode === "many scopes" ? 800 : 5500 },
+        (_, i) =>
+          `src/file_${i}_${"b".repeat(mode === "many scopes" ? 70 : 230)}.ts`,
       );
       const blob = git(source.path, "hash-object", "-w", "src/app.ts");
       gitText(["-C", source.path, "update-index", "--index-info"], {
