@@ -2234,9 +2234,12 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test.each([false, true])(
+  test.each([
+    ["false", false],
+    ["true", true],
+  ] as const)(
     "archives accepted output before starting, cancellation=%s",
-    async (cancelRegistration) => {
+    async (_label, cancelRegistration) => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const codexHome = join(root, "codex-home");
