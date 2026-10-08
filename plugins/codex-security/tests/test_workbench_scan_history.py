@@ -2321,7 +2321,17 @@ def change_repository_metadata(
 
 
 @pytest.mark.parametrize(
-    "change", ("device", "legacy-device", "filesystem", "common-filesystem", "inode", "birth")
+    "change",
+    (
+        "device",
+        "legacy-device",
+        "stored-legacy-device",
+        "foreign-strong-device",
+        "filesystem",
+        "common-filesystem",
+        "inode",
+        "birth",
+    ),
 )
 def test_repository_history_distinguishes_linux_remount_from_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
@@ -2341,6 +2351,12 @@ def test_repository_history_distinguishes_linux_remount_from_replacement(
         if change == "legacy-device":
             connection.execute("UPDATE security_targets SET repository_identity=NULL")
             connection.execute("UPDATE scans SET repository_generation=NULL")
+        if change == "stored-legacy-device":
+            identity = target_state._repository_identity_details(repository)
+            assert identity is not None
+            connection.execute(
+                "UPDATE security_targets SET repository_identity=?", (identity.legacy_value,)
+            )
         before = dict(connection.execute("SELECT * FROM scans").fetchone())
         args = argparse.Namespace(
             repository=str(repository),
@@ -2355,9 +2371,26 @@ def test_repository_history_distinguishes_linux_remount_from_replacement(
         assert [row["scanId"] for row in history.list_scans(connection, args)["scans"]] == [
             scan["scanId"]
         ]
-        change_repository_metadata(monkeypatch, repository, change)
+        change_repository_metadata(
+            monkeypatch,
+            repository,
+            "device" if change in ("stored-legacy-device", "foreign-strong-device") else change,
+        )
+        if change == "foreign-strong-device":
+            connection.execute(
+                "UPDATE security_targets SET repository_identity=?",
+                (
+                    target_state._identity_digest(
+                        "synthetic foreign binding", "repository_v3_sha256_"
+                    ),
+                ),
+            )
+        binding = connection.execute("SELECT repository_identity FROM security_targets").fetchone()[
+            0
+        ]
+        changes = connection.total_changes
         preserved = (
-            change in ("device", "legacy-device")
+            change in ("device", "legacy-device", "stored-legacy-device")
             and sys.platform == "linux"
             or change in ("filesystem", "common-filesystem")
             and sys.platform != "linux"
@@ -2374,6 +2407,11 @@ def test_repository_history_distinguishes_linux_remount_from_replacement(
             with pytest.raises(SystemExit, match="no longer matches"):
                 target_state.ensure_security_target(connection, str(repository))
         assert dict(connection.execute("SELECT * FROM scans").fetchone()) == before
+        assert connection.total_changes == changes
+        assert (
+            connection.execute("SELECT repository_identity FROM security_targets").fetchone()[0]
+            == binding
+        )
 
 
 @pytest.mark.parametrize("remounted_before_upgrade", (False, True))

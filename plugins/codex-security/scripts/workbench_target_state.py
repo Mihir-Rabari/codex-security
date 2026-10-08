@@ -513,11 +513,20 @@ def _inspect_repository_target(
                 if not stored_filesystem_identity_matches(inode, metadata.st_ino):
                     mismatch = True
                     strict_owner_matches = False
-            stored_matches = repository is not None and stored_identity in {
-                repository.value,
-                repository.legacy_value,
-                repository.previous_value or repository.value,
-            }
+            stored_matches = repository is not None and (
+                stored_identity
+                in {
+                    repository.value,
+                    repository.legacy_value,
+                    repository.previous_value or repository.value,
+                }
+                or (
+                    repository.value.startswith("repository_v3_sha256_")
+                    and recorded_generations == {repository.value}
+                    and isinstance(stored_identity, str)
+                    and re.fullmatch(r"repository_sha256_[0-9a-f]{64}", stored_identity) is not None
+                )
+            )
             verified_repository = repository is not None and (
                 stored_matches
                 or recorded_generations in ({repository.value}, {repository.previous_value})
