@@ -1,4 +1,5 @@
 import { execFile as nodeExecFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import * as z from "zod/v4";
@@ -6,8 +7,8 @@ import commonSchema from "../../schemas/definitions/artifact-common.schema.json"
 import reviewItemsSchema from "../../schemas/tools/review-items.schema.json";
 import {
   artifactDestination,
+  artifactSourcePath,
   paginateArtifactRows,
-  readArtifactText,
   type ArtifactContext,
   type ArtifactPage,
 } from "./artifact-io.js";
@@ -19,6 +20,7 @@ import {
   missingPythonHelperMessage,
   resolvePythonCommand,
 } from "./python_command.js";
+import { decodeUtf8 } from "./helpers/utf8.js";
 
 const execFile = promisify(nodeExecFile);
 const documents = [commonSchema, reviewItemsSchema] as SchemaDocument[];
@@ -159,7 +161,11 @@ export async function listCodexSecurityReviewItems(
 async function readReviewItems(
   context: ArtifactContext,
 ): Promise<ReviewItem[]> {
-  const source = await readArtifactText(context, inventoryComponents, label);
+  const source = decodeUtf8(
+    await readFile(
+      await artifactSourcePath(context, inventoryComponents, label),
+    ),
+  );
   const rows: ReviewItem[] = [];
 
   for (const [index, line] of source.split(/\r?\n/u).entries()) {

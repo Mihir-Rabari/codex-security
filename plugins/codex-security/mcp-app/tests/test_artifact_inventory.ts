@@ -16,6 +16,7 @@ const inventory = await importSource(
 try {
   await testSchemasAreBoundAndExact();
   await testPrepareUsesTheExistingStandardGenerator();
+  if (process.platform !== "win32") await testNonUtf8InventoryPaths();
   await testPrepareListsIgnoredTrackedFilesOnce();
   await testPrepareExcludesGitMetadata();
   await testPrepareUsesOnlyAuthoritativeDiffChanges();
@@ -115,6 +116,36 @@ async function testPrepareUsesTheExistingStandardGenerator() {
     ),
     expectedPaths,
   );
+}
+
+async function testNonUtf8InventoryPaths() {
+  const fixture = await createFixture("non-UTF-8 repository names");
+  const rawPath = Buffer.concat([
+    Buffer.from(path.join(fixture.repoRoot, "name-")),
+    Buffer.from([0xff]),
+    Buffer.from(".ts"),
+  ]);
+  await writeFile(rawPath, "raw path\n");
+  await fixture.writeRepositoryFile("name-�.ts", "Unicode path\n");
+  await assert.rejects(
+    inventory.prepareCodexSecurityReviewItems(fixture.scan),
+    /not valid for encoding utf-8/,
+  );
+  assert.ok((await readFile(fixture.scanInventory)).includes(0xff));
+  await assert.rejects(
+    inventory.listCodexSecurityReviewItems(fixture.scan),
+    /not valid for encoding utf-8/,
+  );
+  await unlink(rawPath);
+  assert.deepEqual(
+    await inventory.prepareCodexSecurityReviewItems(fixture.scan),
+    {
+      reviewItemsTotal: 1,
+    },
+  );
+  assert.deepEqual(await inventory.listCodexSecurityReviewItems(fixture.scan), {
+    items: [{ path: "./name-�.ts" }],
+  });
 }
 
 async function testPrepareListsIgnoredTrackedFilesOnce() {

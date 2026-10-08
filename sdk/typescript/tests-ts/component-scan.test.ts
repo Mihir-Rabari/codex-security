@@ -11,6 +11,7 @@ import {
   rename,
   stat,
   symlink,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
@@ -986,6 +987,37 @@ test("plans from a Git inventory without tools or ignored files", async () => {
     );
   }
 });
+
+test.each(["Git", "plain directory"])(
+  "preserves exact UTF-8 paths in a %s component inventory",
+  async (kind) => {
+    const repository = join(await temporaryDirectory(), "repository");
+    await mkdir(repository);
+    if (kind === "Git") execFileSync("git", ["-C", repository, "init", "-q"]);
+    const paths = ["name-\uFFFD.ts", "\uFEFF来源.ts"];
+    for (const path of paths)
+      await writeFile(join(repository, path), "export {};\n");
+    const proposed = { components: [{ name: "Sources", paths }] };
+    const response = mock(() => proposed);
+    const options = { codex: fakeCodex(response) };
+    if (process.platform !== "win32") {
+      const invalid = Buffer.concat([
+        Buffer.from(join(repository, "name-")),
+        Buffer.from([0xff]),
+        Buffer.from(".ts"),
+      ]);
+      await writeFile(invalid, "export {};\n");
+      await expect(planComponents(repository, options)).rejects.toBeInstanceOf(
+        TypeError,
+      );
+      expect(response).not.toHaveBeenCalled();
+      await unlink(invalid);
+      await symlink("missing.ts", invalid);
+    }
+    expect(await planComponents(repository, options)).toEqual(proposed);
+    expect(response).toHaveBeenCalledTimes(1);
+  },
+);
 
 test.each(["directories", "manifests", "root files"])(
   "batches oversized %s without dropping inventory paths",

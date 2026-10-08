@@ -270,6 +270,7 @@ async function inventoryFiles(
   signal?: AbortSignal,
 ): Promise<string[]> {
   signal?.throwIfAborted();
+  const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   if (await enclosingGitWorktreeRoot(repository, signal)) {
     validatedGitEnvironment();
     const git = await resolveTrustedExecutable("git", process.env, repository);
@@ -289,15 +290,19 @@ async function inventoryFiles(
         "--",
         ".",
       ],
-      { env: git.environment, signal, maxBuffer: Infinity },
+      { env: git.environment, signal, maxBuffer: Infinity, encoding: "buffer" },
     );
     const files: string[] = [];
-    for (const path of stdout.split("\0").filter(Boolean)) {
+    for (const path of stdout.toString("latin1").split("\0").filter(Boolean)) {
       signal?.throwIfAborted();
-      const metadata = await lstat(join(repository, path)).catch(
-        nullIfMissingFile,
-      );
-      if (metadata?.isFile()) files.push(join(repository, path));
+      const bytes = Buffer.from(path, "latin1");
+      const metadata = await lstat(
+        Buffer.from(
+          join(Buffer.from(repository).toString("latin1"), path),
+          "latin1",
+        ),
+      ).catch(nullIfMissingFile);
+      if (metadata?.isFile()) files.push(join(repository, utf8.decode(bytes)));
     }
     return files.length === 0
       ? []
@@ -310,9 +315,12 @@ async function inventoryFiles(
     const directory = pending.pop()!;
     for (const entry of await readdir(join(repository, directory), {
       withFileTypes: true,
+      encoding: "latin1",
     })) {
-      if (entry.name === ".git") continue;
-      const path = directory ? `${directory}/${entry.name}` : entry.name;
+      if (!entry.isDirectory() && !entry.isFile()) continue;
+      const name = utf8.decode(Buffer.from(entry.name, "latin1"));
+      if (name === ".git") continue;
+      const path = directory ? `${directory}/${name}` : name;
       if (entry.isDirectory()) pending.push(path);
       else if (entry.isFile()) files.push(path);
     }
