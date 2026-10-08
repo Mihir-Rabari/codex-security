@@ -1,4 +1,5 @@
 import * as z from "zod/v4";
+import { join } from "node:path";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
 import reviewItemsSchema from "../../schemas/tools/review-items.schema.json";
 import {
@@ -12,10 +13,9 @@ import {
   loadArtifactZodSchema,
   type SchemaDocument,
 } from "./artifact-schema-loader.js";
-import {
-  generateInventory,
-  type InventoryOptions,
-} from "./helpers/generate-inventory";
+import { runTool } from "./helpers/inventory-git";
+import { environmentValue } from "./helpers/helper-files";
+import { encodePosixPath } from "./helpers/posix-path";
 
 const documents = [commonSchema, reviewItemsSchema] as SchemaDocument[];
 const inventoryComponents = ["artifacts", "02_discovery", "in_scope_files.txt"];
@@ -70,11 +70,13 @@ export async function prepareCodexSecurityReviewItems(
     inventoryComponents,
     label,
   );
-  const options: InventoryOptions = {
-    repo: context.repoRoot,
-    scope: context.scope ?? ".",
-    out: destination,
-  };
+  const windows = process.platform === "win32";
+  const arguments_ = [
+    "generate-in-scope-files",
+    `--repo=${context.repoRoot}`,
+    `--scope=${context.scope ?? "."}`,
+    `--out=${destination}`,
+  ];
 
   if (context.mode === "diff") {
     const target = context.targetContract?.diffTarget;
@@ -96,13 +98,49 @@ export async function prepareCodexSecurityReviewItems(
         `${label}: the diff scan has an invalid authoritative change set.`,
       );
     }
-    options.base = baseRevision;
-    options.head = headRevision;
-    options.mode = kind === "working_tree" ? "local-patch" : "revisions";
+    arguments_.push(
+      `--diff-base=${baseRevision}`,
+      `--diff-head=${headRevision}`,
+      `--diff-mode=${kind === "working_tree" ? "local-patch" : "revisions"}`,
+    );
   }
 
   try {
-    await generateInventory("generate-in-scope-files", options);
+    if (arguments_.some((argument) => argument.includes("\0")))
+      throw new TypeError("Process arguments must not contain NUL bytes");
+    const helper = join(context.pluginRoot, "mcp", "helpers.mjs");
+    const home = environmentValue("HOME");
+    const input = windows
+      ? undefined
+      : Buffer.from(
+          encodePosixPath(
+            [home === undefined ? "" : "1", home ?? "", ...arguments_, ""].join(
+              "\0",
+            ),
+          ).toString("hex"),
+        );
+    const result = await runTool(
+      windows ? process.execPath : "/bin/sh",
+      windows
+        ? [helper, ...arguments_]
+        : [
+            "-c",
+            'exec "$1" "$2" --helper 3<&0 0</dev/null',
+            "inventory-helper",
+            process.execPath,
+            helper,
+          ],
+      // Relative NODE_OPTIONS preloads use the MCP process's current directory.
+      undefined,
+      input,
+    );
+    if (result.status !== 0)
+      throw new Error(
+        result.stderr.trim() ||
+          (result.signal
+            ? `Inventory helper terminated by ${result.signal}`
+            : `Inventory helper exited with status ${result.status}`),
+      );
   } catch (error) {
     const details = error instanceof Error ? error.message : String(error);
     throw new Error(

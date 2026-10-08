@@ -109,12 +109,11 @@ export function* walk(path: string): Iterable<string> {
         .entriesWithTypes(Buffer.from(path, "utf16le"))
         .map((entry) => entry.name)
     : readdirSync(fsPath(path), { encoding: "buffer" });
-  for (const name of names) {
-    const child = append(
-      path,
-      windows ? name.toString("utf16le") : decodePosixBytes(name),
-    );
-    yield child;
+  const children = names.map((name) =>
+    append(path, windows ? name.toString("utf16le") : decodePosixBytes(name)),
+  );
+  yield* children;
+  for (const child of children) {
     const info = lstat(child);
     if (
       info.isDirectory() &&

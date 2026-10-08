@@ -169,11 +169,30 @@ function spawnTool(
   return spawn("/bin/sh", ["-c", script], { ...options, cwd: undefined });
 }
 
-// Both callers inherit these paths; Git's separate repository-variable overrides stay intact.
 function inheritedToolPaths(additional: string[] = []): Record<string, string> {
+  const keys = Object.keys(process.env).sort();
+  const gitConfiguration = keys.filter((name) => {
+    const key = windows ? name.toUpperCase() : name;
+    return (
+      [
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_PARAMETERS",
+      ].includes(key) || /^GIT_CONFIG_VALUE_\d+$/u.test(key)
+    );
+  });
   return Object.fromEntries(
-    ["HOME", "PATH", "XDG_CONFIG_HOME", ...additional].flatMap((name) => {
-      const value = environmentValue(name);
+    [
+      "HOME",
+      "PATH",
+      "XDG_CONFIG_HOME",
+      ...additional,
+      ...gitConfiguration,
+    ].flatMap((name) => {
+      const key = windows
+        ? (keys.find((key) => key.toUpperCase() === name.toUpperCase()) ?? name)
+        : name;
+      const value = environmentValue(key);
       return value === undefined ? [] : [[name, value]];
     }),
   );
@@ -188,17 +207,6 @@ function gitProcess(repo: string, args: string[]) {
     const key = windows ? name.toUpperCase() : name;
     if (repositoryEnvironment.includes(key) || key === "GIT_LITERAL_PATHSPECS")
       delete env[name];
-    else if (
-      [
-        "GIT_CONFIG_GLOBAL",
-        "GIT_CONFIG_SYSTEM",
-        "GIT_CONFIG_PARAMETERS",
-      ].includes(key) ||
-      /^GIT_CONFIG_VALUE_\d+$/u.test(key)
-    ) {
-      const value = environmentValue(name);
-      if (value !== undefined) inherited[name] = value;
-    }
   }
   env.GIT_LITERAL_PATHSPECS = "1";
   return spawnTool(
@@ -220,17 +228,20 @@ function gitProcess(repo: string, args: string[]) {
 export async function runTool(
   command: string,
   args: string[],
-  cwd: string,
+  cwd?: string,
+  input?: Buffer,
 ): Promise<ToolResult> {
   const child = spawnTool(
     command,
     args,
     {
       cwd,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     },
-    inheritedToolPaths(["RIPGREP_CONFIG_PATH"]),
+    inheritedToolPaths(["RIPGREP_CONFIG_PATH", "CODEX_SECURITY_GIT"]),
   );
+  child.stdin?.on("error", () => {});
+  child.stdin?.end(input);
   return collect(child);
 }
 

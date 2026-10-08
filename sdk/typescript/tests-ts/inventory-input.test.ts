@@ -1160,6 +1160,34 @@ for (const marker of [".git", ".gitignore"])
     },
   );
 
+for (const name of [".gitignore", ".ignore", ".rgignore"])
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    `missing-tool fallback finds descendant ${name} before entering sibling directories`,
+    () => {
+      const f = fixture();
+      rmSync(join(f.repo, ".git"), { recursive: true });
+      f.write(`nested/${name}`, "ignored.py\n");
+      f.write("nested/!unreadable/source.py");
+      const blocked = join(f.repo, "nested", "!unreadable");
+      writeFileSync(f.out, "previous\n");
+      chmodSync(blocked, 0);
+      try {
+        const result = f.run("make-repo-rank-input", [], {
+          ...process.env,
+          CODEX_SECURITY_GIT: "",
+          PATH: f.root,
+        });
+        expect(result.status).toBe(1);
+        expect(result.stderr.trim()).toBe(
+          "Could not safely enumerate ignored scoped files without Git or ripgrep.",
+        );
+        expect(readFileSync(f.out, "utf8")).toBe("previous\n");
+      } finally {
+        chmodSync(blocked, 0o700);
+      }
+    },
+  );
+
 test("file and Git previews retain empty files and incomplete final UTF-16 units", () => {
   const f = fixture();
   f.write("base.py");

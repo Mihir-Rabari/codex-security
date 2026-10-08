@@ -151,7 +151,7 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
         throw error;
       }
     };
-    const ignored =
+    let ignored =
       [...ancestors(repo)].some((path) => exists(append(path, ".git"))) ||
       [...ancestors(scope)].some((path) => {
         try {
@@ -161,15 +161,19 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
         }
         return ignoreNames.some((name) => isIgnoreFile(append(path, name)));
       });
-    const files = ignored ? [] : [...walk(scope)];
-    if (
-      ignored ||
-      files.some(
-        (path) =>
+    const files: string[] = [];
+    if (!ignored)
+      for (const path of walk(scope)) {
+        if (
           ignoreNames.some((name) => path.endsWith(sep + name)) &&
-          isIgnoreFile(path),
-      )
-    )
+          isIgnoreFile(path)
+        ) {
+          ignored = true;
+          break;
+        }
+        files.push(path);
+      }
+    if (ignored)
       throw new Error(
         "Could not safely enumerate ignored scoped files without Git or ripgrep.",
       );
