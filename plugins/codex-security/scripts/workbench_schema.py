@@ -74,7 +74,7 @@ def apply_migrations(
                 repair_thread_scoped_workspaces_migration(connection)
             elif version == 16:
                 should_backfill_targets = repair_stable_targets_migration(connection)
-            elif version == 43:
+            elif version == 44:
                 should_backfill_targets = (
                     repair_repository_identity_migration(connection)
                     or version not in applied
@@ -93,7 +93,7 @@ def apply_migrations(
                     connection.execute(statement)
                 if version == 38:
                     migrate_finding_workflow_results(connection)
-                elif version == 44:
+                elif version == 45:
                     from workbench_target_state import upgrade_linux_repository_generations
 
                     upgrade_linux_repository_generations(connection)
@@ -234,8 +234,9 @@ def move_pre_release_migration(
 
 def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:
     normalize_mirror_lineage_migrations(connection)
-    for legacy_version in (30, 31, 33, 40, 42):
-        move_pre_release_migration(connection, legacy_version, 43, "persist repository identities")
+    move_pre_release_migration(connection, 44, 45, "stabilize Linux repository generations")
+    for legacy_version in (30, 31, 33, 40, 42, 43):
+        move_pre_release_migration(connection, legacy_version, 44, "persist repository identities")
     move_pre_release_migration(connection, 33, 40, "index finding identity and comparison history")
 
     move_pre_release_migration(connection, 25, 26, "persist scan completion warnings")
@@ -490,7 +491,7 @@ def repair_repository_identity_migration(connection: sqlite3.Connection) -> bool
     if (
         "repository_identity" in columns
         and connection.execute(
-            "SELECT 1 FROM schema_migrations WHERE version = 43 AND name = ?",
+            "SELECT 1 FROM schema_migrations WHERE version = 44 AND name = ?",
             ("persist repository identities",),
         ).fetchone()
         is not None
@@ -502,7 +503,7 @@ def repair_repository_identity_migration(connection: sqlite3.Connection) -> bool
         from workbench_target_state import normalize_pre_release_repository_identities
 
         normalize_pre_release_repository_identities(connection)
-    migration_sql = next(sql for version, _, sql in MIGRATIONS if version == 43)
+    migration_sql = next(sql for version, _, sql in MIGRATIONS if version == 44)
     for statement in sql_statements(migration_sql):
         if statement.startswith(("ALTER TABLE security_targets", "ALTER TABLE scans")):
             add_migration_column(connection, statement)
