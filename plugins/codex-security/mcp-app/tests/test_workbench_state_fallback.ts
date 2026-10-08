@@ -457,6 +457,11 @@ async function testWorkbenchStateFallback() {
           inspected.result.structuredContent.receipts.length,
           receipts.length,
         );
+        assert.equal(
+          await pathExists(path.join(issueScanRoot, "workbench-state")),
+          false,
+          "Inspecting absent fallback history must not create its directory.",
+        );
         const recorded = await issueServer.request(3, "tools/call", {
           name: "record_codex_security_finding_issues",
           arguments: { ...issueInput, receipts: [issueReceipt] },
@@ -475,7 +480,7 @@ async function testWorkbenchStateFallback() {
           );
           assert.deepEqual(
             (await readJsonLines(invocationLog)).map((entry) => entry.stateDir),
-            [null, null, fallbackStateDir, fallbackStateDir],
+            [null, fallbackStateDir, null, fallbackStateDir, fallbackStateDir],
           );
         } else {
           assertToolError(recorded, /unable to open database file/);
@@ -493,6 +498,44 @@ async function testWorkbenchStateFallback() {
         );
       } finally {
         await issueServer.stop();
+      }
+      if (existingStore === "missing") {
+        const restarted = startServer(serverBundlePath, {
+          CODEX_HOME: issueHome,
+          CODEX_SECURITY_SCAN_ROOT: issueScanRoot,
+          CODEX_SECURITY_STATE_DIR: undefined,
+          PYTHON: realPython,
+        });
+        try {
+          await initialize(restarted, 1);
+          const inspected = await restarted.request(2, "tools/call", {
+            name: "get_codex_security_finding_issues",
+            arguments: issueInput,
+          });
+          assertNoError(inspected);
+          assert.deepEqual(
+            inspected.result.structuredContent.receipts.map(
+              (receipt: { issueIdentifier: string }) => receipt.issueIdentifier,
+            ),
+            ["APP-1"],
+            "Inspection after restart must recover the existing fallback receipts.",
+          );
+          const reused = await restarted.request(3, "tools/call", {
+            name: "record_codex_security_finding_issues",
+            arguments: {
+              ...issueInput,
+              receipts: [{ ...issueReceipt, operation: "reuse" }],
+            },
+          });
+          assertNoError(reused);
+          assert.equal(
+            await pathExists(path.join(issueState, "workbench.sqlite3")),
+            false,
+            "Recording after restart must keep using the recovered fallback store.",
+          );
+        } finally {
+          await restarted.stop();
+        }
       }
     }
 

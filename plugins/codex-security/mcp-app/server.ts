@@ -2463,13 +2463,27 @@ async function executeWorkbenchWithStateSelection(
         undefined,
         input,
       );
-      // A lookup without a database must not pin the store; existing history must.
+      // Recover a known fallback after restart before reporting missing history.
       if (
-        args[0] !== "finding-issues" ||
-        input === undefined ||
-        JSON.parse(input.toString()).action !== "inspect" ||
-        result.storeExists !== false
+        args[0] === "finding-issues" &&
+        input !== undefined &&
+        JSON.parse(input.toString()).action === "inspect" &&
+        result.storeExists === false
       ) {
+        if (CONFIGURED_SCAN_ROOT) {
+          const stateDir = join(await scanRoot(), "workbench-state");
+          const fallback = await executeWorkbench(
+            pythonCommand,
+            args,
+            stateDir,
+            input,
+          );
+          if (fallback.storeExists === true) {
+            fallbackWorkbenchStateDir = Promise.resolve(stateDir);
+            return fallback;
+          }
+        }
+      } else {
         persistentWorkbenchStateSucceeded = true;
       }
       return result;
