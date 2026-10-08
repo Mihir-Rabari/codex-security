@@ -396,6 +396,7 @@ export async function runCustomValidation(options: {
   }
   const reservedIds = new Set([
     ...findings.flatMap(findingCandidateIds),
+    ...(coverage.resolvedDeferred ?? []).map((item) => item.id),
     ...[
       ...coverage.deferred,
       ...coverage.surfaces,
