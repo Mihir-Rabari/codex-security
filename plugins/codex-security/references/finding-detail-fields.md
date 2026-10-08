@@ -7,7 +7,7 @@ For every reportable finding in `findings.json`, preserve the validated reasonin
 - Lead the title and `summary` with the user action and product impact.
 - Use `attackPath.summary` to briefly explain how to reproduce the issue.
 - Explain how the code causes that product behavior in `rootCause.summary`. Use plain language and avoid repetition.
-- Wrap RPC names, functions, types, fields, parameters, configuration keys, literal identifiers, and short expressions in single backticks. For example: `route/set`, `routeName`, `destination`, and `RouteTable::set_route()`.
+- Wrap RPC names, functions, types, fields, parameters, configuration keys, literal identifiers, and short expressions in single backticks. For example: `item/rename`, `itemId`, `title`, and `ItemStore.rename()`.
 - Keep code out of prose. Put source snippets in `codeEvidence[].code`, then reference them from the section that explains why the snippet matters. The workspace consolidates those referenced snippets under **Root cause** so the violated invariant and its source proof stay together.
 - Root cause must be a source-backed walkthrough, not a verdict paragraph. Start with the code where user-controlled data is declared, decoded, or read; follow each meaningful call, transformation, or state transition; then show the missing control, dangerous operation, and later consumer when it affects impact.
 - Give each code-evidence item a stable `id`, a concise `label`, an exact source location, the smallest useful snippet, a `role`, and an `explanation`. Supported roles include `user_input`, `entrypoint`, `propagation`, `root_control`, `sink`, `outcome`, and `expected_control`.
@@ -34,130 +34,138 @@ The workspace **Evidence** section is an artifact navigator, not another source-
 
 ## Structured Example
 
-This explicitly synthetic example describes an invented notification-routing service. All names, paths, line numbers, and snippets below are invented to illustrate the field structure and evidence ordering; they do not describe an assessed repository:
+This fictional item-service fixture illustrates the field shape. Its paths, identifiers, snippets and scenario were invented for this example; they are not taken from a scan target or finding. Use the shape with your own validated source evidence.
 
 ```json
 {
-  "summary": "The illustrative `route/set` method forwards caller-controlled `routeName` and `destination` to `RouteTable::set_route()`. Startup rejects the reserved `owner` identifier, but the runtime mutation path accepts it and replaces the destination used for owner notifications.",
+  "summary": "In this fictional item service, an authenticated caller can change another tenant's item title by supplying its item identifier. The write route never checks tenant ownership.",
   "codeEvidence": [
     {
-      "id": "rpc-input",
-      "label": "Caller-controlled route fields",
-      "path": "src/routes/request.rs",
-      "startLine": 6,
-      "endLine": 10,
-      "language": "rust",
+      "id": "request-fields",
+      "label": "Caller-controlled item fields",
+      "path": "example_service/items.py",
+      "startLine": 1,
+      "endLine": 2,
+      "language": "python",
       "role": "user_input",
-      "code": "#[serde(rename_all = \"camelCase\")]\npub struct RouteSetParams {\n    pub route_name: String,\n    pub destination: String,\n}",
-      "explanation": "`routeName` and `destination` are accepted as caller-controlled strings."
+      "code": "def rename_fields(body):\n    return body[\"itemId\"], body[\"title\"]",
+      "explanation": "The fictional request body selects both the item and its replacement title."
     },
     {
-      "id": "rpc-forward",
-      "label": "RPC forwards both fields without validation",
-      "path": "src/routes/handler.rs",
-      "startLine": 15,
-      "endLine": 15,
-      "language": "rust",
+      "id": "route-forward",
+      "label": "Write route omits tenant ownership",
+      "path": "example_service/items.py",
+      "startLine": 7,
+      "endLine": 9,
+      "language": "python",
       "role": "entrypoint",
-      "code": "self.routes.set_route(params.route_name, params.destination)?;",
-      "explanation": "The handler passes both values directly to `set_route()` and performs no reserved-ID check."
+      "code": "def rename_item(request, store):\n    item_id, title = rename_fields(request.body)\n    store.rename(item_id, title)",
+      "explanation": "The route passes the item identifier and title to the store without binding the authenticated tenant to that item."
     },
     {
-      "id": "startup-reserved-check",
-      "label": "Startup protects the reserved owner route",
-      "path": "src/routes/table.rs",
-      "startLine": 12,
+      "id": "store-write",
+      "label": "Store writes the selected item",
+      "path": "example_service/items.py",
+      "startLine": 13,
       "endLine": 14,
-      "language": "rust",
-      "role": "expected_control",
-      "code": "if route_name == \"owner\" {\n    return Err(\"route name is reserved\");\n}",
-      "explanation": "Initial route construction prevents custom routes from replacing the owner notification destination."
-    },
-    {
-      "id": "runtime-upsert",
-      "label": "Runtime upsert omits the reserved-ID check",
-      "path": "src/routes/table.rs",
-      "startLine": 25,
-      "endLine": 29,
-      "language": "rust",
+      "language": "python",
       "role": "root_control",
-      "code": "if route_name.is_empty() {\n    return Err(\"route name cannot be empty\");\n}\nself.routes.insert(route_name, destination);\nOk(())",
-      "explanation": "`set_route()` rejects only an empty ID before inserting into the shared map. Passing `owner` replaces the protected entry."
+      "code": "def rename(self, item_id, title):\n    self.items[item_id].title = title",
+      "explanation": "The store updates the selected object without an ownership check. A caller can select another tenant's fictional item."
     },
     {
-      "id": "default-lookup",
-      "label": "Owner notifications read the overwritten map entry",
-      "path": "src/routes/table.rs",
-      "startLine": 35,
-      "endLine": 37,
-      "language": "rust",
+      "id": "item-title",
+      "label": "Later reads observe the replacement",
+      "path": "example_service/items.py",
+      "startLine": 17,
+      "endLine": 18,
+      "language": "python",
       "role": "outcome",
-      "code": "pub fn owner_destination(&self) -> Option<&String> {\n    self.routes.get(\"owner\")\n}",
-      "explanation": "Notification delivery resolves the reserved `owner` ID through the mutable route map, so the replacement affects later notifications."
+      "code": "def item_title(self, item_id):\n    return self.items[item_id].title",
+      "explanation": "Later reads return the title written through the unchecked update."
+    },
+    {
+      "id": "read-owner-check",
+      "label": "Read route checks tenant ownership",
+      "path": "example_service/items.py",
+      "startLine": 21,
+      "endLine": 25,
+      "language": "python",
+      "role": "expected_control",
+      "code": "def read_item(request, store, item_id):\n    item = store.items[item_id]\n    if item.tenant_id != request.tenant_id:\n        raise PermissionError(\"Item belongs to another tenant\")\n    return item",
+      "explanation": "The fictional read route compares the stored owner with the authenticated tenant. The write route needs the same invariant."
     }
   ],
   "rootCause": {
-    "summary": "The violated invariant is that custom routes must not replace the owner notification destination. Startup enforces that invariant, but `RouteTable::set_route()` does not reuse the reserved-ID check and inserts a destination under the caller-supplied key.",
+    "summary": "The read route enforces tenant ownership, but the rename route forwards caller-selected fields to a store operation that writes the item without that check.",
     "evidenceRefs": [
-      "rpc-input",
-      "rpc-forward",
-      "runtime-upsert",
-      "default-lookup",
-      "startup-reserved-check"
+      "request-fields",
+      "route-forward",
+      "store-write",
+      "item-title",
+      "read-owner-check"
     ]
   },
   "validation": {
-    "method": "illustrative source trace",
-    "summary": "The invented snippets show that a `route/set` caller controls both inputs, the RPC forwards them unchanged, and runtime insertion accepts `owner`.",
-    "evidenceRefs": ["rpc-input", "rpc-forward", "runtime-upsert"],
+    "method": "static trace of the fictional fixture",
+    "summary": "The illustrated request controls the item identifier. Neither the route nor the store checks its owner before replacing the title.",
+    "evidenceRefs": [
+      "request-fields",
+      "route-forward",
+      "store-write"
+    ],
     "assertions": [
-      "The runtime path lacks the reserved-ID check present during startup.",
-      "Inserting `owner` replaces the existing `HashMap` entry."
+      "The write route does not compare the authenticated tenant with the item owner.",
+      "The store updates the caller-selected item."
     ],
     "limitations": [
-      "This is a synthetic teaching example; no running service or real repository was assessed."
+      "This example is invented to demonstrate the field shape; it is not a scan result."
     ]
   },
   "attackPath": {
-    "summary": "In the toy service, a client permitted to configure custom routes calls `route/set` with `routeName: \"owner\"` and a destination it controls. Later owner notifications resolve the replaced map entry.",
+    "summary": "A fictional authenticated caller submits item/rename with another tenant's item identifier and a replacement title.",
     "dataflow": {
-      "summary": "`route/set` parameters -> request handler -> `set_route()` -> shared route map -> `owner_destination()`",
-      "source": "caller-controlled `routeName` and `destination`",
-      "sink": "the shared route map",
-      "outcome": "owner notifications use the caller-controlled destination",
+      "summary": "request body -> rename_fields() -> rename_item() -> ItemStore.rename() -> item_title()",
+      "source": "caller-selected item identifier and title",
+      "sink": "the selected item's title",
+      "outcome": "the other tenant's item title changes",
       "evidenceRefs": [
-        "rpc-input",
-        "rpc-forward",
-        "runtime-upsert",
-        "default-lookup"
+        "request-fields",
+        "route-forward",
+        "store-write",
+        "item-title"
       ]
     },
     "reachability": {
-      "summary": "The toy service permits clients to configure custom routes, while reserving owner notifications for the service owner. The client must have access to the route configuration RPC.",
-      "attacker": "client permitted to configure custom routes",
-      "entrypoint": "`route/set` RPC",
-      "outcome": "future owner notifications are routed to the caller-controlled destination"
+      "summary": "The fictional caller needs access to the authenticated rename route and an item identifier belonging to another tenant.",
+      "attacker": "authenticated caller in the invented service",
+      "entrypoint": "item/rename",
+      "outcome": "unauthorized modification of a fictional item"
     },
-    "evidenceRefs": ["rpc-forward", "runtime-upsert", "default-lookup"],
+    "evidenceRefs": [
+      "route-forward",
+      "store-write",
+      "item-title"
+    ],
     "impact": {
       "level": "medium",
-      "why": "Private owner notifications can be delivered to the client-controlled destination."
+      "why": "The fictional failure permits cross-tenant modification of an item title."
     },
     "likelihood": {
       "level": "medium",
-      "why": "The toy service exposes route configuration to clients, but the attack requires access to that RPC."
+      "why": "The invented route accepts an item identifier from the caller."
     },
     "limitations": [
-      "The example demonstrates notification redirection, not code execution."
+      "No real service, repository, scan target or finding is represented."
     ]
   },
-  "remediation": "Reuse the startup reserved-ID check inside `RouteTable::set_route()` so the runtime mutation path rejects the reserved `owner` identifier.",
+  "remediation": "Check the selected item's tenant against the authenticated tenant before writing it; reuse the same ownership check on read and write routes.",
   "remediationTests": [
-    "Assert that `route/set` with `routeName: \"owner\"` returns an error.",
-    "Assert that `owner_destination()` still resolves the original destination after a rejected upsert."
+    "Reject a rename when the selected fictional item belongs to another tenant.",
+    "Allow an owner to rename its own fictional item."
   ],
   "preventiveControls": [
-    "Centralize reserved-identifier validation so every route mutation path shares one guard."
+    "Keep the tenant ownership invariant in a shared item-access operation."
   ]
 }
 ```
