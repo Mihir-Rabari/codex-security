@@ -347,12 +347,13 @@ export interface ValidationOptions extends Pick<
   | "auth"
   | "cyberAccessProgram"
   | "knowledgeBasePaths"
-  | "knowledgeBaseSnapshot"
   | "outputDir"
   | "safetyIdentifier"
   | "signal"
 > {
   repositoryPath: string;
+  /** @internal Reuse the scan's captured knowledge inputs during validation. */
+  knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   /** Finding text or a JSON-serializable object. Strings are never file paths. */
   finding: string | object;
   /** @internal Verify the recorded target for CLI post-scan validation. */
