@@ -68,8 +68,13 @@ try {
     await copyFile(process.execPath, executable);
   await chmod(executable, 0o700);
 
-  await runInstalledSdk(installedPlugin, executable);
-  await runDetachedPlugin(detachedPlugin, executable);
+  const workflows = await Promise.allSettled([
+    runInstalledSdk(installedPlugin, executable),
+    runDetachedPlugin(detachedPlugin, executable),
+  ]);
+  for (const workflow of workflows) {
+    if (workflow.status === "rejected") throw workflow.reason;
+  }
   console.log(
     "Validated installed SDK and detached plugin: real Deep processes, bound artifact tools, checkpoints, reducer acceptance, restart before finalization, and sealed results.",
   );
