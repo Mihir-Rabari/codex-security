@@ -361,3 +361,186 @@ for (const scenario of ["unlinked", "worker-owned", "supplied", "finding"]) {
     assert.deepEqual(coverage.deferred[0], pending);
   });
 }
+
+const { prepareCodexSecurityReviewItems } = await importSource(
+  new URL("../src/artifact-inventory.ts", import.meta.url).pathname,
+);
+const { recordCodexSecurityDiscoveryCandidates, listCodexSecurityCandidates } =
+  await importSource(
+    new URL("../src/artifact-discovery.ts", import.meta.url).pathname,
+  );
+for (const disposition of ["rejected", "not_applicable"]) {
+  for (const kind of [
+    "missing-pattern",
+    "missing-reason",
+    "structured-pattern",
+    "empty-reason",
+    "valid",
+    "generic-metadata",
+  ]) {
+    test(`budget error recovery preserves unresolved evidence: ${disposition}, ${kind}`, async (t) => {
+      const { root, scan } = await budgetFixture(t, false);
+      const env = {
+        ...process.env,
+        CODEX_SECURITY_STATE_DIR: path.join(root, "state"),
+      };
+      const workbench = async (args: string[]) =>
+        JSON.parse(
+          execFileSync(
+            python,
+            [path.join(pluginRoot, "scripts/workbench_db.py"), ...args],
+            { encoding: "utf8", env },
+          ),
+        );
+      const { createScanArtifactContext } = await importSource(
+        new URL("../src/artifact-context.ts", import.meta.url).pathname,
+      );
+      const context = await createScanArtifactContext(scan.scanId, workbench, {
+        requireRunning: true,
+        pluginRoot: path.resolve(
+          pluginRoot,
+          "../../sdk/typescript/_bundled_plugin",
+        ),
+        pythonCommand: python,
+      });
+      await prepareCodexSecurityReviewItems(context);
+      await recordCodexSecurityDiscoveryCandidates(
+        {
+          candidates: [
+            {
+              cwe_ids: [],
+              locations: [
+                {
+                  path: "app.py",
+                  start_line: 1,
+                  end_line: 1,
+                  role: "evidence",
+                },
+              ],
+              summary: "Synthetic source review",
+              evidence: "Synthetic original source evidence",
+            },
+          ],
+        },
+        context,
+      );
+      const rows = (await listCodexSecurityCandidates({}, context)).rows;
+      assert.equal(rows.length, 1);
+      const candidate = rows[0];
+      const pending = {
+        id: "new-proof",
+        candidateId: candidate.candidate_id,
+        candidate,
+        reason,
+      };
+      const draft = {
+        scanId: scan.scanId,
+        complete: true,
+        findings: [],
+        coverage: {
+          completeness: "partial",
+          surfaces: [],
+          explicitExclusions: [],
+          deferred: [pending],
+        },
+      };
+      await recordCodexSecurityScanDraftViaWorkbench(context, draft, workbench);
+      const exclusion: Record<string, unknown> = {
+        candidateId: candidate.candidate_id,
+        disposition,
+        pattern: "app.py",
+        reason: "Synthetic completed review",
+        legacy: { details: ["saved"] },
+      };
+      if (kind === "missing-pattern") delete exclusion.pattern;
+      if (kind === "missing-reason") delete exclusion.reason;
+      if (kind === "structured-pattern")
+        exclusion.pattern = { legacy: "app.py" };
+      if (kind === "empty-reason") exclusion.reason = "";
+      if (kind === "generic-metadata")
+        exclusion.candidateId = { legacy: "annotation" };
+      const malformed = !["valid", "generic-metadata"].includes(kind);
+      if (malformed)
+        await assert.rejects(
+          recordCodexSecurityScanDraftViaWorkbench(
+            context,
+            {
+              ...draft,
+              coverage: { ...draft.coverage, explicitExclusions: [exclusion] },
+            },
+            workbench,
+          ),
+          /pattern|reason/,
+        );
+      const file = path.join(scan.scanDir, "coverage.json");
+      const coverage = JSON.parse(await readFile(file, "utf8"));
+      coverage.explicitExclusions = [exclusion];
+      await writeFile(file, JSON.stringify(coverage));
+      const checkpoints = path.join(scan.scanDir, "checkpoints");
+      const before = new Map(
+        await Promise.all(
+          (await readdir(checkpoints)).map(
+            async (name) =>
+              [name, await readFile(path.join(checkpoints, name))] as const,
+          ),
+        ),
+      );
+      const ledger = path.join(
+        scan.scanDir,
+        "artifacts/02_discovery/candidate_ledger.jsonl",
+      );
+      const originalLedger = await readFile(ledger);
+      const completed = spawnSync(
+        python,
+        [
+          path.join(pluginRoot, "scripts/workbench_db.py"),
+          "complete-budget-exhausted-scan",
+          "--scan-id",
+          scan.scanId,
+          "--cost-json",
+          JSON.stringify({
+            model: "synthetic-model",
+            inputTokens: 1250,
+            cachedInputTokens: 200,
+            cacheWriteInputTokens: 0,
+            outputTokens: 30,
+            estimatedUsd: 0.00625,
+          }),
+          "--message",
+          "Synthetic budget stop",
+        ],
+        { encoding: "utf8", env },
+      );
+      assert.equal(completed.status, malformed ? 1 : 0, completed.stderr);
+      if (malformed) assert.match(completed.stderr, /pattern|reason/);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const saved = (await workbench(["get-scan", "--scan-id", scan.scanId]))
+          .scan;
+        assert.equal(saved.progress.status, malformed ? "failed" : "complete");
+        assert.equal(
+          saved.progress.candidates.unresolved,
+          kind === "valid" ? 0 : 1,
+        );
+        const result = JSON.parse(await readFile(file, "utf8"));
+        const retained = result.deferred.filter(
+          (row: any) => row.candidateId === candidate.candidate_id,
+        );
+        assert.equal(retained.length, kind === "valid" ? 0 : 1);
+        if (retained.length) assert.deepEqual(retained[0], pending);
+        const terminal = result.surfaces.filter(
+          (row: any) =>
+            row.candidateId === candidate.candidate_id &&
+            ["rejected", "not_applicable"].includes(row.disposition),
+        );
+        assert.equal(terminal.length, kind === "valid" ? 1 : 0);
+        if (kind === "generic-metadata")
+          assert.deepEqual(result.explicitExclusions, [exclusion]);
+        assert.deepEqual(await readFile(ledger), originalLedger);
+        for (const [name, bytes] of before)
+          assert.deepEqual(await readFile(path.join(checkpoints, name)), bytes);
+        if (malformed && attempt === 0)
+          await workbench(["recover-scan-results", "--scan-id", scan.scanId]);
+      }
+    });
+  }
+}

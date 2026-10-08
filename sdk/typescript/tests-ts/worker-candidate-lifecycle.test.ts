@@ -780,3 +780,185 @@ for (const decision of ["suppressed", "not_applicable"]) {
     });
   }
 }
+
+for (const publication of ["writer", "file-authored"]) {
+  for (const reference of [
+    "shared",
+    "cross-owner",
+    "other-owner",
+    "unlinked",
+  ]) {
+    test(`stopped Diff retains shared terminal evidence: ${publication}, ${reference}`, async () => {
+      const f = await fixture(true);
+      const inventory = await import(
+        pathToFileURL(join(sourcePlugin, "mcp-app/src/artifact-inventory.ts"))
+          .href
+      );
+      await inventory.prepareCodexSecurityReviewItems(f.parent);
+      await f.api.discovery.recordCodexSecurityDiscoveryCandidates(
+        {
+          candidates: [
+            {
+              cwe_ids: [],
+              locations: [
+                {
+                  path: "app.py",
+                  start_line: 1,
+                  end_line: 1,
+                  role: "evidence",
+                },
+              ],
+              summary: "Synthetic candidate requiring review",
+              evidence: "Synthetic shared source evidence",
+            },
+          ],
+        },
+        f.parent,
+      );
+      const candidateId = (
+        await f.api.discovery.listCodexSecurityCandidates({}, f.parent)
+      ).rows[0].candidate_id;
+      await f.api.validate.recordCodexSecurityCandidateValidations(f.parent, {
+        validations: [
+          {
+            candidateId,
+            validation: {
+              disposition: "suppressed",
+              method: "Source review",
+              confidence: "high",
+              confidence_rationale: "Synthetic trace",
+              rubric: "Synthetic review",
+              evidence: "Synthetic evidence",
+              counterevidence_or_proof_gap: "Saved decision evidence",
+              remaining_uncertainty: "",
+            },
+          },
+        ],
+      });
+      await f.publish(
+        f.draft(
+          {},
+          [
+            {
+              ...finding(),
+              provenance: { ...finding().provenance, candidateId },
+            },
+          ],
+          false,
+        ),
+      );
+      const candidate = (
+        await f.api.discovery.listCodexSecurityCandidates({}, f.parent)
+      ).rows[0];
+      const surface = {
+        id: "shared",
+        candidateId,
+        label: candidate.summary,
+        disposition: "rejected",
+        notes: candidate.validation.counterevidence_or_proof_gap,
+        receiptRefs: [],
+        candidate,
+      };
+      const pending = {
+        id: "pending-b",
+        candidateId: "candidate-b",
+        reason: "Independent shared review",
+        surfaceIds: reference === "unlinked" ? [] : ["shared"],
+        ...(["cross-owner", "other-owner"].includes(reference)
+          ? { sourceWorkerId: "other-worker" }
+          : {}),
+      };
+      const surfaces = [
+        surface,
+        ...(reference === "other-owner"
+          ? [
+              {
+                ...surface,
+                candidateId: "other-candidate",
+                sourceWorkerId: "other-worker",
+                notes: "Other owner's retained evidence",
+              },
+            ]
+          : []),
+      ];
+      const next = f.draft({ surfaces, deferred: [pending] }, [], false);
+      if (publication === "writer") await f.publish(next);
+      else {
+        const coverage = await f.json(join(f.parent.root, "coverage.json"));
+        const findings = await f.json(join(f.parent.root, "findings.json"));
+        Object.assign(coverage, next.coverage);
+        findings.findings = [];
+        await writeFile(
+          join(f.parent.root, "coverage.json"),
+          JSON.stringify(coverage),
+        );
+        await writeFile(
+          join(f.parent.root, "findings.json"),
+          JSON.stringify(findings),
+        );
+      }
+      await f.remember(f.parent.root);
+      const ledger = join(
+        f.parent.root,
+        "artifacts/02_discovery/candidate_ledger.jsonl",
+      );
+      const originalLedger = await readFile(ledger);
+      await f.workbench([
+        "fail-scan",
+        "--scan-id",
+        f.scanId,
+        "--message",
+        "Synthetic interrupted review",
+      ]);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const scan = (await f.workbench(["get-scan", "--scan-id", f.scanId]))
+          .scan;
+        const contract = await loadContract(f.parent.root, {
+          pluginRoot: PLUGIN_ROOT,
+          expectedScanId: f.scanId,
+        });
+        const result = new ScanResult({
+          ...contract,
+          scanDir: f.parent.root,
+          threadId: "synthetic-shared-review",
+          turnResult: {},
+        });
+        expect(result.unresolvedCandidateCount).toBe(1);
+        expect(scan.progress.candidates.unresolved).toBe(1);
+        const retained = (result.coverage.deferred as Row[]).find(
+          (row) => row["candidateId"] === "candidate-b",
+        )!;
+        expect(retained["reason"]).toBe(pending.reason);
+        expect(retained["sourceWorkerId"]).toEqual(pending.sourceWorkerId);
+        for (const id of retained["surfaceIds"]) {
+          const linked = (result.coverage.surfaces as Row[]).find(
+            (row) => row["id"] === id,
+          )!;
+          expect(linked).toBeDefined();
+          expect(linked["notes"]).toBe(
+            reference === "other-owner"
+              ? "Other owner's retained evidence"
+              : surface.notes,
+          );
+          expect(linked["candidate"]).toEqual(candidate);
+          if (reference === "other-owner")
+            expect(linked["sourceWorkerId"]).toBe("other-worker");
+        }
+        if (publication === "file-authored") {
+          expect(result.findings.findings.length).toBe(1);
+          const first = (result.coverage.surfaces as Row[]).find(
+            (row) => row["candidateId"] === candidateId,
+          );
+          expect(Boolean(first)).toBe(
+            reference === "shared" || reference === "cross-owner",
+          );
+          if (first) expect(first["disposition"]).toBe("reported");
+        }
+        await f.unchanged();
+        expect((await readFile(ledger)).equals(originalLedger)).toBe(true);
+        if (attempt === 0)
+          await f.workbench(["recover-scan-results", "--scan-id", f.scanId]);
+      }
+    });
+  }
+}

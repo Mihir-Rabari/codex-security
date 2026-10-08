@@ -208,8 +208,22 @@ def archive_candidate_payloads(destination: dict[str, Any], rows: list[dict[str,
 
 
 def project_resolved_candidate_rows(
-    rows: list[Any], field: str, owner: str | None, states: dict[Any, tuple[str, dict[str, Any]]]
+    rows: list[Any],
+    field: str,
+    owner: str | None,
+    states: dict[Any, tuple[str, dict[str, Any]]],
+    *,
+    pending: list[dict[str, Any]] | None = None,
 ) -> list[Any]:
+    surfaces = [row for row in rows if isinstance(row, dict)] if field == "surfaces" else []
+    referenced_surfaces = {
+        surface_reference_key(surface_id, item, surfaces)
+        for item in pending or []
+        for refs in [item.get("surfaceIds", [])]
+        if isinstance(refs, list)
+        for surface_id in refs
+        if isinstance(surface_id, str)
+    }
     retained = []
     for row in rows:
         state = states.get(coverage_candidate_key(row, owner)) if isinstance(row, dict) else None
@@ -220,6 +234,17 @@ def project_resolved_candidate_rows(
         else:
             destination = state[1]["provenance"] if state[0] == "reported" else state[1]
             archive_candidate_payloads(destination, [row])
+            if (
+                field == "surfaces"
+                and referenced_surfaces
+                and candidate_key(row.get("id"), row.get("sourceWorkerId")) in referenced_surfaces
+            ):
+                retained.append(
+                    {
+                        **row,
+                        "disposition": "needs_follow_up" if state[0] == "deferred" else state[0],
+                    }
+                )
     return retained
 
 
@@ -328,6 +353,14 @@ def _budget_candidate_deferred(candidate: dict[str, Any], surface_ids: list[str]
     }
 
 
+def valid_exclusion(item: dict[str, Any], schema: dict[str, Any]) -> bool:
+    try:
+        _validate_schema_node(item, schema, "coverage.explicitExclusions")
+    except ContractError:
+        return False
+    return True
+
+
 def preserve_budget_candidates(
     coverage: dict[str, Any],
     findings: list[dict[str, Any]],
@@ -388,14 +421,24 @@ def preserve_budget_candidates(
     def generated_surface(item: dict[str, Any]) -> bool:
         return id(item) in legacy_generated or _generated_budget_candidate_surface(item)
 
-    terminal_decisions = {
-        coverage_candidate_key(item): item["disposition"]
-        for field in ("surfaces", "explicitExclusions")
-        for item in coverage[field]
-        if isinstance(item, dict)
-        and item.get("disposition") in ("rejected", "not_applicable")
-        and (field != "surfaces" or not generated_surface(item))
-    }
+    terminal_decisions = {}
+    coverage_schema = _read_json(
+        Path(__file__).resolve().parent.parent / "schemas" / "coverage.schema.json"
+    )["properties"]
+    for field in ("surfaces", "explicitExclusions"):
+        for item in coverage[field]:
+            if (
+                not isinstance(item, dict)
+                or item.get("disposition") not in ("rejected", "not_applicable")
+                or (field == "surfaces" and generated_surface(item))
+            ):
+                continue
+            # Finalization still rejects malformed rows; they cannot close saved work first.
+            if field == "explicitExclusions" and not valid_exclusion(
+                item, coverage_schema[field]["items"]
+            ):
+                continue
+            terminal_decisions[coverage_candidate_key(item)] = item["disposition"]
     # A retry can read the recovered draft after the invalid receipt was removed.
     # Keep that reopening tied to the ledger decision it invalidated; a new phase
     # or an independent saved terminal decision can still resolve the candidate.

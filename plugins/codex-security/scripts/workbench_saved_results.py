@@ -68,6 +68,7 @@ from workbench_budget_candidates import (
     recover_candidate_receipts,
     retained_source_candidate_key,
     reuse_candidate_task_ids,
+    valid_exclusion,
 )
 from workbench_budget_candidates import (
     finding_content as _finding_content,
@@ -1081,11 +1082,22 @@ def _reconcile_stopped_diff_sources(
             else:
                 _append_finding_history(state[1], finding)
         result["findings"] = retained
+        pending = [
+            item
+            for decision in decisions
+            for item in decision["coverage"]["deferred"]
+            if states.get(coverage_candidate_key(item), (None, None))[0] == "deferred"
+        ]
+        pending.extend(
+            item
+            for item in _deferred_rows(result["coverage"])
+            if isinstance(item, dict) and coverage_candidate_key(item, owner) not in states
+        )
         for field in ("surfaces", "explicitExclusions", "deferred"):
             items = result["coverage"].get(field)
             if isinstance(items, list):
                 result["coverage"][field] = project_resolved_candidate_rows(
-                    items, field, owner, states
+                    items, field, owner, states, pending=pending
                 )
         return result
 
@@ -2015,6 +2027,10 @@ def merge_saved_results(
                     isinstance(item, dict)
                     and (key := coverage_candidate_key(item, owner)) is not None
                     and item.get("disposition") in {"rejected", "not_applicable"}
+                    and (
+                        field == "surfaces"
+                        or valid_exclusion(item, coverage_schema[field]["items"])
+                    )
                 ):
                     outcomes.append((relative, key[0], key[1], item["disposition"]))
     ordered_candidates.update(
