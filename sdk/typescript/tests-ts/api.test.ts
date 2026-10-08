@@ -3767,9 +3767,11 @@ describe("CodexSecurity orchestration", () => {
               { code, syscall: "open", path },
             );
           }
-          if (index !== -1) trace(`open.${index}.delegate.begin`);
+          const traceDelegate =
+            index !== -1 && (observedOpens.get(index) ?? 0) <= 4;
+          if (traceDelegate) trace(`open.${index}.delegate.begin`);
           const file = await open(...args);
-          if (index !== -1) trace(`open.${index}.delegate.end`);
+          if (traceDelegate) trace(`open.${index}.delegate.end`);
           return file;
         },
       );
@@ -3782,7 +3784,9 @@ describe("CodexSecurity orchestration", () => {
             async runStreamed() {
               trace("runStreamed.enter");
               await copyCompletedScan(root);
+              trace("artifacts.ready");
               async function* events(): AsyncGenerator<ThreadEvent> {
+                trace("thread-started.yield");
                 yield { type: "thread.started", thread_id: "thread-1" };
                 trace("first.wait");
                 await first;
@@ -3806,6 +3810,7 @@ describe("CodexSecurity orchestration", () => {
         onActivity: () => {},
         onWarning: (warning) => warnings.push(warning),
       });
+      trace("run.returned");
       try {
         expect(await operation).toMatchObject({
           threadId: "thread-1",
