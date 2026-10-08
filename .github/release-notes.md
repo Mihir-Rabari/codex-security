@@ -111,6 +111,7 @@
 - preserve manual line breaks ([#186](https://github.com/openai/codex-security/pull/186))
 - preserve saved diff snapshot provenance ([#1286](https://github.com/openai/codex-security/pull/1286))
 - cancel inherited pipes after the login process exits ([#1068](https://github.com/openai/codex-security/pull/1068))
+- bump napi-derive from 3.6.9 to 3.6.10 in /plugins/codex-security/native ([#1437](https://github.com/openai/codex-security/pull/1437))
 
 <!-- release-section: highlights:end -->
 
