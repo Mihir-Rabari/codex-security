@@ -32,7 +32,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { isIP } from "node:net";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import {
   basename,
   dirname,
@@ -69,6 +69,7 @@ import {
   environmentValue,
   formatEnvironmentVariableRemovalGuidance,
   initialCredentialsAvailable,
+  scanCodexHome,
   listRepositoryFindings,
   SCAN_AUTH_MODES,
   scanAuthentication,
@@ -89,6 +90,7 @@ import {
   readCodexHomeConfig,
 } from "./auth.js";
 import { loadContract, sha256Text, sameCheckedFileDevice } from "./contract.js";
+import type { DeepScanProgress } from "./deep-progress.js";
 import { isRecord as isJsonObject } from "./record.js";
 import { suggestOwnersInternal } from "./suggest-owners.js";
 import { parseImportedFindings } from "./findings-import.js";
@@ -188,6 +190,7 @@ import { importScan, type ImportScanOptions } from "./import-scan.js";
 import {
   bundledPluginRoot,
   acquireCodexSecurityCredentialHomeLock,
+  withCredentialHomeLock,
   requireOutputOutsideRepositories,
   canonicalizeModelSafePath,
   codexSecurityCredentialHome,
@@ -1164,9 +1167,6 @@ interface CliDependencies {
   createPolicySecurity?: (config: CodexSecurityConfig) => PolicySecurity;
   policyPrompt?: PolicyPrompt;
   environment: NodeJS.ProcessEnv;
-  prepareAuthenticationHome?: (
-    environment: NodeJS.ProcessEnv,
-  ) => Promise<string>;
   hasStoredChatGPTSignIn?: (signal?: AbortSignal) => Promise<boolean>;
   scanAuthenticationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
   scanInput?: ConstructorParameters<typeof ScanDashboard>[1]["input"];
@@ -1238,7 +1238,6 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
   createSecurity: (config) =>
     new CodexSecurity(config, undefined, { surface: "cli" }),
   environment: process.env,
-  prepareAuthenticationHome: prepareCodexSecurityCredentialHome,
   checkForUpdate: (signal) =>
     checkForUpdate({ environment: process.env, signal }),
   hasStoredChatGPTSignIn: async (signal) => {
@@ -4674,6 +4673,7 @@ export async function main(
                     try {
                       return await security.run(recipe.repository!, {
                         ...pickScanSettings(recipe),
+                        knowledgeBaseSnapshot: prompts.knowledgeBaseSnapshot,
                         resumeScanId: scan.scanId,
                         outputDir: scanDir,
                         safetyIdentifier: recipe.safetyIdentifier,
@@ -5523,22 +5523,18 @@ export async function main(
         { args: { action: "status" }, description: "Check authentication." },
       ],
       async run({ args, options }) {
-        const credentialHome =
-          dependencies.prepareAuthenticationHome !== undefined
-            ? await dependencies.prepareAuthenticationHome(
-                dependencies.environment,
-              )
-            : await prepareCodexSecurityCredentialHome(
-                dependencies.environment,
-              );
-        if (args.action === "status" && existsSync(credentialHome)) {
-          const ambientHome =
-            environmentValue(dependencies.environment, "CODEX_HOME") ??
-            join(homedir(), ".codex");
-          await initialCredentialsAvailable(
-            dependencies.environment,
-            ambientHome,
-            credentialHome,
+        const credentialHome = await prepareCodexSecurityCredentialHome(
+          dependencies.environment,
+        );
+        const authentication = scanAuthentication(dependencies.environment);
+        if (args.action === "status" && authentication.method !== "api_key") {
+          const ambientHome = scanCodexHome(dependencies.environment);
+          await withCredentialHomeLock(credentialHome, () =>
+            initialCredentialsAvailable(
+              dependencies.environment,
+              ambientHome,
+              credentialHome,
+            ),
           );
         }
         const authenticationEnvironment = {
@@ -5556,15 +5552,10 @@ export async function main(
           undefined,
           authenticationEnvironment,
         );
-        if (
-          args.action === undefined &&
-          exitCode === 0 &&
-          dependencies.prepareAuthenticationHome !== undefined
-        ) {
+        if (args.action === undefined && exitCode === 0) {
           await setCodexSecurityCredentialLogout(credentialHome, false);
         }
         if (args.action === "status") {
-          const authentication = scanAuthentication(dependencies.environment);
           if (
             authentication.method === "api_key" &&
             (exitCode === 0 || exitCode === 1)
@@ -5578,7 +5569,6 @@ export async function main(
             );
           }
         } else if (exitCode === 0 && !options.withApiKey) {
-          const authentication = scanAuthentication(dependencies.environment);
           if (authentication.method === "api_key") {
             const configuredApiKeyVariables = Object.entries(
               dependencies.environment,
@@ -5610,29 +5600,23 @@ export async function main(
       destructive: true,
       mcp: false,
       async run() {
-        const credentialHome =
-          dependencies.prepareAuthenticationHome !== undefined
-            ? await dependencies.prepareAuthenticationHome(
-                dependencies.environment,
-              )
-            : await prepareCodexSecurityCredentialHome(
-                dependencies.environment,
-              );
+        const credentialHome = await prepareCodexSecurityCredentialHome(
+          dependencies.environment,
+        );
         const authenticationEnvironment = {
           ...dependencies.environment,
           CODEX_HOME: credentialHome,
         };
-        exitCode = await dependencies.runCodex(
-          ["logout"],
-          undefined,
-          authenticationEnvironment,
-        );
-        if (
-          exitCode === 0 &&
-          dependencies.prepareAuthenticationHome !== undefined
-        ) {
-          await setCodexSecurityCredentialLogout(credentialHome, true);
-        }
+        await withCredentialHomeLock(credentialHome, async () => {
+          exitCode = await dependencies.runCodex(
+            ["logout"],
+            undefined,
+            authenticationEnvironment,
+          );
+          if (exitCode === 0) {
+            await setCodexSecurityCredentialLogout(credentialHome, true);
+          }
+        });
       },
     })
     .command("serve", {
@@ -5808,11 +5792,7 @@ export async function main(
             ? await resolveDeepScanConfig(
                 resolved.options,
                 join(
-                  expandHome(
-                    environmentValue(dependencies.environment, "CODEX_HOME") ??
-                      join(homedir(), ".codex"),
-                    dependencies.environment,
-                  ),
+                  scanCodexHome(dependencies.environment),
                   "codex-security",
                   "config.toml",
                 ),
@@ -9417,6 +9397,8 @@ async function executeScan(
   let lastProgressUpdate = "";
   let workerCapacity: { planned: number; started: number } | null = null;
   let fileProgress: ScanProgress | null = null;
+  let deepProgress: DeepScanProgress | null = null;
+  let deepConsolidating = false;
   let runningCost: Readonly<ScanCost> | null = null;
   let maxCostUsd = arguments_.maxCostUsd;
   const showCost = arguments_.showCost === true || maxCostUsd !== undefined;
@@ -9634,7 +9616,11 @@ async function executeScan(
           `Workers: ${workerCapacity.started}/${workerCapacity.planned}`,
         );
       }
-      if (fileProgress !== null && fileProgress.filesTotal > 0) {
+      if (deepProgress !== null) {
+        details.push(
+          `Reviews: ${deepProgress.completed} completed, ${deepProgress.active} active, cap ${deepProgress.maximum}`,
+        );
+      } else if (fileProgress !== null && fileProgress.filesTotal > 0) {
         details.push(
           `Files: ${fileProgress.filesCompleted.toLocaleString("en-US")}/${fileProgress.filesTotal.toLocaleString("en-US")}`,
         );
@@ -9862,6 +9848,30 @@ async function executeScan(
         progress.stage(
           `Scan phase: ${phase}${update.filesTotal === 0 ? "" : ` (${update.filesCompleted.toLocaleString("en-US")}/${update.filesTotal.toLocaleString("en-US")} files)`}.`,
         );
+        progress.startTimer(runningMessage());
+      },
+      onDeepProgress: (update) => {
+        if (
+          deepProgress === null &&
+          update.completed === 0 &&
+          update.active === 0 &&
+          !update.consolidating
+        )
+          return;
+        deepProgress = update;
+        deepConsolidating =
+          update.consolidating === true ||
+          (deepConsolidating && update.active === 0);
+        phase = deepConsolidating ? "consolidating results" : "discovery";
+        const message = `Scan phase: ${phase} | Reviews: ${update.completed} completed, ${update.active} active, cap ${update.maximum}`;
+        if (dashboard !== null) {
+          dashboard.setStage(phase);
+          dashboard.note(message);
+          return;
+        }
+        if (progress === null) return;
+        progress.stopTimer();
+        progress.stage(message);
         progress.startTimer(runningMessage());
       },
       onWorkerStatus: (status) => {
