@@ -1318,20 +1318,42 @@ def budget_exhausted_draft(
             "deferred": [],
         }
 
-    valid_findings = [
-        recovered
-        for finding in findings["findings"]
-        for recovered in saved_results.recoverable_findings(
-            scan_dir, scan["id"], {"targetId": scan["target_id"]}, [finding]
+    recovered_findings = [
+        (
+            finding,
+            saved_results.recoverable_findings(
+                scan_dir, scan["id"], {"targetId": scan["target_id"]}, [finding]
+            ),
         )
+        for finding in findings["findings"]
     ]
+    valid_findings = [finding for _, rows in recovered_findings for finding in rows]
     receipt_warnings: list[str] = []
+    receipt_reopened: set[tuple[str | None, str]] = set()
     recovered = saved_results.recover_candidate_receipts(
-        {"coverage": coverage}, scan_dir, receipt_warnings
+        {"coverage": coverage}, scan_dir, receipt_warnings, reopened=receipt_reopened
     )
     assert recovered is not None
     coverage = recovered["coverage"]
-    saved_results.preserve_budget_candidates(coverage, valid_findings, candidates)
+    dismissed = saved_results.preserve_budget_candidates(
+        coverage, valid_findings, candidates, receipt_reopened=receipt_reopened
+    )
+    retained_findings = []
+    for original, rows in recovered_findings:
+        keys = {saved_results.finding_candidate_key(finding) for finding in rows}
+        if not keys or not keys <= dismissed:
+            # Keep invalid records for the existing finalizer's recovery and warnings.
+            retained_findings.append(original)
+            continue
+        for field in ("surfaces", "explicitExclusions"):
+            for row in coverage[field]:
+                if (
+                    isinstance(row, dict)
+                    and row.get("disposition") in ("rejected", "not_applicable")
+                    and saved_results.coverage_candidate_key(row) in keys
+                ):
+                    saved_results.archive_candidate_payloads(row, [{"finding": original}])
+    findings["findings"] = retained_findings
     if not any(
         isinstance(item, dict)
         and isinstance(reason := item.get("reason"), str)

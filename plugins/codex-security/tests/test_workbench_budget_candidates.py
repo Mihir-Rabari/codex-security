@@ -1322,3 +1322,158 @@ def test_budget_candidate_allocation_preserves_generic_closure(
     ]
     assert len(pending) == 1
     assert pending[0]["id"] != closure["id"]
+
+
+@pytest.mark.parametrize("modern", [False, True])
+@pytest.mark.parametrize("decision", ["suppressed", "not_applicable"])
+@pytest.mark.parametrize("receipt", ["missing", "valid", "replacement", "reported"])
+def test_public_budget_completion_keeps_receipt_reopened_work(
+    tmp_path: Path, modern: bool, decision: str, receipt: str
+) -> None:
+    state, target, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    candidate["validation"] = {
+        "disposition": decision,
+        "counterevidence_or_proof_gap": "Saved terminal decision.",
+    }
+    ledger.write_text(json.dumps(candidate) + "\n")
+    original_ledger = ledger.read_bytes()
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    findings_path = scan_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    if receipt == "reported":
+        findings["findings"][0]["provenance"]["candidateId"] = candidate["candidate_id"]
+    else:
+        findings["findings"] = []
+    findings_path.write_text(json.dumps(findings))
+    path = scan_dir / "artifacts/proof/decision.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("Synthetic original decision evidence.\n")
+    refs = ["artifacts/proof/decision.txt"]
+    if receipt != "valid":
+        path.unlink()
+    if receipt == "replacement":
+        path = path.with_name("replacement.txt")
+        path.write_text("Synthetic independently replaced decision evidence.\n")
+        refs = ["artifacts/proof/replacement.txt"]
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage.update(
+        completeness="complete",
+        surfaces=[
+            {
+                "id": "candidate-review",
+                "candidateId": candidate["candidate_id"],
+                "label": "Saved candidate decision",
+                "disposition": "rejected" if decision == "suppressed" else "not_applicable",
+                "receiptRefs": refs,
+            }
+        ],
+        deferred=[],
+    )
+    coverage_path.write_text(json.dumps(coverage))
+    if modern:
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE deep_scan_runs SET manifest_path = ? WHERE scan_id = ?",
+                (str(scan_dir / "scan-manifest.json"), scan_id),
+            )
+    completed = complete_budget_scan(state, scan_id)["scan"]
+    saved = json.loads(coverage_path.read_text())
+    active = json.loads(findings_path.read_text())["findings"]
+    assert len(active) == int(receipt == "reported")
+    assert completed["progress"]["candidates"]["unresolved"] == int(receipt == "missing")
+    if receipt == "missing":
+        assert any(row.get("candidateId") == candidate["candidate_id"] for row in saved["deferred"])
+        assert saved["surfaces"][0]["disposition"] == "needs_follow_up"
+        assert saved["surfaces"][0]["receiptRefs"] == []
+        assert saved["completeness"] == "partial"
+    elif receipt != "reported":
+        assert saved["surfaces"][0]["disposition"] == (
+            "rejected" if decision == "suppressed" else "not_applicable"
+        )
+        assert path.read_text().startswith("Synthetic")
+    assert ledger.read_bytes() == original_ledger
+
+
+@pytest.mark.parametrize("modern", [False, True])
+@pytest.mark.parametrize("decision", ["suppressed", "not_applicable"])
+@pytest.mark.parametrize("newer_phase", [False, True])
+def test_public_budget_dismissal_archives_reopened_findings(
+    tmp_path: Path, modern: bool, decision: str, newer_phase: bool
+) -> None:
+    state, target, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
+    candidate = json.loads(ledger.read_text())
+    candidate["validation"] = {
+        "disposition": decision,
+        "counterevidence_or_proof_gap": "Saved ledger decision.",
+    }
+    previous = copy.deepcopy(candidate)
+    if newer_phase:
+        candidate["validation"]["counterevidence_or_proof_gap"] = (
+            "New independent terminal evidence."
+        )
+    ledger.write_text(json.dumps(candidate) + "\n")
+    original_ledger = ledger.read_bytes()
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    findings_path = scan_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    old = findings["findings"][0]
+    old["provenance"].update(candidateId=candidate["candidate_id"], candidateReopened=True)
+    findings_path.write_text(json.dumps(findings))
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage.update(
+        completeness="partial",
+        surfaces=[
+            {
+                "id": "candidate-review",
+                "candidateId": candidate["candidate_id"],
+                "label": "Current proof gap",
+                "disposition": "needs_follow_up",
+                "receiptRefs": [],
+            }
+        ],
+        deferred=[
+            {
+                "id": "candidate-gap",
+                "candidateId": candidate["candidate_id"],
+                "candidate": previous,
+                "reason": "Reopened proof gap.",
+                "surfaceIds": ["candidate-review"],
+            }
+        ],
+    )
+    coverage_path.write_text(json.dumps(coverage))
+    if modern:
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE deep_scan_runs SET manifest_path = ? WHERE scan_id = ?",
+                (str(scan_dir / "scan-manifest.json"), scan_id),
+            )
+    completed = complete_budget_scan(state, scan_id)["scan"]
+    saved = json.loads(coverage_path.read_text())
+    active = json.loads(findings_path.read_text())["findings"]
+    assert len(active) == int(modern)
+    assert completed["progress"]["candidates"]["unresolved"] == int(modern)
+    if modern:
+        assert saved["surfaces"][0]["disposition"] == "needs_follow_up"
+    else:
+        terminal = next(
+            row for row in saved["surfaces"] if row.get("candidateId") == candidate["candidate_id"]
+        )
+        assert terminal["disposition"] == (
+            "rejected" if decision == "suppressed" else "not_applicable"
+        )
+        history = terminal.get("previousFindings", [])
+        assert any(
+            row.get("summary") == old["summary"]
+            and row.get("locations") == old["locations"]
+            and row.get("provenance", {}).get("candidateId") == candidate["candidate_id"]
+            for row in history
+        )
+    assert ledger.read_bytes() == original_ledger

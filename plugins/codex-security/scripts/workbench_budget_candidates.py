@@ -329,8 +329,12 @@ def _budget_candidate_deferred(candidate: dict[str, Any], surface_ids: list[str]
 
 
 def preserve_budget_candidates(
-    coverage: dict[str, Any], findings: list[dict[str, Any]], candidates: list[dict[str, Any]]
-) -> None:
+    coverage: dict[str, Any],
+    findings: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+    *,
+    receipt_reopened: set[tuple[str | None, str]] | None = None,
+) -> set[tuple[str | None, str]]:
     """Reconcile ledger candidates with the saved cost-limit draft's decisions."""
     findings_by_candidate = {
         key
@@ -397,7 +401,11 @@ def preserve_budget_candidates(
             "reported"
             if (None, candidate["candidate_id"]) in findings_by_candidate
             else terminal_decisions.get((None, candidate["candidate_id"]))
-            or diff_candidate_disposition(candidate)
+            or (
+                diff_candidate_disposition(candidate)
+                if (None, candidate["candidate_id"]) not in (receipt_reopened or ())
+                else None
+            )
             or "needs_follow_up"
         )
         for candidate in candidates
@@ -586,6 +594,12 @@ def preserve_budget_candidates(
                 **_budget_candidate_deferred(candidate, [surface["id"] for surface in surfaces]),
             }
         )
+
+    return {
+        key
+        for key, disposition in dispositions.items()
+        if disposition in ("rejected", "not_applicable")
+    }
 
 
 def _diff_candidate_phase_snapshot(candidate: dict[str, Any]) -> dict[str, Any]:
