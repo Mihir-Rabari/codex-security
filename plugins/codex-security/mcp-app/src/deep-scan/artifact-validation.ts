@@ -318,7 +318,8 @@ export function projectDiscoveryCoverage(
   worker: { id: string; attempt?: number },
   artifactPrefix: string,
   archived: { attempt: number; coverage: ScanDraftInput["coverage"] }[] = [],
-  originalCoverage: ScanDraftInput["coverage"] = coverage,
+  originalCoverage:
+    ScanDraftInput["coverage"] | ScanDraftInput["coverage"][] = coverage,
   receiptDigests?: ReadonlyMap<string, string>,
 ): ScanDraftInput["coverage"] {
   const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;
@@ -367,8 +368,9 @@ export function projectDiscoveryCoverage(
       matchedHistoricalSurfaces.set(historical, matched);
       original ??= historical;
     }
-    const currentSources =
-      (originalCoverage[field] as unknown[] | undefined) ?? [];
+    const currentSources = (
+      Array.isArray(originalCoverage) ? originalCoverage : [originalCoverage]
+    ).flatMap((source) => (source[field] as unknown[] | undefined) ?? []);
     const savedSource =
       currentSources.find(
         (saved) =>

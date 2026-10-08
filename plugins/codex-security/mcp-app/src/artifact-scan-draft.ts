@@ -547,7 +547,11 @@ export async function preserveScanDraft(
   input: ScanDraftInput,
   saveCheckpoint = true,
   archivedSources?: SavedScanDraft[],
-): Promise<{ input: ScanDraftInput; previousDigest: string }> {
+): Promise<{
+  input: ScanDraftInput;
+  previousDigest: string;
+  originalCurrentCoverage: ScanDraftInput["coverage"][];
+}> {
   const currentCheckpointName = scanDraftCheckpointName(input);
   const requiresClosureValidation = resolvedDeferred(input.coverage).length > 0;
   if (saveCheckpoint && !requiresClosureValidation)
@@ -576,6 +580,9 @@ export async function preserveScanDraft(
     (left, right) =>
       right.modifiedMs - left.modifiedMs ||
       Number(right.head ?? false) - Number(left.head ?? false),
+  );
+  const originalCurrentCoverage = current.map(({ input }) =>
+    structuredClone(input.coverage),
   );
   const savedSources = [...current, ...archived];
   const sources = savedSources.map(({ input }) => input);
@@ -843,7 +850,11 @@ export async function preserveScanDraft(
     );
   else normalizeSavedScanCoverage([result]);
   if (saveCheckpoint) await saveScanDraftCheckpoint(context, result);
-  return { input: result, previousDigest: previousState.digest };
+  return {
+    input: result,
+    previousDigest: previousState.digest,
+    originalCurrentCoverage,
+  };
 }
 
 function completedCandidateIds(

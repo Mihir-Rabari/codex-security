@@ -1244,3 +1244,106 @@ test("different unreadable receipt cannot establish an earlier surface origin", 
     await rm(f.root, { recursive: true, force: true });
   }
 });
+
+for (const mode of ["explicit", "normalized"]) {
+  for (const interrupted of [false, true]) {
+    test(`selected current checkpoint retains original IDs ${mode} interrupted=${interrupted}`, async (t) => {
+      const f = await fixture();
+      try {
+        const worker = {
+          root: f.output,
+          repoRoot: f.root,
+          scanId,
+          layout: "worker",
+        };
+        await recordCodexSecurityWorkerScanDraft(
+          worker,
+          workerDraft([], { complete: true }),
+        );
+        await archiveDirectory(
+          f.output,
+          path.join(f.workerRoot, "attempts", "attempt-01"),
+        );
+        await recordCodexSecurityWorkerScanDraft(
+          worker,
+          workerDraft([], { complete: true }),
+        );
+        const prior = await readFile(f.resultPath);
+        const submitted = workerDraft([], {
+          complete: true,
+          coverage: {
+            completeness: "partial",
+            surfaces: [
+              {
+                ...(mode === "explicit" ? { id: "current-review" } : {}),
+                label: "Synthetic current-checkpoint evidence",
+                disposition: "needs_follow_up",
+                receiptRefs: [],
+              },
+            ],
+            explicitExclusions: [],
+            deferred: [
+              {
+                ...(mode === "explicit"
+                  ? { id: "current-gap", surfaceIds: ["current-review"] }
+                  : {}),
+                reason: "Review this synthetic current-checkpoint proof.",
+              },
+            ],
+          },
+        });
+        if (interrupted) {
+          const rename = fs.rename;
+          t.mock.method(
+            fs,
+            "rename",
+            async (...args: Parameters<typeof rename>) => {
+              if (args[1] === f.resultPath)
+                throw Object.assign(
+                  new Error("Synthetic result publication interruption."),
+                  { code: "EIO" },
+                );
+              return rename(...args);
+            },
+          );
+          await assert.rejects(
+            recordCodexSecurityWorkerScanDraft(worker, submitted),
+            /Synthetic result publication interruption/,
+          );
+          t.mock.restoreAll();
+          assert.deepEqual(await readFile(f.resultPath), prior);
+        } else await recordCodexSecurityWorkerScanDraft(worker, submitted);
+        const head = JSON.parse(
+          await readFile(path.join(f.output, "checkpoint-head.json"), "utf8"),
+        );
+        const checkpointPath = path.join(
+          f.output,
+          "checkpoints",
+          head.checkpoint,
+        );
+        const acceptedBytes = await readFile(checkpointPath);
+        const accepted = JSON.parse(acceptedBytes.toString());
+        assert.equal(accepted.complete, true);
+        const coverage = (await readDeepReductionSources(f.context))
+          .discoveries[0].coverage;
+        assert.equal(coverage.surfaces.length, 1);
+        assert.equal(coverage.deferred.length, 1);
+        assert.equal(
+          coverage.surfaces[0].provenance.sourceId,
+          accepted.coverage.surfaces[0].id,
+        );
+        assert.equal(
+          coverage.deferred[0].provenance.sourceId,
+          accepted.coverage.deferred[0].id,
+        );
+        assert.equal(coverage.surfaces[0].provenance.attempt, 3);
+        assert.equal(coverage.deferred[0].provenance.attempt, 3);
+        assert.deepEqual(await readFile(checkpointPath), acceptedBytes);
+        if (interrupted) assert.deepEqual(await readFile(f.resultPath), prior);
+      } finally {
+        t.mock.restoreAll();
+        await rm(f.root, { recursive: true, force: true });
+      }
+    });
+  }
+}
