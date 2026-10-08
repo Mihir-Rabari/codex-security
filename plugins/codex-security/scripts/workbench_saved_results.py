@@ -1749,7 +1749,7 @@ def merge_saved_results(
                 if not isinstance(item, dict) or not isinstance(item.get("candidateId"), str):
                     continue
                 retained = retained_coverage_record(field, item, worker, relative)
-                if retained is None:
+                if retained is None and draft.get("complete") is not False:
                     retained = project_missing_record(
                         field, item, index, worker, draft["coverage"], relative
                     )

@@ -1373,15 +1373,26 @@ def test_restored_optional_worker_id_matches_accepted_projection(
     assert all(path.read_bytes() == value for path, value in originals.items())
 
 
-@pytest.mark.parametrize("worker_state", ["pending", "accepted-pending", "host-projection"])
+@pytest.mark.parametrize(
+    "projected_alias", [False, True], ids=["raw-candidate", "projected-candidate"]
+)
+@pytest.mark.parametrize(
+    "worker_state", ["pending", "canceled", "accepted-pending", "host-projection"]
+)
 @pytest.mark.parametrize("retry", [False, True], ids=["direct", "failed-retry"])
 def test_parent_extensions_do_not_resolve_unreviewed_child_candidate(
-    workbench_api, workbench_db, publication_scan, monkeypatch, worker_state, retry
+    workbench_api, workbench_db, publication_scan, monkeypatch, worker_state, retry, projected_alias
 ):
     scan = publication_scan()
     accepted_worker = worker_state == "host-projection"
     result = add_worker(
-        workbench_db, scan, status="running" if worker_state == "pending" else "succeeded"
+        workbench_db,
+        scan,
+        status="running"
+        if worker_state == "pending"
+        else "canceled"
+        if worker_state == "canceled"
+        else "succeeded",
     )
     worker = result.parent.name
     pending = {
@@ -1414,6 +1425,7 @@ def test_parent_extensions_do_not_resolve_unreviewed_child_candidate(
     projected = {
         **rejected,
         "id": f"{worker}-attempt-1-surface-1",
+        "candidateId": f"{worker}-attempt-1-candidate-1" if projected_alias else "candidate-1",
         "provenance": {
             "workerId": worker,
             "attempt": 1,
@@ -1433,13 +1445,14 @@ def test_parent_extensions_do_not_resolve_unreviewed_child_candidate(
     coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
     assert projected in coverage["surfaces"]
     assert review in coverage["reviews"]
+    accepted_review = accepted_worker or (projected_alias and worker_state == "accepted-pending")
     assert (
         any(row.get("reason") == task["reason"] for row in coverage["deferred"])
-        is not accepted_worker
+        is not accepted_review
     )
     assert (
         any(row.get("disposition") == "needs_follow_up" for row in coverage["surfaces"])
-        is not accepted_worker
+        is not accepted_review
     )
     assert all(path.read_bytes() == value for path, value in originals.items())
 
