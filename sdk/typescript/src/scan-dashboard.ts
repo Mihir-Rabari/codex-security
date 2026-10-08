@@ -1,4 +1,6 @@
 import { basename, isAbsolute } from "node:path";
+import { emitKeypressEvents } from "node:readline";
+import { PassThrough } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { isRecord } from "./record.js";
@@ -150,12 +152,34 @@ export class ScanDashboard {
   #noteCount = 0;
   #observingStreamErrors = false;
   readonly #onStreamError = (): void => {};
+  #keyInput: PassThrough | null = null;
+  #inputKeys: string[] | null = null;
   readonly #onInput = (chunk: string | Uint8Array): void => {
-    const input =
-      typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    const keys: string[] = [];
+    this.#inputKeys = keys;
+    try {
+      this.#keyInput?.write(chunk);
+    } finally {
+      this.#inputKeys = null;
+    }
+    this.#handleKeys(keys);
+  };
+
+  #setKeyInput(input: PassThrough | null): void {
+    this.#keyInput?.removeAllListeners();
+    this.#keyInput?.destroy();
+    this.#keyInput = input;
+    if (input === null) return;
+    emitKeypressEvents(input);
+    input.on("keypress", (_text: unknown, key: { sequence: string }) => {
+      if (this.#inputKeys !== null) this.#inputKeys.push(key.sequence);
+      else this.#handleKeys([key.sequence]);
+    });
+  }
+
+  #handleKeys(keys: string[]): void {
     if (this.#budget !== null) {
-      for (const key of input.match(/\u001B\[[0-?]*[ -/]*[@-~]|[\s\S]/gu) ??
-        []) {
+      for (const key of keys) {
         const budget = this.#budget;
         if (budget === null) break;
         if (key === "\u0003" || key === "\u0004") {
@@ -183,17 +207,18 @@ export class ScanDashboard {
           budget.input += key;
         }
       }
+      // Discard the rest of this input event, including an unfinished key sequence.
+      if (this.#budget === null && this.#keyInput !== null)
+        this.#setKeyInput(new PassThrough());
       this.#refresh();
       return;
     }
     if (this.#options.presentation === "components") {
-      this.#componentInput(input);
+      this.#componentInput(keys);
       return;
     }
     let lines = 0;
-    for (const key of input.match(
-      /[\u0003\u0004\u0015dam1-9]|\u001B\[(?:[ABHF]|[1456]~)/gu,
-    ) ?? []) {
+    for (const key of keys) {
       if (key === "\u0003") {
         if (lines !== 0) this.scroll(lines);
         this.#options.onInterrupt?.();
@@ -227,7 +252,9 @@ export class ScanDashboard {
         lines += this.#activityRows();
       } else if (key === "\u001B[6~") {
         lines -= this.#activityRows();
-      } else {
+      } else if (
+        ["\u001B[H", "\u001B[F", "\u001B[1~", "\u001B[4~"].includes(key)
+      ) {
         if (lines !== 0) this.scroll(lines);
         this.scroll(
           key === "\u001B[H" || key === "\u001B[1~"
@@ -238,7 +265,7 @@ export class ScanDashboard {
       }
     }
     if (lines !== 0) this.scroll(lines);
-  };
+  }
 
   public constructor(stream: DashboardStream, options: ScanDashboardOptions) {
     this.#stream = stream;
@@ -260,6 +287,7 @@ export class ScanDashboard {
       }
       this.#stream.write(`${ENTER_ALTERNATE_SCREEN}${HIDE_CURSOR}`);
       if (input?.isTTY === true) {
+        this.#setKeyInput(new PassThrough());
         input.setRawMode?.(true);
         input.resume?.();
         input.on("data", this.#onInput);
@@ -289,6 +317,7 @@ export class ScanDashboard {
     try {
       if (input?.isTTY === true) {
         input.off("data", this.#onInput);
+        this.#setKeyInput(null);
         input.setRawMode?.(this.#inputWasRaw);
         input.pause?.();
       }
@@ -660,15 +689,16 @@ export class ScanDashboard {
     );
   }
 
-  #componentInput(input: string): void {
-    for (const key of input.match(
-      /\u001B\[(?:[ABHF]|[1456]~)|[\u0003\u0004\u0015\r\n\u001Bbdam1-9]/gu,
-    ) ?? []) {
+  #componentInput(keys: string[]): void {
+    for (const key of keys) {
       if (key === "\u0003") {
         this.#options.onInterrupt?.();
       } else if (this.#showComponent) {
         if (key === "\u001B" || key === "b") this.#showComponent = false;
-        else this.#components[this.#selectedComponent]!.dashboard.#onInput(key);
+        else
+          this.#components[this.#selectedComponent]!.dashboard.#handleKeys([
+            key,
+          ]);
       } else if (
         (key === "\r" || key === "\n") &&
         this.#components.length > 0

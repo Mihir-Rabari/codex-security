@@ -120,7 +120,10 @@ describe("live scan dashboard", () => {
       cost,
       signal: controller.signal,
     });
-    input.emit("data", "-30\r");
+    for (const byte of Buffer.from("é🙂"))
+      input.emit("data", Uint8Array.of(byte));
+    expect(stderr.text()).toContain("é🙂_");
+    input.emit("data", "\u0015-30\r");
     expect(stderr.text()).toContain("Enter a finite total above");
     input.emit("data", "\u00150\r");
     input.emit("data", "\u0015Infinity\r");
@@ -146,6 +149,107 @@ describe("live scan dashboard", () => {
     dashboard.stop();
     expect(input.isRaw).toBe(false);
     expect(input.listenerCount("data")).toBe(0);
+  });
+
+  test.each([
+    "\u001B[A",
+    "\u001B[B",
+    "\u001B[H",
+    "\u001B[F",
+    "\u001B[1~",
+    "\u001B[4~",
+    "\u001B[5~",
+    "\u001B[6~",
+  ])(
+    "keeps the budget prompt open across every split of %j",
+    async (sequence) => {
+      const input = new DashboardTestInput();
+      const dashboard = createDashboard(capture(true).stream, {
+        input,
+        maxCostUsd: 20,
+      });
+      dashboard.start();
+      try {
+        for (let split = 0; split <= sequence.length; split++) {
+          const answer = dashboard.requestBudgetIncrease({
+            maxCostUsd: 20,
+            cost: {
+              ...fakeResult([], "complete", {
+                input_tokens: 100,
+                output_tokens: 1,
+              }).cost!,
+              estimatedUsd: 16,
+            },
+            signal: new AbortController().signal,
+          });
+          input.emit("data", sequence.slice(0, split));
+          input.emit("data", sequence.slice(split) + "30\r");
+          await expect(answer).resolves.toBe(30);
+        }
+      } finally {
+        dashboard.stop();
+      }
+    },
+  );
+
+  test("discards pasted keys and partial sequences after a budget answer", async () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const onInterrupt = mock();
+    const dashboard = createDashboard(
+      { ...stderr.stream, rows: 14 },
+      { input, onInterrupt, maxCostUsd: 20 },
+    );
+    dashboard.start();
+    try {
+      for (let index = 0; index < 20; index++)
+        dashboard.note(`Activity ${index}`);
+      const answer = dashboard.requestBudgetIncrease({
+        maxCostUsd: 20,
+        cost: {
+          ...fakeResult([], "complete", { input_tokens: 100, output_tokens: 1 })
+            .cost!,
+          estimatedUsd: 16,
+        },
+        signal: new AbortController().signal,
+      });
+      input.emit("data", "30\rd\u0003\u001B[");
+      await expect(answer).resolves.toBe(30);
+      input.emit("data", "A");
+      expect(lastFrame(stderr)).not.toContain("above live");
+      expect(lastFrame(stderr)).not.toContain("DETAILS");
+      expect(onInterrupt).not.toHaveBeenCalled();
+      input.emit("data", "d");
+      expect(lastFrame(stderr)).toContain("DETAILS");
+    } finally {
+      dashboard.stop();
+    }
+  });
+
+  test("owns only its input listeners and drops pending Escape on stop and restart", async () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    input.isRaw = true;
+    const observer = mock();
+    input.on("data", observer);
+    input.on("keypress", observer);
+    const onInterrupt = mock();
+    const dashboard = createDashboard(stderr.stream, { input, onInterrupt });
+    dashboard.start();
+    input.emit("data", "\u001B");
+    dashboard.stop();
+    const stopped = stderr.text();
+    await Bun.sleep(600);
+    expect(stderr.text()).toBe(stopped);
+    expect(onInterrupt).not.toHaveBeenCalled();
+    expect(input.isRaw).toBe(true);
+    expect(input.listenerCount("data")).toBe(1);
+    expect(input.listenerCount("keypress")).toBe(1);
+    dashboard.start();
+    input.emit("data", "d");
+    expect(lastFrame(stderr)).toContain("DETAILS");
+    dashboard.stop();
+    expect(observer).toHaveBeenCalledTimes(2);
   });
 
   test.each(["enter", "escape", "abort", "stop", "interrupt", "eof"] as const)(
@@ -191,7 +295,7 @@ describe("live scan dashboard", () => {
     },
   );
 
-  test("shows concurrent components and keeps their activity and costs separate", () => {
+  test("shows concurrent components and keeps their activity and costs separate", async () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
     let timers = 0;
@@ -299,7 +403,9 @@ describe("live scan dashboard", () => {
     expect(frame()).toContain("API session detail");
     expect(frame()).not.toContain("Web session detail");
     input.emit("data", "\u001B");
-    input.emit("data", "\u001B[B\r");
+    await Bun.sleep(600); // Allow readline's default standalone-Escape disambiguation.
+    input.emit("data", "\u001B[");
+    input.emit("data", "B\r");
     expect(frame()).toContain("Web only activity");
     expect(frame()).not.toContain("API only activity");
     dashboard.updateComponent({
@@ -825,7 +931,8 @@ describe("live scan dashboard", () => {
       frame.indexOf("finding-20"),
     );
 
-    input.emit("data", "\u001B[A");
+    input.emit("data", "\u001B");
+    input.emit("data", "[A");
     frame = lastFrame(stderr);
     expect(frame).toContain("finding-15");
     expect(frame).not.toContain("finding-20");
@@ -837,12 +944,14 @@ describe("live scan dashboard", () => {
     expect(frame).not.toContain("finding-20");
     expect(frame).toContain("1 line above live");
 
-    input.emit("data", "\u001B[H");
+    input.emit("data", "\u001B[");
+    input.emit("data", "H");
     frame = lastFrame(stderr);
     expect(frame).toContain("finding-1");
     expect(frame).not.toContain("finding-20");
 
-    input.emit("data", "\u001B[F");
+    input.emit("data", "\u001B[");
+    input.emit("data", "F");
     frame = lastFrame(stderr);
     expect(frame).toContain("finding-20");
     expect(frame).not.toContain("events · live");
@@ -929,9 +1038,11 @@ describe("live scan dashboard", () => {
     expect(frame).toContain("finding-20");
     expect(frame).not.toContain("above live");
 
-    input.emit("data", "\u001B[5~");
+    input.emit("data", "\u001B[5");
+    input.emit("data", "~");
     expect(lastFrame(stderr)).toContain("7 lines above live");
-    input.emit("data", "\u001B[6~");
+    input.emit("data", "\u001B");
+    input.emit("data", "[6~");
     expect(lastFrame(stderr)).not.toContain("above live");
     dashboard.stop();
   });
