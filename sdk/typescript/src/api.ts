@@ -66,6 +66,7 @@ import {
   resolveCodexProfile,
   resolveCommandAuthConfig,
   resolveAgentPaths,
+  resolveSkillPaths,
   resolveOtelPaths,
   scanApprovalPolicy,
   scanCyberAccessConfig,
@@ -5043,6 +5044,7 @@ function selectedWorkerRuntimeConfig(
     typeof selectedProvider === "string" ? selectedProvider : undefined;
   const resolved = resolveCodexProfile(config);
   resolveAgentPaths(resolved, workingDirectory);
+  resolveSkillPaths(resolved, workingDirectory);
   resolveOtelPaths(resolved, workingDirectory);
   const providers = resolved["model_providers"];
   const providerEnvironmentNames = isRecord(providers)

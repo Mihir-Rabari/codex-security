@@ -232,6 +232,27 @@ test.each([
           ...agents,
           reviewer: { ...agents.reviewer, config_file: agentFile },
         };
+        const explicitFileSkills = selection === "file default key";
+        const skills = {
+          config: [
+            { path: `skill-${index}/SKILL.md`, enabled: index === 0 },
+            { path: join(scan, "absolute-skill", "SKILL.md"), enabled: true },
+            { path: "~/synthetic-skill/SKILL.md", enabled: false },
+          ],
+        };
+        const resolvedSkills = {
+          config: skills.config.map((skill, skillIndex) =>
+            skillIndex === 0
+              ? {
+                  ...skill,
+                  path: join(
+                    fileProfile && !explicitFileSkills ? sourceHome : scan,
+                    skill.path,
+                  ),
+                }
+              : skill,
+          ),
+        };
         const providerKey =
           selection === "file default key"
             ? "OPENROUTER_API_KEY"
@@ -292,6 +313,7 @@ test.each([
               },
               features: featureOverrides,
               agents,
+              skills,
               web_search: webSearch,
             }),
           );
@@ -301,12 +323,16 @@ test.each([
             {
               pluginPath: PLUGIN_ROOT,
               codexOverrides: fileProfile
-                ? { profile: `review-${index}` }
+                ? {
+                    profile: `review-${index}`,
+                    ...(explicitFileSkills ? { skills } : {}),
+                  }
                 : {
                     model_provider: "openrouter",
                     web_search: selection === "root" ? webSearch : "live",
                     features: selection === "root" ? featureOverrides : {},
                     agents: selection === "root" ? agents : {},
+                    skills: selection === "root" ? skills : {},
                     ...(selection === "profile only"
                       ? {}
                       : {
@@ -333,6 +359,7 @@ test.each([
                             selected: {
                               features: featureOverrides,
                               agents,
+                              skills,
                               web_search: webSearch,
                               ...(selection === "null profile"
                                 ? {
@@ -416,12 +443,21 @@ test.each([
                       environment: workerEnvironment,
                       features: featureOverrides,
                       agents: resolvedAgents,
+                      skills: resolvedSkills,
                       web_search: webSearch,
                     });
                     if (fileProfile)
                       expect(options.config!["model"]).toBe("gpt-5.6-terra");
                     expect(options.config!["agents"]).toEqual(
                       fileProfile ? resolvedAgents : agents,
+                    );
+                    expect(options.config!["skills"]).toEqual(
+                      fileProfile && !explicitFileSkills
+                        ? resolvedSkills
+                        : skills,
+                    );
+                    expect(skills.config[0]!.path).toBe(
+                      `skill-${index}/SKILL.md`,
                     );
                     expect(options.config!["web_search"]).toBe(webSearch);
                     expect(options.config!["features"]).toMatchObject(

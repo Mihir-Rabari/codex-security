@@ -292,16 +292,7 @@ export async function readCodexFileProfile(
       }
     }
     resolveAgentPaths(nativeProfile, profileHome);
-    const skills = nativeProfile["skills"];
-    if (isObject(skills) && Array.isArray(skills["config"])) {
-      for (const skill of skills["config"]) {
-        if (!isObject(skill)) continue;
-        const path = skill["path"];
-        if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
-          skill["path"] = resolve(profileHome, path);
-        }
-      }
-    }
+    resolveSkillPaths(nativeProfile, profileHome);
     resolveOtelPaths(nativeProfile, profileHome);
     normalizeLegacyWindowsSandboxOverride(nativeProfile);
   }
@@ -317,6 +308,20 @@ export function resolveAgentPaths(config: JsonObject, directory: string): void {
     const path = agent["config_file"];
     if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
       agent["config_file"] = resolve(directory, path);
+    }
+  }
+}
+
+/** @internal Preserve skill file origins when a native config changes directories. */
+export function resolveSkillPaths(config: JsonObject, directory: string): void {
+  const skills = config["skills"];
+  if (isObject(skills) && Array.isArray(skills["config"])) {
+    for (const skill of skills["config"]) {
+      if (!isObject(skill)) continue;
+      const path = skill["path"];
+      if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
+        skill["path"] = resolve(directory, path);
+      }
     }
   }
 }

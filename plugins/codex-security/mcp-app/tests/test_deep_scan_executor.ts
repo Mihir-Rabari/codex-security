@@ -1497,6 +1497,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                         ),
                         enabled: index % 2 === 0,
                       },
+                      { path: "~/synthetic-skill/SKILL.md", enabled: false },
                     ],
                   },
             otel:
@@ -1665,6 +1666,19 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
       for (const kind of ["discovery", "dedup"] as const) {
         for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
           const subagents = kind === "discovery" ? 3 : 0;
+          const workerDirectories = settings.map((_, index) =>
+            path.join(
+              fixture.root,
+              `worker-${index}`,
+              kind,
+              resumeThreadId ?? "fresh",
+            ),
+          );
+          await Promise.all(
+            workerDirectories.map((directory) =>
+              mkdir(directory, { recursive: true }),
+            ),
+          );
           launches.length = 0;
           await Promise.all(
             executors.map((executor, index) => {
@@ -1680,7 +1694,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH =
                 workerConfigurations[index].deepPath;
               return executor.run(
-                workerRequest(promptPath, fixture.root, {
+                workerRequest(promptPath, workerDirectories[index], {
                   kind,
                   subagents,
                   resumeThreadId,
@@ -1794,6 +1808,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               web_search: workerConfigurations[index].webSearch,
               "windows.sandbox": workerConfigurations[index].windowsSandbox,
             });
+            assertFlagPair(invocation.argv, "--cd", workerDirectories[index]);
             const selectedRuntime = parseToml(
               invocation.argv
                 .filter((arg: string) => /^(?:skills|otel)=/.test(arg))
@@ -1943,6 +1958,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               preflight.providerKey,
               selectedProvider.environment?.SYNTHETIC_GATEWAY_KEY,
             );
+            assert.equal(
+              preflight.cwd,
+              workerDirectories[workerConfigurations.indexOf(selectedProvider)],
+            );
             assert.deepEqual(
               preflight.providerHeaders,
               Object.fromEntries(
@@ -1953,6 +1972,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             assertConfigOverrides(preflight.argv, {
               openai_base_url: selectedProvider.endpoint,
+              "skills.config.0.path": selectedProvider.skills?.config[0]?.path,
+              "skills.config.0.enabled":
+                selectedProvider.skills?.config[0]?.enabled,
+              "skills.config.1.path": selectedProvider.skills?.config[1]?.path,
+              "skills.config.1.enabled":
+                selectedProvider.skills?.config[1]?.enabled,
               model_instructions_file: selectedProvider.instructionsFile,
               model_verbosity: selectedProvider.verbosity,
               model_context_window: selectedProvider.modelContextWindow,
