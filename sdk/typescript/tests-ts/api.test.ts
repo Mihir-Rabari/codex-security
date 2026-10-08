@@ -3736,7 +3736,7 @@ describe("CodexSecurity orchestration", () => {
         onWarning: (warning) => warnings.push(warning),
       });
       try {
-        await expect(operation).resolves.toMatchObject({
+        expect(await operation).toMatchObject({
           threadId: "thread-1",
         });
         await Promise.resolve();
