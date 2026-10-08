@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
 import uuid
@@ -83,6 +84,37 @@ def test_inspection_of_portable_source_does_not_create_state(tmp_path: Path) -> 
     assert result["receipts"] == []
     assert result["storeExists"] is False
     assert not state.exists()
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or getattr(os, "geteuid", lambda: 0)() == 0,
+    reason="requires Unix file permissions",
+)
+@pytest.mark.parametrize("action", ["inspect", "record"])
+def test_inaccessible_state_preserves_sqlite_open_error(tmp_path: Path, action: str) -> None:
+    scan_dir, validated = source(tmp_path)
+    state = tmp_path / "state"
+    state.mkdir(mode=0o000)
+    try:
+        with pytest.raises(PermissionError):
+            (state / "workbench.sqlite3").stat()
+        result = run_workbench(
+            state,
+            "finding-issues",
+            input_text=json.dumps(
+                {
+                    "action": action,
+                    "scanDirectory": str(scan_dir),
+                    "destination": LINEAR,
+                    **({"receipts": [receipt_for(validated)]} if action == "record" else {}),
+                }
+            ),
+            check=False,
+        )
+        assert result["returncode"] != 0
+        assert "sqlite3.OperationalError: unable to open database file" in result["stderr"]
+    finally:
+        state.chmod(0o700)
 
 
 @pytest.mark.parametrize("project", [None, "project-example"])

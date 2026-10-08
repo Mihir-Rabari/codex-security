@@ -448,6 +448,19 @@ async function testWorkbenchStateFallback() {
       issueIdentifier: "APP-1",
       operation: "create",
     };
+    const seedIssueStore = (
+      state: string,
+      receipts: (typeof issueReceipt)[],
+    ) => {
+      execFileSync(
+        realPython,
+        [path.join(pluginRoot, "scripts", "workbench_db.py"), "finding-issues"],
+        {
+          env: { ...process.env, CODEX_SECURITY_STATE_DIR: state },
+          input: JSON.stringify({ ...issueInput, action: "record", receipts }),
+        },
+      );
+    };
     for (const existingStore of [
       "missing",
       "empty",
@@ -472,23 +485,11 @@ async function testWorkbenchStateFallback() {
           issueState,
           path.join(issueScanRoot, "workbench-state"),
         ]) {
-          execFileSync(
-            realPython,
-            [
-              path.join(pluginRoot, "scripts", "workbench_db.py"),
-              "finding-issues",
-            ],
-            {
-              env: { ...process.env, CODEX_SECURITY_STATE_DIR: state },
-              input: JSON.stringify({
-                ...issueInput,
-                action: "record",
-                receipts:
-                  state === issueState
-                    ? receipts
-                    : [{ ...issueReceipt, issueIdentifier: "FALLBACK-1" }],
-              }),
-            },
+          seedIssueStore(
+            state,
+            state === issueState
+              ? receipts
+              : [{ ...issueReceipt, issueIdentifier: "FALLBACK-1" }],
           );
         }
       }
@@ -639,6 +640,84 @@ async function testWorkbenchStateFallback() {
           } finally {
             await restarted.stop();
           }
+        }
+      }
+    }
+
+    if (process.getuid?.() !== 0) {
+      for (const firstOperation of ["inspect", "record"]) {
+        const receiptHome = path.join(
+          fixtureRoot,
+          `inaccessible-receipt-${firstOperation}-home`,
+        );
+        const receiptState = path.join(
+          receiptHome,
+          "state",
+          "plugins",
+          "codex-security",
+        );
+        const receiptScanRoot = path.join(
+          fixtureRoot,
+          `inaccessible-receipt-${firstOperation}-scans`,
+        );
+        seedIssueStore(receiptState, []);
+        seedIssueStore(path.join(receiptScanRoot, "workbench-state"), [
+          issueReceipt,
+        ]);
+        await chmod(receiptState, 0o000);
+        const receiptServer = startServer(serverBundlePath, {
+          CODEX_HOME: receiptHome,
+          CODEX_SECURITY_SCAN_ROOT: receiptScanRoot,
+          CODEX_SECURITY_STATE_DIR: undefined,
+          PYTHON: realPython,
+        });
+        try {
+          await initialize(receiptServer, 1);
+          const recordReuse = (id: number) =>
+            receiptServer.request(id, "tools/call", {
+              name: "record_codex_security_finding_issues",
+              arguments: {
+                ...issueInput,
+                receipts: [{ ...issueReceipt, operation: "reuse" }],
+              },
+            });
+          if (firstOperation === "record") assertNoError(await recordReuse(2));
+          const inspected = await receiptServer.request(3, "tools/call", {
+            name: "get_codex_security_finding_issues",
+            arguments: issueInput,
+          });
+          assertNoError(inspected);
+          assert.equal(
+            inspected.result.structuredContent.receipts.some(
+              (receipt: { issueIdentifier: string; operation: string }) =>
+                receipt.issueIdentifier === "APP-1" &&
+                receipt.operation === "create",
+            ),
+            true,
+            `${firstOperation}-first access must retain existing fallback receipts.`,
+          );
+          assertNoError(await recordReuse(4));
+          const saved = await receiptServer.request(5, "tools/call", {
+            name: "get_codex_security_finding_issues",
+            arguments: issueInput,
+          });
+          assertNoError(saved);
+          assert.deepEqual(
+            saved.result.structuredContent.receipts.map(
+              (receipt: { operation: string }) => receipt.operation,
+            ),
+            ["create", "reuse"],
+          );
+          assert.equal(
+            receiptServer
+              .stderrEvents()
+              .filter((event) => event.event === "state_fallback_pinned")
+              .length,
+            1,
+          );
+        } finally {
+          await receiptServer.stop();
+          await chmod(receiptState, 0o700);
         }
       }
     }

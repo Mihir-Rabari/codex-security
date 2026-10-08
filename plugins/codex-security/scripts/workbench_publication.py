@@ -206,15 +206,19 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
         "receipts": [],
     }
     path = db.database_path()
-    if not path.is_file():
-        if require_history:
-            raise SystemExit(
-                "Cannot publish findings because the local Codex Security scan-history database "
-                "does not exist. Use the state directory where this scan was completed."
-            )
-        if payload["action"] == "inspect":
+    if payload["action"] == "inspect" or require_history:
+        try:
+            path.stat()
+        except FileNotFoundError:
+            if require_history:
+                raise SystemExit(
+                    "Cannot publish findings because the local Codex Security scan-history database "
+                    "does not exist. Use the state directory where this scan was completed."
+                ) from None
             result["storeExists"] = False
             return result
+        except PermissionError:
+            pass  # Let SQLite report the open failure used by the host's state fallback.
     if payload["action"] == "inspect":
         database_uri = f"file:{quote(str(path), safe='')}?mode=ro"
         connection = sqlite3.connect(database_uri, uri=True, timeout=5)
