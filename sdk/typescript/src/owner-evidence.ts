@@ -13,6 +13,11 @@ import {
   validatedGitEnvironment,
 } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
+import {
+  codeownersForPath,
+  parseCodeowners,
+  type CodeownerIdentity,
+} from "./codeowners.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -23,11 +28,13 @@ export interface OwnerIdentity {
 
 export interface OwnerEvidence {
   id: string;
-  kind: "source" | "blame" | "history";
+  kind: "source" | "blame" | "history" | "codeowners";
   path: string;
   commit: string;
   startLine?: number;
   endLine?: number;
+  rule?: string;
+  matchedPath?: string;
   content: string;
   identityIndex: number | null;
 }
@@ -36,6 +43,7 @@ export interface OwnerContext {
   identities: OwnerIdentity[];
   evidence: OwnerEvidence[];
   limitations: string[];
+  codeowner: CodeownerIdentity | null;
 }
 
 /** Read committed objects, so dirty files and source symlinks are never followed. */
@@ -152,6 +160,7 @@ export async function collectOwnerEvidence(
   const context: OwnerContext = {
     identities: [],
     evidence: [],
+    codeowner: null,
     limitations: [
       "Git authors are not verified tracker accounts or proof of current employment.",
     ],
@@ -178,6 +187,49 @@ export async function collectOwnerEvidence(
   const add = (item: Omit<OwnerEvidence, "id">) => {
     context.evidence.push({ id: `e${context.evidence.length + 1}`, ...item });
   };
+  const codeownersPath = [
+    ".github/CODEOWNERS",
+    "CODEOWNERS",
+    "docs/CODEOWNERS",
+  ].find((path) => files.has(path));
+  if (codeownersPath !== undefined) {
+    const source = await git(
+      "cat-file",
+      "blob",
+      `${revision}:${codeownersPath}`,
+    );
+    // GitHub requires CODEOWNERS to be under 3 MB.
+    if (Buffer.byteLength(source) >= 3_000_000) {
+      context.limitations.push(
+        "CODEOWNERS meets or exceeds GitHub's 3 MB file-size limit and was ignored.",
+      );
+    } else {
+      const rules = parseCodeowners(source);
+      for (const { path } of finding.locations) {
+        if (!files.has(path)) continue;
+        const rule = codeownersForPath(rules, path);
+        if (rule === undefined) continue;
+        const owner = rule.owners[0];
+        if (owner === undefined) continue;
+        context.codeowner = owner;
+        context.limitations.push(
+          "CODEOWNERS identities are declarations; their existence and repository access are not verified.",
+        );
+        add({
+          kind: "codeowners",
+          path: codeownersPath,
+          commit: revision,
+          startLine: rule.line,
+          endLine: rule.line,
+          rule: rule.rule,
+          matchedPath: path,
+          content: rule.rule,
+          identityIndex: null,
+        });
+        return context;
+      }
+    }
+  }
   for (const path of new Set(finding.locations.map(({ path }) => path))) {
     if (!files.has(path)) {
       context.limitations.push(`Not a regular file at HEAD: ${path}`);

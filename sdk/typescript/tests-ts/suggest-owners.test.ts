@@ -479,3 +479,171 @@ test("propagates cancellation", async () => {
     }),
   ).rejects.toThrow("Canceled by caller");
 });
+
+test("prioritizes the first committed declared owner without a model call", async () => {
+  const repo = await repository();
+  await mkdir(join(repo.path, ".github"));
+  await mkdir(join(repo.path, "docs"));
+  await writeFile(
+    join(repo.path, ".github", "CODEOWNERS"),
+    "* @default\n/handler.ts @example/maintainers @reviewer alex@example.test\n",
+  );
+  await writeFile(join(repo.path, "CODEOWNERS"), "* @wrong-root\n");
+  await writeFile(join(repo.path, "docs", "CODEOWNERS"), "* @wrong-docs\n");
+  await repo.git("add", ".");
+  await repo.git("commit", "-qm", "Declare owners");
+  const revision = await repo.git("rev-parse", "HEAD");
+  await writeFile(join(repo.path, ".github", "CODEOWNERS"), "* @uncommitted\n");
+  const { codex, calls } = fakeCodex(() => {
+    throw new Error("A declared owner does not require a model.");
+  });
+  const report = await suggestOwners(repo.path, [finding], { codex });
+  expect(calls).toHaveLength(0);
+  expect(report.revision).toBe(revision);
+  expect(report.results[0]).toMatchObject({
+    findingId: finding.findingId,
+    status: "identified",
+    owner: {
+      kind: "group",
+      provider: "github",
+      handle: "example/maintainers",
+    },
+    evidence: [
+      {
+        kind: "codeowners",
+        path: ".github/CODEOWNERS",
+        commit: revision,
+        startLine: 2,
+        endLine: 2,
+        rule: "/handler.ts @example/maintainers @reviewer alex@example.test",
+        matchedPath: "handler.ts",
+      },
+    ],
+  });
+  expect(report.results[0]!.evidence).toHaveLength(1);
+});
+
+test.each([
+  ["@reviewer", { kind: "person", provider: "github", handle: "reviewer" }],
+  ["alex@example.test", { kind: "person", email: "alex@example.test" }],
+] as const)("returns the declared person %s", async (declaration, owner) => {
+  const repo = await repository();
+  await writeFile(join(repo.path, "CODEOWNERS"), `* ${declaration}\n`);
+  await repo.git("add", ".");
+  await repo.git("commit", "-qm", "Declare owner");
+  const { codex, calls } = fakeCodex();
+  const report = await suggestOwners(repo.path, [finding], { codex });
+  expect(report.results[0]!.owner).toEqual(owner);
+  expect(report.results[0]!.status).toBe("identified");
+  expect(calls).toHaveLength(0);
+});
+
+test.each(["CODEOWNERS", "docs/CODEOWNERS"])(
+  "uses %s when no higher-priority ownership file exists",
+  async (path) => {
+    const repo = await repository();
+    await mkdir(join(repo.path, "docs"));
+    await writeFile(join(repo.path, path), "* @example/maintainers\n");
+    await repo.git("add", ".");
+    await repo.git("commit", "-qm", "Declare owner");
+    const report = await suggestOwners(repo.path, [finding]);
+    expect(report.results[0]!.evidence[0]!.path).toBe(path);
+    expect(report.results[0]!.owner).toEqual({
+      kind: "group",
+      provider: "github",
+      handle: "example/maintainers",
+    });
+  },
+);
+
+test.each([
+  "/elsewhere/ @example/maintainers\n",
+  "* @default\n/handler.ts\n",
+  "/handler.ts invalid-owner\n",
+])(
+  "falls back to Git when CODEOWNERS has no applicable owner: %s",
+  async (source) => {
+    const repo = await repository();
+    await mkdir(join(repo.path, ".github"));
+    await writeFile(join(repo.path, ".github", "CODEOWNERS"), source);
+    await writeFile(join(repo.path, "CODEOWNERS"), "* @wrong-root\n");
+    await repo.git("add", ".");
+    await repo.git("commit", "-qm", "Declare owners");
+    const { codex, calls } = fakeCodex();
+    const report = await suggestOwners(repo.path, [finding], { codex });
+    expect(calls).toHaveLength(1);
+    expect(report.results[0]!.status).toBe("identified");
+    expect(report.results[0]!.owner).toEqual({
+      name: "Alex Example",
+      email: "alex@example.test",
+    });
+    expect(
+      report.results[0]!.evidence.every(({ kind }) => kind !== "codeowners"),
+    ).toBe(true);
+  },
+);
+
+test("selects the first affected path with a declared owner", async () => {
+  const repo = await repository();
+  await writeFile(join(repo.path, "other.ts"), "export const other = 1;\n");
+  await writeFile(
+    join(repo.path, "CODEOWNERS"),
+    "/handler.ts @handler-owner\n/other.ts @other-owner\n",
+  );
+  await repo.git("add", ".");
+  await repo.git("commit", "-qm", "Declare owners");
+  const report = await suggestOwners(repo.path, [
+    {
+      ...finding,
+      locations: [
+        { path: "missing.ts" },
+        { path: "other.ts" },
+        ...finding.locations,
+      ],
+    },
+  ]);
+  expect(report.results[0]!.owner).toEqual({
+    kind: "person",
+    provider: "github",
+    handle: "other-owner",
+  });
+  expect(report.results[0]!.evidence[0]!.matchedPath).toBe("other.ts");
+});
+
+test("ignores a CODEOWNERS symlink and uses the next regular ownership file", async () => {
+  const repo = await repository();
+  await mkdir(join(repo.path, ".github"));
+  await writeFile(join(repo.path, ".github", "CODEOWNERS"), "../CODEOWNERS\n");
+  await writeFile(join(repo.path, "CODEOWNERS"), "* @reviewer\n");
+  const blob = await repo.git("hash-object", "-w", ".github/CODEOWNERS");
+  await repo.git("add", ".");
+  await repo.git(
+    "update-index",
+    "--cacheinfo",
+    `120000,${blob},.github/CODEOWNERS`,
+  );
+  await repo.git("commit", "-qm", "Declare owner through regular file");
+  const report = await suggestOwners(repo.path, [finding]);
+  expect(report.results[0]!.evidence[0]!.path).toBe("CODEOWNERS");
+  expect(report.results[0]!.owner).toEqual({
+    kind: "person",
+    provider: "github",
+    handle: "reviewer",
+  });
+});
+
+test("ignores CODEOWNERS at GitHub's file-size limit and falls back to Git", async () => {
+  const repo = await repository();
+  const source = "* @reviewer\n#";
+  await writeFile(join(repo.path, "CODEOWNERS"), source.padEnd(3_000_000, "x"));
+  await repo.git("add", ".");
+  await repo.git("commit", "-qm", "Declare owner in oversized file");
+  const { codex, calls } = fakeCodex();
+  const report = await suggestOwners(repo.path, [finding], { codex });
+  expect(calls).toHaveLength(1);
+  expect(report.results[0]!.owner).toEqual({
+    name: "Alex Example",
+    email: "alex@example.test",
+  });
+  expect(report.results[0]!.limitations.join(" ")).toContain("3 MB");
+});
