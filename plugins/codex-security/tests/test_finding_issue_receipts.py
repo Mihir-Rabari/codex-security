@@ -144,7 +144,7 @@ def test_legacy_receipts_are_read_without_migration_and_preserved_on_upgrade(
     assert prepared["storeExists"] is True
     assert issues(state, scan_dir, "inspect", destination=destination) == inspected
     with closing(sqlite3.connect(path)) as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 44
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 47
         assert (
             connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE name = 'finding_publications'"

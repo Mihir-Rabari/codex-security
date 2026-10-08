@@ -78,6 +78,7 @@ EXPECTED_TABLES = {
     "finding_dedupe_group_members",
     "finding_dedupe_groups",
     "finding_embeddings",
+    "local_finding_embeddings",
     "finding_locations",
     "finding_occurrences",
     "finding_issue_receipts",
