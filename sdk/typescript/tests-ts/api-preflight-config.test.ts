@@ -1,4 +1,3 @@
-import { pythonExecutable } from "./support/python.js";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -46,14 +45,11 @@ function runPreflight(
   profile: string,
   options: readonly string[] = [],
 ): { status: number | null; payload: Record<string, unknown> } {
-  const interpreter = pythonExecutable(false);
-  expect(interpreter).not.toBeNull();
   const result = spawnSync(
-    interpreter!,
+    Bun.which("node")!,
     [
-      "-I",
-      "-B",
-      join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+      join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+      "config-preflight",
       "--profile",
       profile,
       "--config",
@@ -172,14 +168,11 @@ describe("CodexSecurity preflight configuration", () => {
         },
       });
 
-      const interpreter = pythonExecutable();
-      expect(interpreter).not.toBeNull();
       const result = spawnSync(
-        interpreter!,
+        Bun.which("node")!,
         [
-          "-I",
-          "-B",
-          join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "config-preflight",
           "--profile",
           "security_scan",
           "--cwd",
@@ -713,12 +706,11 @@ describe("CodexSecurity preflight configuration", () => {
     ]) {
       expect(serialized).not.toContain(secret);
     }
-    const interpreter = pythonExecutable(false);
-    expect(interpreter).not.toBeNull();
     const output = execFileSync(
-      interpreter!,
+      Bun.which("node")!,
       [
-        join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+        join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+        "config-preflight",
         "--skill",
         "security-scan",
         "--config",
@@ -769,9 +761,10 @@ describe("CodexSecurity preflight configuration", () => {
     expect(bridgeSerialized).not.toContain("BRIDGE_TOKEN");
     expect(bridgeSerialized).not.toContain("BRIDGE_MCP_TOKEN");
     const bridgeOutput = execFileSync(
-      interpreter!,
+      Bun.which("node")!,
       [
-        join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+        join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+        "config-preflight",
         "--skill",
         "security-scan",
         "--config",

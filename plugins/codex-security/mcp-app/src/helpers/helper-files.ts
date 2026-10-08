@@ -6,11 +6,11 @@ import {
   readSync,
   writeFileSync,
 } from "node:fs";
-import { windowsBinding } from "../native";
+import { unixBinding, windowsBinding } from "../native";
 import { widePath, windowsFileSystem } from "../../../native/windows-files.mjs";
-import { encodePosixPath } from "./posix-path";
+import { decodePosixBytes, encodePosixPath } from "./posix-path";
 import { escapeControls } from "./json";
-import { parsedPath } from "./resolve-security-md";
+import { parsedPath, resolvedPath } from "./resolve-security-md";
 import { decodeUtf8 } from "./utf8";
 
 export function filesystemErrorMessage(error: unknown): string {
@@ -37,6 +37,41 @@ export function normalizePath(path: string): string {
         .filter((part) => part && part !== ".")
         .join("/") || "."
   );
+}
+
+export function resolvedPathText(path: string, strict = true): string {
+  if (process.platform !== "win32")
+    return decodePosixBytes(resolvedPath(encodePosixPath(path), strict));
+  const canonical = resolvedPath(widePath(path), strict);
+  const text = canonical.toString("utf16le");
+  if (
+    path.startsWith("\\\\?\\") ||
+    path.startsWith("\\\\.\\") ||
+    !text.startsWith("\\\\?\\")
+  )
+    return text;
+  const ordinary = text.startsWith("\\\\?\\UNC\\")
+    ? `\\\\${text.slice(8)}`
+    : text.slice(4);
+  try {
+    if (resolvedPath(widePath(ordinary), strict).equals(canonical))
+      return ordinary;
+  } catch {
+    // Some raw Windows names can only be opened with the namespace prefix.
+  }
+  return text;
+}
+
+export function environmentValue(name: string): string | undefined {
+  const windows = process.platform === "win32";
+  const value = windows
+    ? windowsBinding().windowsEnvironment(Buffer.from(name, "utf16le"))
+    : unixBinding().unixEnvironment(Buffer.from(name));
+  return value === null
+    ? undefined
+    : windows
+      ? value.toString("utf16le")
+      : decodePosixBytes(value);
 }
 
 function readError(error: unknown, path: string, label?: string): never {

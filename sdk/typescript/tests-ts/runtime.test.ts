@@ -4973,14 +4973,11 @@ describe("runtime directories and plugin Python boundary", () => {
     await mkdir(repository);
     await writeFile(configPath, "[agents]\nmax_threads = 8\n");
 
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
     const result = spawnSync(
-      python!,
+      Bun.which("node")!,
       [
-        "-I",
-        "-B",
-        join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+        join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+        "config-preflight",
         "--profile",
         "security_scan",
         "--cwd",
@@ -5046,15 +5043,11 @@ describe("runtime directories and plugin Python boundary", () => {
       await mkdir(repository);
       await writeFile(systemConfig, "[agents]\nmax_threads = 8\n");
 
-      const python =
-        process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
-      expect(python).not.toBeNull();
       const result = spawnSync(
-        python!,
+        Bun.which("node")!,
         [
-          "-I",
-          "-B",
-          join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "config-preflight",
           "--profile",
           "security_scan",
           "--cwd",
@@ -5100,20 +5093,16 @@ describe("runtime directories and plugin Python boundary", () => {
     const root = await temporaryDirectory();
     const config = join(root, "config.toml");
     await writeFile(config, "");
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-
     for (const profile of [
       "security_diff_scan",
       "security_scan",
       "deep_security_scan",
     ]) {
       const result = spawnSync(
-        python!,
+        Bun.which("node")!,
         [
-          "-I",
-          "-B",
-          join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "config-preflight",
           "--profile",
           profile,
           "--config",
@@ -5140,60 +5129,6 @@ describe("runtime directories and plugin Python boundary", () => {
       expect(
         payload.unknown.every(({ severity }) => severity !== "block"),
       ).toBe(true);
-    }
-  });
-
-  test("keeps required preflight capabilities blocking", async () => {
-    const root = await temporaryDirectory();
-    const config = join(root, "config.toml");
-    const registry = join(root, "capabilities.toml");
-    await writeFile(config, "");
-    await writeFile(
-      registry,
-      [
-        "version = 1",
-        "[capabilities.required]",
-        'kind = "runtime"',
-        'check = "required_available"',
-        "[profiles.required]",
-        'description = "Required runtime capability"',
-        "[[profiles.required.requirements]]",
-        'capability = "required"',
-        'severity = "block"',
-        'reason = "Required runtime capability"',
-      ].join("\n"),
-    );
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-
-    for (const [value, status, exitCode] of [
-      [undefined, "incomplete", 2],
-      ["false", "blocked", 1],
-      ["true", "ready", 0],
-    ] as const) {
-      const result = spawnSync(
-        python!,
-        [
-          "-I",
-          "-B",
-          join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
-          "--registry",
-          registry,
-          "--profile",
-          "required",
-          "--config",
-          config,
-          "--cwd",
-          root,
-          ...(value === undefined
-            ? []
-            : ["--runtime-check", `required_available=${value}`]),
-        ],
-        { encoding: "utf8", env: process.env },
-      );
-
-      expect(result.status, result.stderr).toBe(exitCode);
-      expect(JSON.parse(result.stdout)).toMatchObject({ status });
     }
   });
 

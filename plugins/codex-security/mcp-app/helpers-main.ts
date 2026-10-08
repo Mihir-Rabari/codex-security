@@ -11,6 +11,7 @@ import { rankPoolCommand } from "./src/helpers/rank-pool";
 import { bindRepoScopesCommand } from "./src/helpers/bind-repo-scopes";
 import { escapeControls, stringifyJson } from "./src/helpers/json";
 import { decodeUtf8 } from "./src/helpers/utf8";
+import { configPreflightCommand } from "./src/helpers/config-preflight";
 
 let commandLine = process.argv.slice(2);
 if (process.platform === "win32") {
@@ -56,7 +57,9 @@ const workbenchUsage: Record<string, string> = {
   "read-severity-classification":
     "Usage: read-severity-classification --scan-id <id>\nReads a JSON object from stdin with an absolute stateDirectory. Reads saved assessments without updating the database.",
 };
-if (command === "resolve-security-md") {
+if (command === "config-preflight") {
+  process.exitCode = configPreflightCommand(args);
+} else if (command === "resolve-security-md") {
   process.exitCode = resolveSecurityMdCommand(args, posixHome);
 } else if (command === "normalize-candidates") {
   process.exitCode = normalizeCandidatesCommand(args, posixHome);
@@ -131,7 +134,7 @@ if (command === "resolve-security-md") {
   });
 } else {
   console.error(
-    `Usage: launch_codex_security_mcp[.cmd] --helper <resolve-security-md | normalize-candidates | validate-patch-risk-assessment | copy-deep-review-input | select-deep-review-input | make-rank-shards | validate-rank-shard | merge-rank-outputs | make-rank-pool-plan | validate-rank-worker | validate-rank-pool | bind-repo-scopes | ${Object.keys(workbenchUsage).join(" | ")}> [options]`,
+    `Usage: launch_codex_security_mcp[.cmd] --helper <config-preflight | resolve-security-md | normalize-candidates | validate-patch-risk-assessment | copy-deep-review-input | select-deep-review-input | make-rank-shards | validate-rank-shard | merge-rank-outputs | make-rank-pool-plan | validate-rank-worker | validate-rank-pool | bind-repo-scopes | ${Object.keys(workbenchUsage).join(" | ")}> [options]`,
   );
   process.exitCode = 2;
 }
