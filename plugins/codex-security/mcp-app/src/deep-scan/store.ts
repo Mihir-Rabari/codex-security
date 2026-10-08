@@ -488,8 +488,12 @@ export class WorkbenchDeepScanStore {
           : await this.runWorkbench(args, input);
       } catch (error) {
         const scanId = argumentValue(args, "--scan-id");
-        if (scanId && isStaleCoordinatorGenerationError(error)) {
-          this.coordinatorLeases.delete(scanId);
+        const lease = scanId ? this.coordinatorLeases.get(scanId) : undefined;
+        if (lease && isStaleCoordinatorGenerationError(error)) {
+          // Diagnostics can contain paths or user text; only state establishes ownership.
+          await this.get(lease.input.scanId, lease.input.threadId).catch(
+            () => {},
+          );
         }
         throw error;
       }

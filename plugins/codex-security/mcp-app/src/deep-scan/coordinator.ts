@@ -568,6 +568,8 @@ export class DeepScanCoordinator {
     let current: DeepScanRunState;
     try {
       current = await this.options.store.get(this.state.scanId, threadId);
+      // A successful state read determines whether ownership changed.
+      leaseLossConfirmed = false;
     } catch (readError) {
       this.log({
         event: "coordinator_ownership_read_failed",

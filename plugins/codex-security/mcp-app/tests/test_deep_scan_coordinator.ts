@@ -356,6 +356,54 @@ async function testConsumedSourceWithToolDiagnosticIsNotRereadAfterReducerWrites
   assert.deepEqual((await readJson(terminal.manifestPath)).findings, []);
 }
 
+async function testIndependentSourceGroupsDoNotSaturate() {
+  const { fixture, store } = await coordinatorFixture({
+    workers: 1,
+    stopAfterNoNew: 1,
+    maxDiscoveryRuns: 4,
+  });
+  const executor = new FakeExecutor({
+    discoveryCandidateId: "shared-identity",
+  });
+  const run = executor.run.bind(executor);
+  executor.run = async (request) => {
+    const result = await run(request);
+    if (request.kind === "dedup") {
+      const assigned = request.artifactContext!.deepReducer!;
+      const previous = assigned.previousReducerResultPath
+        ? (await readJson(assigned.previousReducerResultPath)).findings
+        : [];
+      const discoveries = await Promise.all(
+        assigned.claimedWorkers.map(async (worker) =>
+          (await readJson(worker.resultPath)).findings.map(
+            (finding: Record<string, unknown>, index: number) => ({
+              ...finding,
+              provenance: {
+                source: "local_plugin",
+                sourceFindingIds: [`${worker.id}:${index}`],
+              },
+            }),
+          ),
+        ),
+      );
+      const resultPath = path.join(
+        request.artifactContext!.root,
+        "result.json",
+      );
+      await writeJson(resultPath, {
+        ...(await readJson(resultPath)),
+        findings: [...previous, ...discoveries.flat()],
+      });
+    }
+    return result;
+  };
+  const terminal = await runCoordinator(fixture, store, executor);
+  assert.equal(terminal?.terminalReason, "capped", terminal?.error);
+  assert.equal(store.run.noNewStreak, 0);
+  assert.equal(executor.discoveryCalls, 4);
+  assert.equal((await readJson(terminal.manifestPath)).findings.length, 4);
+}
+
 async function testRetryKeepsLogicalWorker() {
   const { fixture, store } = await coordinatorFixture({
     workers: 2,
@@ -2378,6 +2426,51 @@ async function testStaleMutationObservesReplacement() {
   );
 }
 
+async function testReducerDiagnosticDoesNotOverrideOwnership() {
+  for (const reference of [
+    "missing-reference",
+    "Deep Scan coordinator lease belongs to a newer generation.",
+  ]) {
+    const { fixture, store } = await coordinatorFixture({
+      workers: 1,
+      maxDiscoveryRuns: 1,
+      stopAfterConsecutiveErrors: 1,
+    });
+    fixture.run.coordinatorGeneration = store.run.coordinatorGeneration = 2;
+    const worker = new FakeExecutor({ discoveryCandidateId: "candidate-1" });
+    const executor = {
+      async run(request: Parameters<FakeExecutor["run"]>[0]) {
+        const result = await worker.run(request);
+        if (request.kind === "dedup") {
+          const resultPath = path.join(
+            request.artifactContext!.root,
+            "result.json",
+          );
+          const draft = await readJson(resultPath);
+          draft.findings[0].provenance.sourceFindingIds = [reference];
+          await writeJson(resultPath, draft);
+        }
+        return result;
+      },
+    };
+    let observations = 0;
+    const terminal = await runCoordinator(fixture, store, executor, {
+      retryDelaysMs: [],
+      threadId: "fixture-thread",
+      heartbeatIntervalMs: 60_000,
+      observeReplacement: async (run) => {
+        observations += 1;
+        return run;
+      },
+    });
+    assert.equal(observations, 0);
+    assert.equal(terminal?.status, "failed");
+    assert.equal(store.run.status, "failed");
+    assert.equal(terminal?.coordinatorGeneration, 2);
+    assert.ok(store.failureMessages[0].includes(reference));
+  }
+}
+
 async function testJoinAndOrphanRules() {
   const fixture = await fixtureRun({
     workers: 2,
@@ -3724,6 +3817,7 @@ try {
   await testWorkerScopedCandidateSourceAggregation();
   await testConsumedSourceIsNotRereadAfterReducerWritesResult();
   await testConsumedSourceWithToolDiagnosticIsNotRereadAfterReducerWritesResult();
+  await testIndependentSourceGroupsDoNotSaturate();
   await testRetryKeepsLogicalWorker();
   await testSandboxDiagnosticSurvivesArtifactRetries();
   await testCompletionOrdering();
@@ -3797,6 +3891,7 @@ try {
   await testStoppedPublicationFailureBoundsPrefixedDiagnostic();
   await testTerminalReadFailureIsNotRecordedAsPublicationFailure();
   await testStaleMutationObservesReplacement();
+  await testReducerDiagnosticDoesNotOverrideOwnership();
   await testCoordinatorHeartbeatsStopAfterOwnershipChanges();
   await testCoordinatorHeartbeatsContinueDuringBlockedOwnershipRead();
   await testRemoteObserverRetriesTransientPersistenceFailures();
