@@ -6198,15 +6198,11 @@ describe("runtime directories and plugin Python boundary", () => {
         ? {}
         : { SystemRoot: process.env["SystemRoot"] }),
     });
-    const filtered = roots.map((_root, index) => ({
-      ...environment,
-      PATH:
-        index === roots.length - 1 ? dirname(interpreter) : `filtered-${index}`,
-    }));
+    const filtered = { ...environment, PATH: dirname(interpreter) };
     const calls: Array<{
       candidate: string;
       environment: Readonly<Record<string, string | undefined>>;
-      root: string;
+      root: string | readonly string[];
     }> = [];
     const resolveCommand = spyOn(
       trustedExecutables,
@@ -6215,7 +6211,7 @@ describe("runtime directories and plugin Python boundary", () => {
       calls.push({ candidate, environment: currentEnvironment, root });
       return {
         executable: interpreter,
-        environment: filtered[calls.length - 1]!,
+        environment: filtered,
       };
     });
     const selection = {
@@ -6227,15 +6223,12 @@ describe("runtime directories and plugin Python boundary", () => {
     try {
       expect(await resolvePluginPythonCommand(selection)).toEqual({
         executable: interpreter,
-        environment: filtered.at(-1)!,
+        environment: filtered,
       });
-      expect(calls).toEqual(
-        roots.map((root, index) => ({
-          candidate: "python3",
-          environment: index === 0 ? environment : filtered[index - 1]!,
-          root,
-        })),
-      );
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ candidate: "python3", environment });
+      expect(calls[0]!.root).toEqual(expect.arrayContaining(roots));
+      expect(calls[0]!.root).toContain(process.cwd());
       expect(environment).not.toHaveProperty("OPENAI_API_KEY");
       expect(environment).not.toHaveProperty("CODEX_API_KEY");
       expect(environment).not.toHaveProperty("OPENROUTER_API_KEY");
@@ -6245,20 +6238,15 @@ describe("runtime directories and plugin Python boundary", () => {
       resolveCommand.mockImplementation(
         async (candidate, currentEnvironment, root) => {
           calls.push({ candidate, environment: currentEnvironment, root });
-          return root === roots.at(-1)
-            ? null
-            : {
-                executable: interpreter,
-                environment: filtered[calls.length - 1]!,
-              };
+          return null;
         },
       );
       await expect(resolvePluginPythonCommand(selection)).rejects.toThrow(
         PluginPythonUnavailableError,
       );
-      expect(calls.map(({ candidate, root }) => ({ candidate, root }))).toEqual(
-        roots.map((root) => ({ candidate: "python3", root })),
-      );
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ candidate: "python3", environment });
+      expect(calls[0]!.root).toEqual(expect.arrayContaining(roots));
     } finally {
       resolveCommand.mockRestore();
     }
