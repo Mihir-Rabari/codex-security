@@ -1355,7 +1355,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         { model: "gpt-6.1-sol", reasoningEffort: "max" },
         { model: "gpt-6-sol", reasoningEffort: "high" },
         { model: "fixture-future-model", reasoningEffort: "future-effort" },
-        // Omitted settings preserve the model and effort in the Codex home.
         {},
       ];
       const providerKeys = settings.map((_, index) =>
@@ -1611,7 +1610,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             },
           }),
       );
-      // A running coordinator retains its settings if the source file changes.
       for (const kind of ["discovery", "dedup"] as const) {
         for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
           launches.length = 0;
@@ -2120,7 +2118,6 @@ async function testWorkerCyberAccessSettings() {
           assertReadOnlyWorkerPolicy(invocation.argv);
           assertWorkerSubagentPolicy(invocation.argv, 0);
         }
-        // Running coordinators and their resumed workers retain their own settings.
         for (const { configPath } of cases) {
           await writeFile(
             configPath!,
