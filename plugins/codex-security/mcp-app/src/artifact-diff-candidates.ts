@@ -362,9 +362,26 @@ export function preserveDiffCandidateDecisions(
   const retainDecision = (item: JsonObject) =>
     !isTerminalCandidateDecision(item) ||
     !accepted.has(coverageCandidateKey(item));
-  const surfaces = (input.coverage.surfaces as JsonObject[]).filter(
-    retainDecision,
+  const inputSurfaces = input.coverage.surfaces as JsonObject[];
+  const pendingReferences = new Set(
+    (input.coverage.deferred as JsonObject[]).flatMap((item) => {
+      const key = coverageCandidateKey(item);
+      return (key === undefined || !resolved.has(key)) &&
+        Array.isArray(item.surfaceIds)
+        ? item.surfaceIds.map((id) =>
+            surfaceReferenceKey(id, item, inputSurfaces),
+          )
+        : [];
+    }),
   );
+  const surfaces = inputSurfaces
+    .map((item) =>
+      !retainDecision(item) &&
+      pendingReferences.has(candidateKey(item.id, item.sourceWorkerId))
+        ? { ...item, disposition: "reported" }
+        : item,
+    )
+    .filter(retainDecision);
   const exclusions = (input.coverage.explicitExclusions as JsonObject[]).filter(
     retainDecision,
   );
