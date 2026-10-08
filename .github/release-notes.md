@@ -90,6 +90,7 @@
 - hide expected answers and test the checkout's skill ([#1054](https://github.com/openai/codex-security/pull/1054))
 - preserve saved results when scans stop or restart ([#1269](https://github.com/openai/codex-security/pull/1269))
 - keep usable bundles after failures and preserve release labels ([#1263](https://github.com/openai/codex-security/pull/1263))
+- preserve distinct fixes from merged findings ([#905](https://github.com/openai/codex-security/pull/905))
 
 <!-- release-section: highlights:end -->
 
