@@ -7,8 +7,10 @@ from contextlib import closing
 import pytest
 
 
-@pytest.mark.parametrize("upgrade", [False, True], ids=["fresh", "upgrade"])
-def test_frozen_checkpoint_head_migration_preserves_scan_state(workbench_api, upgrade):
+@pytest.mark.parametrize(
+    "omitted_version", [None, 47, 43], ids=["fresh", "upgrade", "existing-checkpoint"]
+)
+def test_frozen_checkpoint_head_migration_preserves_scan_state(workbench_api, omitted_version):
     migrations = workbench_api["MIGRATIONS"]
     timestamp = "2026-07-01T00:00:00Z"
 
@@ -22,7 +24,7 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(workbench_api, up
         connection.execute("PRAGMA foreign_keys = ON")
         migrate(
             connection,
-            tuple(item for item in migrations if item[0] != 47) if upgrade else migrations,
+            tuple(item for item in migrations if item[0] != omitted_version),
         )
         connection.execute(
             "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
@@ -48,16 +50,23 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(workbench_api, up
                     else None,
                 ),
             )
+        heads = json.dumps({"workers/review": "workers/review/checkpoints/" + "a" * 64 + ".json"})
+        if omitted_version == 43:
+            connection.execute(
+                "UPDATE scans SET retained_checkpoint_heads_json = ? WHERE id = 'failed'", (heads,)
+            )
+        original_checkpoint_migration = connection.execute(
+            "SELECT * FROM schema_migrations WHERE version = 47"
+        ).fetchone()
         before = [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")]
         migrate(connection, migrations)
         after = [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")]
         for original, updated in zip(before, after, strict=True):
             retained_heads = updated.pop("retained_checkpoint_heads_json")
-            assert retained_heads is None
+            assert retained_heads == original.get("retained_checkpoint_heads_json")
             original.pop("retained_checkpoint_heads_json", None)
             assert updated == original
 
-        heads = json.dumps({"workers/review": "workers/review/checkpoints/" + "a" * 64 + ".json"})
         connection.execute(
             "UPDATE scans SET retained_checkpoint_heads_json = ? WHERE id = 'failed'", (heads,)
         )
@@ -80,4 +89,18 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(workbench_api, up
                 "SELECT version, name FROM schema_migrations WHERE version = 47"
             )
         ] == [(47, "freeze stopped scan checkpoint selections")]
+        if original_checkpoint_migration is not None:
+            assert (
+                connection.execute("SELECT * FROM schema_migrations WHERE version = 47").fetchone()
+                == original_checkpoint_migration
+            )
+        assert connection.execute(
+            "SELECT COUNT(*), MAX(version) FROM schema_migrations"
+        ).fetchone()[:] == (44, 47)
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 43"
+            ).fetchone()[0]
+            == 1
+        )
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []

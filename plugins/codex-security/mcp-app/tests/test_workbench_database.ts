@@ -99,7 +99,7 @@ test("opens a private WAL database at the configured state path", async () => {
     assert.equal(
       database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()
         ?.count,
-      43,
+      44,
     );
     assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
     if (process.platform !== "win32") {
@@ -129,7 +129,7 @@ test("every released schema upgrades to the same current schema and remains idem
   const current = memory(t);
   applyMigrations(current);
   const expected = schema(current);
-  for (let version = 0; version <= 42; version++) {
+  for (let version = 0; version <= 43; version++) {
     const database = memory(t, version);
     applyMigrations(database);
     assert.deepEqual(
@@ -151,59 +151,100 @@ test("every released schema upgrades to the same current schema and remains idem
   }
 });
 
-test("database-info upgrades and retains stopped-scan checkpoint selections", async () => {
-  const directory = await temporary.create("workbench-checkpoint-upgrade-");
-  const databasePath = join(directory, "workbench.sqlite3");
-  const sources = JSON.stringify({ "results.json": "retained-digest" });
-  const heads = JSON.stringify({ worker: "accepted-checkpoint" });
-  const old = new DatabaseSync(databasePath);
-  try {
-    applyMigrations(
-      old,
-      migrations.filter((item) => item.version <= 42),
-    );
-    insertScan(old);
-    old
-      .prepare(
-        "UPDATE scans SET status = 'failed', retained_source_digests_json = ?",
-      )
-      .run(sources);
-  } finally {
-    old.close();
-  }
-  await databaseInfo(directory);
-  const upgraded = new DatabaseSync(databasePath);
-  try {
-    assert.equal(
-      upgraded.prepare("SELECT retained_checkpoint_heads_json FROM scans").get()
-        ?.retained_checkpoint_heads_json,
-      null,
-    );
-    upgraded
-      .prepare("UPDATE scans SET retained_checkpoint_heads_json = ?")
-      .run(heads);
-  } finally {
-    upgraded.close();
-  }
-  await databaseInfo(directory);
-  const reopened = new DatabaseSync(databasePath);
-  try {
-    const scan = reopened.prepare("SELECT * FROM scans").get()!;
-    assert.equal(scan.status, "failed");
-    assert.equal(scan.retained_source_digests_json, sources);
-    assert.equal(scan.retained_checkpoint_heads_json, heads);
-    assert.equal(
-      reopened
+for (const missingVersion of [47, 43]) {
+  test(`database-info retains stopped-scan checkpoints when adding migration ${missingVersion}`, async () => {
+    const directory = await temporary.create("workbench-checkpoint-upgrade-");
+    const databasePath = join(directory, "workbench.sqlite3");
+    const sources = JSON.stringify({ "results.json": "retained-digest" });
+    const heads = JSON.stringify({ worker: "accepted-checkpoint" });
+    let originalCheckpointMigration: Record<string, unknown> | undefined;
+    const old = new DatabaseSync(databasePath);
+    try {
+      applyMigrations(
+        old,
+        migrations.filter((item) => item.version !== missingVersion),
+      );
+      insertScan(old);
+      old
         .prepare(
-          "SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 47",
+          "UPDATE scans SET status = 'failed', retained_source_digests_json = ?",
         )
-        .get()?.count,
-      1,
-    );
-  } finally {
-    reopened.close();
-  }
-});
+        .run(sources);
+      if (missingVersion === 43) {
+        old
+          .prepare("UPDATE scans SET retained_checkpoint_heads_json = ?")
+          .run(heads);
+      }
+      originalCheckpointMigration = old
+        .prepare("SELECT * FROM schema_migrations WHERE version = 47")
+        .get();
+    } finally {
+      old.close();
+    }
+    await databaseInfo(directory);
+    const upgraded = new DatabaseSync(databasePath);
+    try {
+      assert.equal(
+        upgraded
+          .prepare("SELECT retained_checkpoint_heads_json FROM scans")
+          .get()?.retained_checkpoint_heads_json,
+        missingVersion === 43 ? heads : null,
+      );
+      upgraded
+        .prepare("UPDATE scans SET retained_checkpoint_heads_json = ?")
+        .run(heads);
+    } finally {
+      upgraded.close();
+    }
+    await databaseInfo(directory);
+    const reopened = new DatabaseSync(databasePath);
+    try {
+      const scan = reopened.prepare("SELECT * FROM scans").get()!;
+      assert.equal(scan.status, "failed");
+      assert.equal(scan.retained_source_digests_json, sources);
+      assert.equal(scan.retained_checkpoint_heads_json, heads);
+      if (originalCheckpointMigration !== undefined) {
+        assert.deepEqual(
+          reopened
+            .prepare("SELECT * FROM schema_migrations WHERE version = 47")
+            .get(),
+          originalCheckpointMigration,
+        );
+      }
+      assert.equal(
+        reopened
+          .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
+          .get()?.count,
+        44,
+      );
+      assert.equal(
+        reopened
+          .prepare("SELECT MAX(version) AS version FROM schema_migrations")
+          .get()?.version,
+        47,
+      );
+      assert.equal(
+        reopened
+          .prepare(
+            "SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 43",
+          )
+          .get()?.count,
+        1,
+      );
+      assert.deepEqual(reopened.prepare("PRAGMA foreign_key_check").all(), []);
+      assert.equal(
+        reopened
+          .prepare(
+            "SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 47",
+          )
+          .get()?.count,
+        1,
+      );
+    } finally {
+      reopened.close();
+    }
+  });
+}
 
 test("configured state paths use native parent traversal semantics", async () => {
   const directory = await temporary.create("workbench-symlink-");
@@ -775,7 +816,7 @@ test("retries an upgrade when another process holds the write lock beyond the bu
         database
           .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
           .get()?.count,
-        43,
+        44,
       );
       assert.equal(
         database.prepare("SELECT COUNT(*) AS count FROM security_targets").get()
