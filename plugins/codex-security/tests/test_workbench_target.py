@@ -95,8 +95,16 @@ def junction_factory(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyP
         ("indexed", None),
         ("untracked", ".gitignore"),
         ("untracked", ".git/info/exclude"),
+        ("nested", ".git/info/exclude"),
     ],
-    ids=["plain", "git-untracked", "git-indexed", "gitignore", "git-info-exclude"],
+    ids=[
+        "plain",
+        "git-untracked",
+        "git-indexed",
+        "gitignore",
+        "git-info-exclude",
+        "nested-info-exclude",
+    ],
 )
 @pytest.mark.parametrize(
     "change",
@@ -123,10 +131,14 @@ def test_reviewed_patch_preserves_junction_boundaries(
     source.mkdir()
     if git_repository:
         subprocess.run(["git", "init", "-q"], cwd=source, check=True)
+    junction_root = source
+    if git_repository == "nested":
+        junction_root = source / "nested"
+        initialize_git_repository(junction_root)
     if git_exclusion is not None:
-        (source / git_exclusion).write_text("dependencies/linked_directory/\n")
-    (source / "dependencies").mkdir()
-    junction = source / "dependencies" / "linked_directory"
+        (junction_root / git_exclusion).write_text("dependencies/linked_directory/\n")
+    (junction_root / "dependencies").mkdir()
+    junction = junction_root / "dependencies" / "linked_directory"
     outside = tmp_path / "outside"
     outside.mkdir()
     if change != "target_populated":
@@ -485,6 +497,38 @@ index {"0" * 40}..{"1" * 40}
 def initialize_unborn_git_repository(target: Path) -> None:
     target.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+
+
+def test_windows_inventory_batches_wide_untracked_trees(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import workbench_target
+
+    target = tmp_path / "target"
+    initialize_unborn_git_repository(target)
+    monkeypatch.setattr(workbench_target, "_WINDOWS", True)
+    run_git = workbench_target.git_command
+    calls = 0
+
+    def counted_git(*args: Any, **kwargs: Any):
+        nonlocal calls
+        calls += 1
+        return run_git(*args, **kwargs)
+
+    monkeypatch.setattr(workbench_target, "git_command", counted_git)
+    sources = []
+    for index in range(16):
+        source = target / f"component-{index}" / "src" / "app.py"
+        source.parent.mkdir(parents=True)
+        source.write_text("print('fixture')\n")
+        sources.append(source)
+        if index == 0:
+            assert workbench_target.git_directory_snapshot_paths(target) == sources
+            single_directory_calls = calls
+            calls = 0
+
+    assert set(workbench_target.git_directory_snapshot_paths(target)) == set(sources)
+    assert calls == single_directory_calls
 
 
 @pytest.mark.parametrize("change", ["unchanged", "ignored_file", "unrelated_file"])

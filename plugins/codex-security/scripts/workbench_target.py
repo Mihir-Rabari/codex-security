@@ -589,6 +589,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
         raise SystemExit("Could not inspect files in the selected Git working tree.")
     paths: list[Path] = []
     junctions: dict[tuple[int, int], Path] = {}
+    nested_worktrees: set[tuple[int, int]] = set()
     for entry in (entry for entry in listed.split(b"\0") if entry):
         relative = Path(os.fsdecode(entry[2:]))
         if scope_depth:
@@ -628,6 +629,7 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
         if nested_repository_root is not None and Path(nested_repository_root).samefile(path):
             nested_paths = git_directory_snapshot_paths(path)
             if nested_paths is not None:
+                nested_worktrees.add((metadata.st_dev, metadata.st_ino))
                 paths.extend(nested_paths)
                 continue
         paths.extend(source_directory_snapshot_paths(path))
@@ -638,38 +640,28 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
         git_directory = git_output(target, "rev-parse", "--absolute-git-dir")
         if git_directory is None:
             raise SystemExit("Could not inspect the selected Git working tree.")
-        pending = [target]
+        directories = git_bytes(
+            target,
+            "--no-literal-pathspecs",
+            "ls-files",
+            "--others",
+            "--directory",
+            "--exclude-standard",
+            "-z",
+            "--",
+            # Seed only eligible descendants, never the selected directory itself.
+            ":(glob)**/*/",
+            git_dir=Path(git_directory),
+            work_tree=repository,
+        )
+        if directories is None:
+            raise SystemExit("Could not inspect directories in the selected Git working tree.")
+        pending = [target / os.fsdecode(path) for path in directories.split(b"\0") if path]
         while pending:
-            directory = pending.pop()
-            directories = git_bytes(
-                directory,
-                "--no-literal-pathspecs",
-                "ls-files",
-                "--others",
-                "--directory",
-                "--exclude-standard",
-                "-z",
-                "--",
-                # Match directory descendants, never the selected directory itself.
-                ":(glob)**/*/",
-                # Changing cwd must not select a nested repository's Git context.
-                git_dir=Path(git_directory),
-                work_tree=repository,
-            )
-            if directories is None:
-                if directory != target:
-                    try:
-                        with os.scandir(directory):
-                            pass
-                    except PermissionError:
-                        # Git's root inventory also skips unreadable descendants.
-                        continue
-                raise SystemExit("Could not inspect directories in the selected Git working tree.")
-            for raw_path in (item for item in directories.split(b"\0") if item):
+            children: list[Path] = []
+            for path in pending:
                 try:
-                    path = _directory_link_boundary(
-                        target, directory / os.fsdecode(raw_path), linked_prefixes
-                    )
+                    path = _directory_link_boundary(target, path, linked_prefixes)
                     metadata = path.lstat()
                 except (FileNotFoundError, NotADirectoryError):
                     continue
@@ -678,7 +670,44 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
                 elif stat.S_ISLNK(metadata.st_mode):
                     paths.append(path)
                 elif stat.S_ISDIR(metadata.st_mode):
-                    pending.append(path)
+                    if (metadata.st_dev, metadata.st_ino) in nested_worktrees:
+                        # Its own inventory already applied its repository exclusions.
+                        continue
+                    try:
+                        children.extend(path.iterdir())
+                    except PermissionError:
+                        # Match Git's treatment of unreadable descendants.
+                        continue
+            candidates: dict[bytes, Path] = {}
+            for path in children:
+                if os.path.normcase(path.name) == ".git":
+                    continue
+                try:
+                    metadata = path.lstat()
+                except (FileNotFoundError, NotADirectoryError, PermissionError):
+                    continue
+                if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)):
+                    continue
+                relative = (Path(pathspec) / path.relative_to(target)).as_posix()
+                candidates[os.fsencode(relative)] = path
+            if not candidates:
+                break
+            # Filter a directory level at once, retaining the outer repository context.
+            ignored = git_command(
+                repository,
+                "--no-literal-pathspecs",
+                "check-ignore",
+                "-z",
+                "--stdin",
+                text=False,
+                input_data=b"\0".join(candidates) + b"\0",
+                git_dir=Path(git_directory),
+                work_tree=repository,
+            )
+            if ignored.returncode not in (0, 1):
+                raise SystemExit("Could not inspect directories in the selected Git working tree.")
+            excluded = set(ignored.stdout.split(b"\0"))
+            pending = [path for raw, path in candidates.items() if raw not in excluded]
     paths.extend(junctions.values())
     return sorted({str(path): path for path in paths}.values(), key=str)
 
