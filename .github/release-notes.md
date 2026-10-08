@@ -106,6 +106,7 @@
 - preserve closed stdin when launching helpers ([#1329](https://github.com/openai/codex-security/pull/1329))
 - retain recovery guidance on canceled uploads ([#680](https://github.com/openai/codex-security/pull/680))
 - retry container releases without replacing a newer latest tag ([#1046](https://github.com/openai/codex-security/pull/1046))
+- read compressed Codex session logs ([#1428](https://github.com/openai/codex-security/pull/1428))
 
 <!-- release-section: highlights:end -->
 
