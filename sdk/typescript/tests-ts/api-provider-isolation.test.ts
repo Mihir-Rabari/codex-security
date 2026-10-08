@@ -723,7 +723,7 @@ const legacyScanCases: Array<
     ],
   ),
   [
-    "deep with a filtered profile and readable snapshot",
+    "deep with a resolved dotted profile and readable snapshot",
     "deep",
     {
       profile: "selected.profile",
@@ -733,7 +733,6 @@ const legacyScanCases: Array<
       capability: true,
       inherited: "synthetic.system",
       reads: true,
-      rejects: true,
     },
   ],
 ];

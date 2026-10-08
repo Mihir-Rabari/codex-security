@@ -1,6 +1,13 @@
 import { rm } from "node:fs/promises";
 import { readJson, writeJson } from "./support/json.ts";
-import { assertFlagPair } from "./assertions.ts";
+import {
+  assertConfigOverrides,
+  assertFlagPair,
+  assertReadOnlyWorkerPolicy,
+  assertWorkerSubagentPolicy,
+  nativeConfigOverrides,
+  workerPermissionProfileOverride,
+} from "./assertions.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import { mock } from "node:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
@@ -2908,95 +2915,9 @@ if (stdin.includes('COMPLETE_THEN_HANG')) { setInterval(() => {}, 1_000); await 
   return { root, markerPath, preflightMarkerPath, executablePath: scriptPath };
 }
 
-function assertReadOnlyWorkerPolicy(args: readonly string[]) {
-  assert.equal(args.includes("--sandbox"), false);
-  assert.equal(args.includes("--add-dir"), false);
-  assert.deepEqual(
-    args.filter((arg: string) => arg.startsWith("approval_policy=")),
-    ['approval_policy="never"'],
-  );
-  assert.equal(
-    args.some((arg: string) => arg.includes("network_access")),
-    false,
-  );
-  const override = workerPermissionProfileOverride(args);
-  assertConfigOverrides(args, {
-    "permissions.codex_security_deep_scan_worker.extends": ":read-only",
-    "permissions.codex_security_deep_scan_worker.filesystem.:root": "read",
-    "permissions.codex_security_deep_scan_worker.network.enabled": false,
-  });
-  assert.equal(override.includes('"write"'), false);
-}
-
-function workerPermissionProfileOverride(args: readonly string[]) {
-  assert.deepEqual(
-    args.filter((arg: string) => arg.startsWith("default_permissions=")),
-    ['default_permissions="codex_security_deep_scan_worker"'],
-  );
-  const overrides = args.filter((arg: string) =>
-    arg.startsWith("permissions.codex_security_deep_scan_worker="),
-  );
-  assert.equal(overrides.length, 1);
-  return overrides[0];
-}
-
-function assertWorkerSubagentPolicy(
-  args: readonly string[],
-  subagents: number,
-) {
-  assertConfigOverrides(args, {
-    "features.multi_agent_v2.enabled": false,
-    "features.multi_agent_v2.max_concurrent_threads_per_session": subagents + 1,
-    "features.multi_agent": undefined,
-    "features.code_mode.excluded_tool_namespaces": undefined,
-    ...(subagents === 0
-      ? {
-          "agents.max_threads": undefined,
-          "features.enable_fanout": false,
-          "features.code_mode.enabled": undefined,
-        }
-      : {
-          "agents.max_threads": subagents,
-          "features.enable_fanout": undefined,
-        }),
-  });
-  assert.equal(args.includes("features.multi_agent_v2.enabled=true"), false);
-}
-
 function restoreEnv(name: string, value: string | undefined) {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;
-}
-
-function nativeConfigOverrides(args: readonly string[]) {
-  return args.flatMap((arg, index) =>
-    arg === "--config" || arg === "-c" ? [args[index + 1]] : [],
-  );
-}
-
-function assertConfigOverrides(
-  args: readonly string[],
-  values: Record<string, string | number | boolean | undefined>,
-) {
-  const overrides = nativeConfigOverrides(args).map((value) =>
-    parseToml(value),
-  );
-  for (const [key, value] of Object.entries(values)) {
-    const supplied = overrides.map((config) =>
-      key
-        .split(".")
-        .reduce<unknown>(
-          (current, part) =>
-            (current as Record<string, unknown> | undefined)?.[part],
-          config,
-        ),
-    );
-    assert.deepEqual(
-      supplied.findLast((item) => item !== undefined),
-      value,
-      key,
-    );
-  }
 }
 
 async function withWorkerFixture<Result>(
@@ -3608,7 +3529,6 @@ async function testWorkerProviderSelection() {
     delete process.env.CODEX_API_KEY;
     const configPath = path.join(fixture.root, "scan config.toml");
     const promptPath = path.join(fixture.root, "prompt.md");
-    await writeFile(configPath, 'model_provider = "fixture-provider"\n');
     await writeFile(promptPath, "fixture provider selection");
     process.env.CODEX_CLI_PATH = process.execPath;
     process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
@@ -3626,22 +3546,35 @@ async function testWorkerProviderSelection() {
         options,
       )) as unknown as typeof childProcess.spawn;
     syncBuiltinESMExports();
-    const executor = new CodexSdkWorkerExecutor({
-      parentSandbox: trustedParentSandbox,
-    });
-    for (const kind of ["discovery", "dedup"]) {
-      await executor.run({
-        kind,
-        promptPath,
-        workingDirectory: fixture.root,
-        subagents: 0,
-        signal: new AbortController().signal,
+    for (const config of [
+      { model_provider: "fixture-provider" },
+      {
+        profile: "selected.profile",
+        profiles: {
+          "selected.profile": { model_provider: "fixture-provider" },
+        },
+      },
+    ]) {
+      await writeFile(configPath, stringifyToml(config));
+      const executor = new CodexSdkWorkerExecutor({
+        parentSandbox: trustedParentSandbox,
       });
-      const invocation = JSON.parse(await readFile(fixture.markerPath, "utf8"));
-      assert.equal(
-        invocation.argv.includes('model_provider="fixture-provider"'),
-        true,
-      );
+      for (const kind of ["discovery", "dedup"]) {
+        await executor.run({
+          kind,
+          promptPath,
+          workingDirectory: fixture.root,
+          subagents: 0,
+          signal: new AbortController().signal,
+        });
+        const invocation = JSON.parse(
+          await readFile(fixture.markerPath, "utf8"),
+        );
+        assert.equal(
+          invocation.argv.includes('model_provider="fixture-provider"'),
+          true,
+        );
+      }
     }
   } finally {
     childProcess.spawn = originalSpawn;
