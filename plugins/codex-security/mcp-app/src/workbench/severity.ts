@@ -49,10 +49,14 @@ export function assessments(
       ? "finding_severity_assessments"
       : "scan_severity_assessments";
   const scope = scanId === undefined ? "" : "WHERE assessment.scan_id = ?";
+  // JSON preserves embedded NULs across Node 22 SQLite TEXT results.
+  const projection = Object.entries(fields)
+    .map(([key, column]) => `'${key}', assessment.${column}`)
+    .join(", ");
   // Keep selected IDs first so each assessment is a primary-key lookup.
   const rows = database
     .prepare(
-      `SELECT assessment.* FROM json_each(?) AS selected
+      `SELECT json_object(${projection}) AS value FROM json_each(?) AS selected
        CROSS JOIN ${table} AS assessment ON assessment.finding_id = selected.value
        ${scope} ORDER BY selected.key`,
     )
@@ -60,12 +64,7 @@ export function assessments(
       stringifyJson(findingIds, 0),
       ...(scanId === undefined ? [] : [scanId]),
     );
-  return rows.map(
-    (row) =>
-      Object.fromEntries(
-        Object.entries(fields).map(([key, column]) => [key, row[column]]),
-      ) as Assessment,
-  );
+  return rows.map((row) => parseJson(String(row.value)) as Assessment);
 }
 
 export function severityCheckpoint(
@@ -194,11 +193,16 @@ export function readSeverityClassification(
         return {};
       const row = database
         .prepare(
-          "SELECT * FROM scan_severity_classifications WHERE scan_id = ?",
+          `SELECT json_object(
+            'findingIds', json(finding_ids_json), 'assessedAt', assessed_at,
+            'rubricSha256', rubric_sha256, 'knowledgeBaseSha256', knowledge_base_sha256
+          ) AS value FROM scan_severity_classifications WHERE scan_id = ?`,
         )
         .get(scanId);
       if (!row) return {};
-      const findingIds = parseJson(String(row.finding_ids_json)) as string[];
+      const classification = parseJson(String(row.value)) as {
+        findingIds: string[];
+      };
       const hasScanAssessments = database
         .prepare(
           "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scan_severity_assessments'",
@@ -206,13 +210,10 @@ export function readSeverityClassification(
         .get();
       return {
         scanId,
-        findingIds,
-        assessedAt: row.assessed_at,
-        rubricSha256: row.rubric_sha256,
-        knowledgeBaseSha256: row.knowledge_base_sha256,
+        ...classification,
         assessments: assessments(
           database,
-          findingIds,
+          classification.findingIds,
           hasScanAssessments ? scanId : undefined,
         ),
       };

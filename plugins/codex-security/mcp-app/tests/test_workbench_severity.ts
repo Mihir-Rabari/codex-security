@@ -77,6 +77,15 @@ function begin(
 test("severity checkpoints retain external findings and each scan's cached assessments", (t) => {
   const database = open(t);
   const payload = save("finding\0suffix", "scan-a");
+  for (const field of [
+    "occurrenceId",
+    "inputSha256",
+    "rubricSha256",
+    "knowledgeBaseSha256",
+    "rubricLabel",
+    "reviewTrigger",
+  ] as const)
+    payload.assessment[field] = `${field}\0suffix λ`;
   assert.deepEqual(
     severityCheckpoint(
       database,
@@ -85,12 +94,12 @@ test("severity checkpoints retain external findings and each scan's cached asses
     ),
     { assessments: [] },
   );
-  severityCheckpoint(database, payload, "first");
+  severityCheckpoint(database, payload, "first\0timestamp");
   const details = database
     .prepare("SELECT details_json FROM findings WHERE id = ?")
     .get(payload.finding.findingId)!.details_json;
   assert.match(String(details), /18446744073709551617/);
-  const first = { ...payload.assessment, assessedAt: "first" };
+  const first = { ...payload.assessment, assessedAt: "first\0timestamp" };
   assert.deepEqual(
     severityCheckpoint(
       database,
@@ -188,11 +197,25 @@ test("old database reads use legacy assessments without migrating or changing th
     INSERT INTO finding_severity_assessments
       (finding_id, occurrence_id, input_sha256, assessed_at, source, decision, level, rationale)
     VALUES ('finding', 'occurrence', 'digest', 'assessed', 'existing-severity', 'assessed', 'high', 'Saved');`);
+  database
+    .prepare(
+      "UPDATE scan_severity_classifications SET assessed_at = ?, rubric_sha256 = ?, knowledge_base_sha256 = ? WHERE scan_id = 'scan'",
+    )
+    .run("started\0suffix", "rubric\0suffix", "knowledge\0suffix");
   const before = await readFile(path);
   const metadata = await stat(path);
+  const schema = database
+    .prepare("SELECT name, sql FROM sqlite_master ORDER BY name")
+    .all();
   const result = readSeverityClassification(path, "scan") as {
     assessments: { findingId: string }[];
+    assessedAt: string;
+    rubricSha256: string;
+    knowledgeBaseSha256: string;
   };
+  assert.equal(result.assessedAt, "started\0suffix");
+  assert.equal(result.rubricSha256, "rubric\0suffix");
+  assert.equal(result.knowledgeBaseSha256, "knowledge\0suffix");
   assert.deepEqual(
     result.assessments.map((row) => row.findingId),
     ["finding"],
@@ -200,6 +223,10 @@ test("old database reads use legacy assessments without migrating or changing th
   assert.deepEqual(readSeverityClassification(path, "missing"), {});
   assert.deepEqual(await readFile(path), before);
   assert.equal((await stat(path)).mode, metadata.mode);
+  assert.deepEqual(
+    database.prepare("SELECT name, sql FROM sqlite_master ORDER BY name").all(),
+    schema,
+  );
   database.exec("DROP TABLE scan_severity_classifications");
   assert.deepEqual(readSeverityClassification(path, "scan"), {});
   const missing = join(directory, "missing.sqlite3");
