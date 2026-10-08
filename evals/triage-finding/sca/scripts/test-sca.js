@@ -608,14 +608,35 @@ test("disables literal inherited integration names while retaining the persisten
   }
 });
 
-test("runs the installed Promptfoo entrypoint with the selected Node and cleans only staged cases", () => {
+test("runs the package-selected Promptfoo entrypoint with the selected Node and cleans only staged cases", () => {
   const childProcess = require("node:child_process");
   const evalRoot = path.resolve(__dirname, "../..");
   const promptfooPackage = path.join(
     evalRoot,
     "node_modules/promptfoo/package.json",
   );
-  const { bin } = JSON.parse(fs.readFileSync(promptfooPackage, "utf8"));
+  const bin = { promptfoo: "bin/synthetic-promptfoo.cjs" };
+  const evalSdkPackage = path.join(
+    evalRoot,
+    "node_modules/@openai/codex-sdk/package.json",
+  );
+  const installedSdkPackage = fs.realpathSync(
+    path.resolve(
+      __dirname,
+      "../../../../sdk/typescript/node_modules/@openai/codex-sdk/package.json",
+    ),
+  );
+  // Deterministic CI installs the SDK; model-eval dependencies are separate.
+  const readFile = fs.readFileSync;
+  const realpath = fs.realpathSync;
+  const packageRead = mock.method(fs, "readFileSync", (file, ...args) =>
+    file === promptfooPackage
+      ? JSON.stringify({ bin })
+      : readFile(file, ...args),
+  );
+  const packagePath = mock.method(fs, "realpathSync", (file, ...args) =>
+    file === evalSdkPackage ? installedSdkPackage : realpath(file, ...args),
+  );
   const args = ["validate", "config", "-c", "./sca/promptfooconfig.yaml"];
   let staged;
   const calls = [];
@@ -652,6 +673,8 @@ test("runs the installed Promptfoo entrypoint with the selected Node and cleans 
     assert.equal(fs.existsSync(runtimeVars({}).triage_runtime_root), true);
   } finally {
     spy.mock.restore();
+    packagePath.mock.restore();
+    packageRead.mock.restore();
     if (staged) fs.rmSync(staged, { recursive: true, force: true });
   }
 });
