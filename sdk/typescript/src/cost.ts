@@ -18,6 +18,7 @@ import {
   attributedScanThreads,
   isAttributedScanEvent,
   isScanArtifactDirectory,
+  sessionOwnsTurn,
   sessionParentThreadId,
   sessionStartedAt,
   type ScanExecutionAttribution,
@@ -841,20 +842,12 @@ function readSessionEvent(
         };
       }
     }
-    if (payload["type"] === "task_started") {
-      // Fresh Codex worker thread/turn IDs share a same-process monotonic UUIDv7 generator.
-      const threadOrder = uuid7Order(session.threadId);
-      const turnOrder = uuid7Order(payload["turn_id"]);
-      const owned =
-        threadOrder === null
-          ? typeof payload["started_at"] === "number" &&
-            session.startedAt !== null &&
-            payload["started_at"] >= Math.floor(session.startedAt / 1_000)
-          : turnOrder !== null && turnOrder >= threadOrder;
-      if (owned) {
-        session.replaying = false;
-        session.events?.push({ index, event });
-      }
+    if (
+      payload["type"] === "task_started" &&
+      sessionOwnsTurn(session, payload)
+    ) {
+      session.replaying = false;
+      session.events?.push({ index, event });
     }
     return;
   }
@@ -1247,18 +1240,6 @@ function reconcileReceiptCounters(session: SessionUsage): void {
   session.responseBaselineTokens = baseline;
   session.expectedResponseTokens = expected;
   session.excludedResponseTokens = excluded;
-}
-
-function uuid7Order(value: unknown): bigint | null {
-  if (
-    typeof value !== "string" ||
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
-      value,
-    )
-  ) {
-    return null;
-  }
-  return BigInt(`0x${value.replaceAll("-", "")}`);
 }
 
 function readSessionReasoning(

@@ -10,6 +10,7 @@ import {
   attributedScanThreads,
   isAttributedScanEvent,
   isScanArtifactDirectory,
+  sessionOwnsTurn,
   sessionParentThreadId,
   sessionStartedAt,
   type ScanExecutionAttribution,
@@ -201,9 +202,7 @@ export async function readScanLogs(options: ScanLogOptions) {
           event["type"] !== "event_msg" ||
           !isRecord(payload) ||
           payload["type"] !== "task_started" ||
-          typeof payload["started_at"] !== "number" ||
-          session.startedAt === null ||
-          payload["started_at"] < Math.floor(session.startedAt / 1_000)
+          !sessionOwnsTurn(session, payload)
         ) {
           continue;
         }
