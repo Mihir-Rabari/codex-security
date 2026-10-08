@@ -129,7 +129,7 @@ test("every released schema upgrades to the same current schema and remains idem
   const current = memory(t);
   applyMigrations(current);
   const expected = schema(current);
-  for (const version of [0, ...migrations.map(({ version }) => version)]) {
+  for (const version of [0, ...migrations.map((item) => item.version)]) {
     const database = memory(t, version);
     applyMigrations(database);
     assert.deepEqual(

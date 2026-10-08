@@ -3041,53 +3041,79 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("forwards durable Deep Scan independent-review progress", async () => {
-    const { repository, codexHome, scanDir } = await scanDirectories();
-    const updates: DeepScanProgress[] = [];
-    const environment = { CODEX_CLI_PATH: process.execPath };
-    const client = TestClient.withDependencies({
-      environment,
-      prepareRuntime: runtimePreparer(codexHome, () => ({ environment })),
-      resolvePluginPython: async () => "/managed/python",
-      prepareOutputDir: async () => scanDir,
-      repositoryRevision: async () => "deadbeef",
-      resolveCodexCommand: () => ({ command: process.execPath }),
-      runWorkbench: async (
-        _options: unknown,
-        args: readonly string[],
-        input?: string,
-      ): Promise<JsonObject> => {
-        if (args[0] === "get-scan") {
-          return {
-            scan: {
-              progress: {
-                independentReviews: {
-                  completed: 3,
-                  active: 2,
-                  maximum: 40,
+  test.each([true, "false", null])(
+    "routes durable Deep progress without replacing scan errors (consolidating=%p)",
+    async (consolidating) => {
+      const { repository, codexHome, scanDir } = await scanDirectories();
+      const updates: DeepScanProgress[] = [];
+      const observerErrors: unknown[] = [];
+      const warnings: string[] = [];
+      const environment = { CODEX_CLI_PATH: process.execPath };
+      const client = TestClient.withDependencies({
+        environment,
+        prepareRuntime: runtimePreparer(codexHome, () => ({ environment })),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        resolveCodexCommand: () => ({ command: process.execPath }),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> => {
+          if (args[0] === "get-scan") {
+            return {
+              scan: {
+                progress: {
+                  independentReviews: {
+                    completed: 3,
+                    active: 2,
+                    maximum: 40,
+                    consolidating,
+                  },
                 },
               },
-            },
-          };
-        }
-        return mockWorkbench(args, input);
-      },
-      createCodex: codexFactory(async () => {
-        await Bun.sleep(0);
-        throw new Error("deep progress captured");
-      }),
-    });
+            };
+          }
+          return mockWorkbench(args, input);
+        },
+        createCodex: codexFactory(async () => {
+          await Bun.sleep(0);
+          throw new Error("deep progress captured");
+        }),
+      });
 
-    await expect(
-      client.run(repository, {
-        mode: "deep",
-        onDeepProgress: (progress) => updates.push(progress),
-      }),
-    ).rejects.toThrow("deep progress captured");
-    await Bun.sleep(0);
-    expect(updates).toEqual([{ completed: 3, active: 2, maximum: 40 }]);
-    await client.close();
-  });
+      await expect(
+        client.run(repository, {
+          mode: "deep",
+          onDeepProgress: (progress) => {
+            updates.push(progress);
+            throw new Error("progress presenter failed");
+          },
+          onWarning: (warning) => warnings.push(warning),
+          onObserverError: (observer, error) =>
+            observerErrors.push([observer, error]),
+        }),
+      ).rejects.toThrow("deep progress captured");
+      await Bun.sleep(0);
+      if (consolidating === true) {
+        expect(updates).toEqual([
+          { completed: 3, active: 2, maximum: 40, consolidating: true },
+        ]);
+        expect(observerErrors).toEqual([
+          ["onDeepProgress", new Error("progress presenter failed")],
+        ]);
+        expect(warnings).toEqual([]);
+      } else {
+        expect(updates).toEqual([]);
+        expect(observerErrors).toEqual([]);
+        expect(warnings).toEqual([
+          "Could not track Deep Scan progress: Codex Security workbench returned invalid Deep Scan progress.",
+        ]);
+      }
+      await client.close();
+    },
+  );
 
   test.skipIf(process.platform !== "win32")(
     "loads deep scan settings from a backslash home-relative CODEX_HOME",
@@ -6915,6 +6941,7 @@ describe("CodexSecurity orchestration", () => {
       { pluginPath: join(root, "missing-plugin") },
       {
         environment: {
+          CODEX_HOME: join(root, "ambient-codex-home"),
           CODEX_SECURITY_STATE_DIR: stateDirectory,
           ...fakeCommand.environment,
         },
