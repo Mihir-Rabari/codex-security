@@ -1086,10 +1086,10 @@ test.each([
         Object.assign(f.environment, { HOME: "../relative-home" });
     }
     await Promise.all(
-      fixtures.map((f) =>
-        f.client.scanDependencies({
-          repositoryPath: f.repository,
-          outputDir: f.outputDir,
+      [first, second].map((client, index) =>
+        client.scanDependencies({
+          repositoryPath: fixtures[index]!.repository,
+          outputDir: fixtures[index]!.outputDir,
         }),
       ),
     );
