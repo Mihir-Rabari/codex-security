@@ -318,9 +318,9 @@ export interface CoverageDocument {
     riskArea?: string;
     notes?: string;
     /**
-     * Stable identity of a saved candidate; omitted for general coverage work.
+     * A non-blank string identifies a saved candidate; other historical metadata is preserved unchanged.
      */
-    candidateId?: string;
+    candidateId?: unknown;
     [k: string]: unknown;
   }[];
   explicitExclusions: {
@@ -334,9 +334,9 @@ export interface CoverageDocument {
     paths?: string[];
     surfaceIds?: string[];
     /**
-     * Stable identity of a saved candidate; omitted for general coverage work.
+     * A non-blank string identifies a saved candidate; other historical metadata is preserved unchanged.
      */
-    candidateId?: string;
+    candidateId?: unknown;
     /**
      * Saved candidate details and evidence awaiting a final decision.
      */

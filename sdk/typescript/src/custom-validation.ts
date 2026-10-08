@@ -410,7 +410,7 @@ export async function runCustomValidation(options: {
   const previousDeferred = new Map<string, DeferredCoverage[]>();
   coverage.deferred = coverage.deferred.filter((item) => {
     if (
-      item.candidateId === undefined ||
+      typeof item.candidateId !== "string" ||
       (item["sourceWorkerId"] != null &&
         typeof item["sourceWorkerId"] !== "string")
     )

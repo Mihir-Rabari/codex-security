@@ -96,9 +96,8 @@
             "minLength": 1
           },
           "candidateId": {
-            "type": "string",
-            "minLength": 1,
-            "description": "Stable identity of a saved candidate; omitted for general coverage work."
+            "description": "A non-blank string identifies a saved candidate; other historical metadata is preserved unchanged.",
+            "tsType": "unknown"
           }
         }
       }
@@ -149,9 +148,8 @@
             }
           },
           "candidateId": {
-            "type": "string",
-            "minLength": 1,
-            "description": "Stable identity of a saved candidate; omitted for general coverage work."
+            "description": "A non-blank string identifies a saved candidate; other historical metadata is preserved unchanged.",
+            "tsType": "unknown"
           },
           "candidate": {
             "description": "Saved candidate details and evidence awaiting a final decision.",

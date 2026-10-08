@@ -1634,3 +1634,37 @@ for (const candidate of [
     expect(await readFile(join(scanDir, "coverage.json"))).toEqual(original);
   });
 }
+
+for (const candidateId of [
+  null,
+  false,
+  0,
+  {},
+  ["historical"],
+  "",
+  " ",
+  "review/auth",
+]) {
+  test(`loads sealed coverage with generic candidateId metadata ${JSON.stringify(candidateId)}`, async () => {
+    const scanDir = await copyExample();
+    const coverage = await readJson(join(scanDir, "coverage.json"));
+    coverage["surfaces"][0]["candidateId"] = candidateId;
+    coverage["completeness"] = "partial";
+    coverage["deferred"] = [
+      {
+        id: "historical-review",
+        candidateId,
+        reason: "Independent review remains.",
+      },
+    ];
+    await writeJson(join(scanDir, "coverage.json"), coverage);
+    await reseal(scanDir);
+    const original = await readFile(join(scanDir, "coverage.json"));
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    expect(loaded.coverage.surfaces[0]!["candidateId"]).toEqual(candidateId);
+    expect(loaded.coverage.deferred[0]!["candidateId"]).toEqual(candidateId);
+    const exported = pythonExport(scanDir);
+    expect(exported.exitCode).toBe(0);
+    expect(await readFile(join(scanDir, "coverage.json"))).toEqual(original);
+  });
+}

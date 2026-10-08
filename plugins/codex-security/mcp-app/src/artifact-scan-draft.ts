@@ -97,12 +97,6 @@ export const scanDraftInputSchema = loadArtifactZodSchema(
   "scanDraftInput",
 ) as z.ZodType<ScanDraftInput>;
 
-const coverageCandidateIdSchema = loadArtifactZodSchema(
-  schemaDocuments,
-  commonSchema.$id,
-  "candidateId",
-);
-
 export const completedScanInputSchema = loadArtifactZodSchema(
   schemaDocuments,
   scanDraftDocument.$id,
@@ -2686,8 +2680,7 @@ function normalizeLegacyCandidateEntry(item: JsonObject): JsonObject {
   if (
     item.candidateId === undefined &&
     typeof item.id === "string" &&
-    (isObject(item.candidate) || isObject(item.finding)) &&
-    coverageCandidateIdSchema.safeParse(item.id).success
+    (isObject(item.candidate) || isObject(item.finding))
   )
     return { ...item, candidateId: item.id };
   return item;
