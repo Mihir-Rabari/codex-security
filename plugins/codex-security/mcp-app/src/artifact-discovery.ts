@@ -1,7 +1,14 @@
-import { execFile } from "node:child_process";
-import { promises as fs } from "node:fs";
-import { dirname, join } from "node:path";
-import { promisify } from "node:util";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { decodeUtf8 } from "./helpers/utf8.js";
+import { resolvePythonCommand, runPythonWithInput } from "./python_command.js";
+import {
+  createCandidateNormalizer,
+  stableJson,
+  relativeFile,
+  pathKey,
+  type CandidateSource,
+} from "./helpers/normalize-candidates.js";
 import type * as z from "zod/v4";
 import discoveryCandidateDefinitions from "../../schemas/definitions/discovery-candidate.schema.json";
 import discoveryCandidatesToolSchema from "../../schemas/tools/discovery-candidates.schema.json";
@@ -10,7 +17,8 @@ import {
   artifactDestination,
   paginateArtifactRows,
   readArtifactJsonl,
-  readArtifactText,
+  artifactSourcePath,
+  replaceArtifactText,
 } from "./artifact-io.js";
 import {
   loadArtifactZodSchema,
@@ -18,7 +26,6 @@ import {
 } from "./artifact-schema-loader.js";
 import { candidateSchemaV1 } from "./deep-scan/artifact-contracts.js";
 
-const execFileAsync = promisify(execFile);
 const discoveryComponents = ["artifacts", "02_discovery"] as const;
 const discoveryLabel = "discovery candidates";
 const discoverySchemaDocuments = [
@@ -105,109 +112,141 @@ export interface ListCodexSecurityCandidatesResult {
   nextCursor?: string;
 }
 
-/**
- * Invoke the shared discovery normalizer. Only its canonical output persists;
- * raw candidate input is kept in a private temporary directory and always removed.
- */
+/** Normalize in memory and replace the bound canonical candidate ledger. */
 export async function recordCodexSecurityDiscoveryCandidates(
   input: DiscoveryCandidatesInput,
   context: ArtifactContext,
 ): Promise<RecordCodexSecurityDiscoveryCandidatesResult> {
   const { candidates } = discoveryCandidatesInputSchema.parse(input);
-  const pluginRoot = context.pluginRoot?.trim();
-  if (!pluginRoot) {
-    throw new Error(
-      "discovery candidates: the plugin runtime is not bound to this scan; " +
-        "restore the scan context before retrying.",
-    );
-  }
-
   const inventoryComponents = [...discoveryComponents, "in_scope_files.txt"];
-  const candidateComponents = [
-    ...discoveryComponents,
-    "candidate_ledger.jsonl",
-  ];
-
-  // Verify the inventory is a context-bound regular file before normalization.
-  await readArtifactText(
-    context,
-    inventoryComponents,
-    "discovery review inventory",
-  );
-  const inventoryPath = await artifactDestination(
+  const inventory = await artifactSourcePath(
     context,
     inventoryComponents,
     "discovery review inventory",
   );
   const destination = await artifactDestination(
     context,
-    candidateComponents,
+    [...discoveryComponents, "candidate_ledger.jsonl"],
     discoveryLabel,
   );
-  const temporaryDirectory = await fs.mkdtemp(
-    join(dirname(destination), ".discovery-candidates-"),
+  const normalizer = createCandidateNormalizer(
+    context.repoRoot,
+    inventory,
+    context.mode === "diff",
+    context.mode === "diff"
+      ? await diffCandidateSources(context, inventory, candidates)
+      : undefined,
   );
-  const temporaryInput = join(temporaryDirectory, "candidates.jsonl");
-
-  try {
-    await fs.chmod(temporaryDirectory, 0o700);
-    const content = candidates
-      .map((candidate) => `${JSON.stringify(candidate)}\n`)
-      .join("");
-    await fs.writeFile(temporaryInput, content, {
-      encoding: "utf8",
-      flag: "wx",
-      mode: 0o600,
-    });
-
+  for (const [index, candidate] of candidates.entries()) {
     try {
-      await execFileAsync(
-        process.execPath,
-        [
-          join(pluginRoot, "mcp", "helpers.mjs"),
-          "normalize-candidates",
-          "--input",
-          temporaryInput,
-          "--out",
-          destination,
-          "--repo-root",
-          context.repoRoot,
-          "--in-scope-files",
-          inventoryPath,
-          ...(context.mode === "diff" ? ["--allow-missing-in-scope"] : []),
-        ],
-        {
-          cwd: pluginRoot,
-          encoding: "utf8",
-          shell: false,
-        },
-      );
+      normalizer.add(candidate);
     } catch (error) {
-      throw discoveryNormalizationError(error, [
-        [temporaryInput, "candidate input"],
-        [temporaryDirectory, "private candidate input"],
-        [inventoryPath, "the assigned review inventory"],
-        [destination, "the candidate set"],
-        [context.repoRoot, "the repository"],
-        [pluginRoot, "the plugin runtime"],
-      ]);
+      throw new Error(
+        `${discoveryLabel}: candidate input row ${index + 1}: ${(error as Error).message}`,
+        { cause: error },
+      );
     }
-
-    const normalized = await readArtifactJsonl(
-      context,
-      candidateComponents,
-      discoveryLabel,
-      candidateSchemaV1,
-    );
-    return {
-      operation: "replace",
-      candidatesRecorded: normalized.length,
-    };
-  } finally {
-    await fs
-      .rm(temporaryDirectory, { recursive: true, force: true })
-      .catch(() => undefined);
   }
+  const rows = normalizer.finish();
+  await replaceArtifactText(
+    destination,
+    rows.map((row) => `${stableJson(row)}\n`).join(""),
+  );
+  return { operation: "replace", candidatesRecorded: rows.length };
+}
+
+async function diffCandidateSources(
+  context: ArtifactContext,
+  inventory: string,
+  candidates: RawDiscoveryCandidate[],
+): Promise<Map<string, CandidateSource>> {
+  const target = context.targetContract?.diffTarget as
+    Record<string, unknown> | undefined;
+  if (
+    !context.pluginRoot ||
+    !target ||
+    !["working_tree", "commit", "range"].includes(String(target.kind)) ||
+    typeof target.baseRevision !== "string" ||
+    !target.baseRevision ||
+    typeof target.headRevision !== "string" ||
+    !target.headRevision
+  ) {
+    throw new Error(
+      "discovery candidates: the diff scan has no authoritative change set.",
+    );
+  }
+  const nativePath = (value: string) =>
+    process.platform === "win32" ? value.replaceAll("\\", "/") : value;
+  const paths = decodeUtf8(await readFile(inventory))
+    .split("\n")
+    .flatMap((row, index, lines) =>
+      row.endsWith("\r") && index < lines.length - 1
+        ? process.platform === "win32"
+          ? [row.slice(0, -1)]
+          : [row, row.slice(0, -1)]
+        : [row],
+    )
+    .filter(Boolean)
+    .map(nativePath);
+  const locations = candidates.flatMap((candidate) =>
+    candidate.locations.map((location) => nativePath(location.path)),
+  );
+  const aliases = new Map<string, string>();
+  if (process.platform === "win32") {
+    for (const value of new Set([...paths, ...locations])) {
+      try {
+        const [name] = relativeFile(value, context.repoRoot);
+        if (value !== name && pathKey(value) === pathKey(name))
+          aliases.set(value, name);
+      } catch {
+        // The selected revision may contain a file absent from this checkout.
+      }
+    }
+  }
+  const python = context.pythonCommand ?? (await resolvePythonCommand());
+  const output = await runPythonWithInput(
+    python,
+    [
+      "-I",
+      "-X",
+      "utf8",
+      "-c",
+      `import json, subprocess, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from workbench_target import candidate_source_lines
+try:
+    json.dump(candidate_source_lines(Path(sys.argv[2]), **json.load(sys.stdin)), sys.stdout)
+except subprocess.CalledProcessError as error:
+    if error.stderr:
+        sys.stderr.buffer.write(error.stderr)
+    raise`,
+      join(context.pluginRoot, "scripts"),
+      context.repoRoot,
+    ],
+    JSON.stringify({
+      diff_target: target,
+      paths: [...paths, ...aliases.values()],
+      locations: locations.flatMap((value) =>
+        aliases.has(value) ? [value, aliases.get(value)!] : [value],
+      ),
+    }),
+    "Diff source reader",
+  );
+  const sources = new Map(
+    Object.entries(JSON.parse(output) as Record<string, CandidateSource>),
+  );
+  for (const [value, name] of aliases) {
+    const source = sources.get(value);
+    if (
+      source &&
+      "error" in source &&
+      source.error === "missing" &&
+      sources.has(name)
+    )
+      sources.set(value, sources.get(name)!);
+  }
+  return sources;
 }
 
 /** Read the actual compact ledger, including records added by later shared phases. */
@@ -223,36 +262,4 @@ export async function listCodexSecurityCandidates(
     compactDiscoveryCandidateSchema,
   );
   return paginateArtifactRows(rows, page, discoveryLabel);
-}
-
-function discoveryNormalizationError(
-  error: unknown,
-  privateValues: Array<readonly [string, string]>,
-): Error {
-  const stderr =
-    error && typeof error === "object" && "stderr" in error
-      ? error.stderr
-      : undefined;
-  let detail =
-    typeof stderr === "string"
-      ? stderr.trim()
-      : Buffer.isBuffer(stderr)
-        ? stderr.toString("utf8").trim()
-        : "";
-
-  if (!detail) {
-    return new Error(
-      `${discoveryLabel}: normalization could not be confirmed; ` +
-        "read the current candidate set before retrying.",
-      { cause: error },
-    );
-  }
-
-  for (const [source, replacement] of [...privateValues].sort(
-    ([left], [right]) => right.length - left.length,
-  )) {
-    if (source) detail = detail.replaceAll(source, replacement);
-  }
-  detail = detail.replace(/^normalize_candidates:\s*/u, "");
-  return new Error(`${discoveryLabel}: ${detail}`, { cause: error });
 }
