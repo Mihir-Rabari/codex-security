@@ -31,7 +31,7 @@ const { temporaryDirectories: roots, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
 const description =
-  'An imported report with a comma, a "quoted value", and Unicode: café.\n\n' +
+  'An imported report with a comma, a "quoted value", and Unicode: café �.\n\n' +
   "The full second paragraph must survive importing and indexing.\n" +
   "A final line describes the reported impact.";
 const sourceOccurrenceIds = [
@@ -337,6 +337,29 @@ test.each([false, true])(
     ).rejects.toThrow("non-finite JSON numbers are not supported");
     expect(workbench).not.toHaveBeenCalled();
     expect(await readFile(context.options.sourcePath, "utf8")).toBe(source);
+  },
+);
+
+test.each(["csv", "json"] as const)(
+  "%s import rejects invalid UTF-8 before persistence and preserves valid text",
+  async (format) => {
+    const context = await fixture(format);
+    const source = Buffer.from(`\uFEFF${context.source}`);
+    await writeFile(context.options.sourcePath, source);
+    const workbench = mock(runWorkbench);
+    const dependencies = { ...context.dependencies, runWorkbench: workbench };
+    expect(
+      await importScan({ ...context.options, dryRun: true }, dependencies),
+    ).toMatchObject({ findingCount: 2 });
+    source[source.indexOf(Buffer.from("café"))] = 0xff;
+    await writeFile(context.options.sourcePath, source);
+    for (const dryRun of [false, true]) {
+      await expect(
+        importScan({ ...context.options, dryRun }, dependencies),
+      ).rejects.toThrow(TypeError);
+    }
+    expect(workbench).not.toHaveBeenCalled();
+    expect(await readFile(context.options.sourcePath)).toEqual(source);
   },
 );
 

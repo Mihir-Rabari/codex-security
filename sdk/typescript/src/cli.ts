@@ -1815,6 +1815,7 @@ export async function main(
   let exitCode = 0;
   let frameworkExit: number | undefined;
   const frameworkCapture = captureOutput();
+  let rawExportOutput = false;
   let streamedLogs: Awaited<ReturnType<typeof readSavedScanLogs>> | undefined;
   let renderedHistory: string | undefined;
   let renderedPublication: string | undefined;
@@ -4816,6 +4817,7 @@ export async function main(
                 ),
             );
           }
+          rawExportOutput = options.output === "-";
           exitCode = await runExport(
             {
               scanDir: resolveCliPath(currentDirectory, scanDir),
@@ -5944,6 +5946,7 @@ export async function main(
       return 2;
     }
   }
+  if (rawExportOutput) return exitCode;
   if (
     frameworkOutput.length === 0 &&
     streamedLogs === undefined &&

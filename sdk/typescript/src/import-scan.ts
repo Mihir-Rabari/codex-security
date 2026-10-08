@@ -136,7 +136,7 @@ export async function importScan(
       signal,
     );
     const findings = await parseImportedFindings(
-      source.toString("utf8"),
+      new TextDecoder("utf-8", { fatal: true }).decode(source),
       options.format,
       pluginRoot,
     );
