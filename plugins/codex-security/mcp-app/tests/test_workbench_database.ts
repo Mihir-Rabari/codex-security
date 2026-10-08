@@ -243,7 +243,7 @@ test(
         database
           .prepare("SELECT MAX(version) AS version FROM schema_migrations")
           .get()?.version,
-        migrations.at(-1)?.version,
+        migrations.at(-1)!.version,
       );
     } finally {
       database.close();
