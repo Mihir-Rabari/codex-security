@@ -2317,7 +2317,25 @@ describe("CodexSecurity orchestration", () => {
         expect(
           await readFile(join(root, "registration-input.json"), "utf8"),
         ).toBe(submitted!);
-        const closed = once(socket, "close", { signal: deadline });
+        const closed = new Promise<void>((resolve, reject) => {
+          deadline.throwIfAborted();
+          const aborted = () => reject(deadline.reason);
+          deadline.addEventListener("abort", aborted, { once: true });
+          socket!.once("close", () => {
+            deadline.removeEventListener("abort", aborted);
+            resolve();
+          });
+          socket!.on("error", (error: NodeJS.ErrnoException) => {
+            // Windows can reset the gate when cancellation kills Python.
+            if (
+              error.code !== "ECONNRESET" ||
+              boundary === "commit" ||
+              boundary === "rollback"
+            ) {
+              reject(error);
+            }
+          });
+        });
         if (cancel === "close") closing = client.close();
         else controller.abort();
         if (boundary === "commit" || boundary === "rollback") {
