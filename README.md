@@ -52,6 +52,10 @@ Run your scan from the repository directory:
 cs scan .
 ```
 
+If you have Daybreak Blue access, add `--cyber-access-program daybreak_blue`
+to the scan command. Otherwise, omit the flag or use
+`--cyber-access-program standard`.
+
 To run without a global installation, replace `cs` in these examples with
 `npx @openai/codex-security`, for example:
 
@@ -144,6 +148,10 @@ repository scan, add an OpenAI API key as the repository secret
 `.github/workflows/codex-security.yml`. Replace `REPLACE_WITH_REVIEWED_COMMIT`
 with the full SHA of an Action commit.
 
+This workflow requests Daybreak Blue. Use an API key from a project with Blue
+enabled; without Daybreak access, omit `cyber-access-program` or set it to
+`standard`.
+
 ```yaml
 name: Codex Security
 on:
@@ -158,6 +166,7 @@ jobs:
   security:
     runs-on: ubuntu-24.04
     steps:
+      # Configure Bubblewrap and AppArmor so Codex Security can run safely in its sandbox.
       - name: Set up the Ubuntu sandbox
         run: |
           sudo apt-get update
@@ -170,6 +179,7 @@ jobs:
         with:
           model: gpt-5.6-sol
           effort: high
+          cyber-access-program: daybreak_blue
         env:
           OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
 ```

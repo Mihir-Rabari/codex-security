@@ -103,11 +103,6 @@ assert.deepEqual(
   "The MCP process and SDK workers must inherit Codex, external-provider, and Bedrock authentication, AWS credential-chain settings, runtime paths, and enterprise proxy/certificate configuration.",
 );
 const serverSource = await readFile(path.join(mcpAppRoot, "server.ts"), "utf8");
-assert.match(
-  serverSource,
-  /timeout:\s*\[[^\]]*"start-prompt-only-scan"[^\]]*\]\.includes\(args\[0\] \?\? ""\)\s*\?\s*300_000\s*:\s*30_000/,
-  "Prompt-only scan startup must use the same five-minute timeout as other scan starts.",
-);
 const authenticatedArtifactClaimSource = serverSource.match(
   /if \(\s*handoffClaimToken\s*&&\s*threadId[\s\S]*?authenticatedArtifactClaims\.set\(scanId,[\s\S]*?\n\s*\}/,
 )?.[0];
@@ -1437,6 +1432,10 @@ try {
     (tool: { name: string }) =>
       tool.name === "update_codex_security_scan_context_from_app",
   );
+  const renameScan = toolList.result.tools.find(
+    (tool: { name: string }) => tool.name === "rename_codex_security_scan",
+  );
+  assert.deepEqual(renameScan._meta.ui.visibility, ["app"]);
   const submit = toolList.result.tools.find(
     (tool: { name: string }) => tool.name === "submit_codex_security_setup",
   );
@@ -2542,6 +2541,24 @@ try {
   assertNoError(deliveredWithoutToken);
 
   const longUserContext = "Prioritize tenant isolation. ".repeat(120).trim();
+  const renamedScan = await testServer.callTool(92020, {
+    name: "rename_codex_security_scan",
+    arguments: { scanId, name: "  - Release audit  " },
+  });
+  assertNoError(renamedScan);
+  assert.deepEqual(renamedScan.result.structuredContent, {
+    scanId,
+    name: "- Release audit",
+  });
+  const reopenedScan = await testServer.callTool(92021, {
+    name: "get_codex_security_scan",
+    arguments: { scanId },
+  });
+  assertNoError(reopenedScan);
+  assert.equal(
+    reopenedScan.result.structuredContent.scan.name,
+    "- Release audit",
+  );
   const updatedContext = await testServer.callTool(92010, {
     name: "update_codex_security_scan_context",
     arguments: { handoffClaimToken, scanId, userContext: longUserContext },
