@@ -409,7 +409,10 @@ def preserve_budget_candidates(
         if candidate is None:
             continue
         phase = _diff_candidate_phase_snapshot(candidate)
-        if key in receipt_reopened:
+        if key in receipt_reopened and diff_candidate_disposition(candidate) in (
+            "rejected",
+            "not_applicable",
+        ):
             item["receiptReopenedDecision"] = copy.deepcopy(phase)
         elif item.get("receiptReopenedDecision") == phase:
             receipt_reopened.add(key)
