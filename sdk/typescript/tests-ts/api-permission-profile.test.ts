@@ -142,7 +142,7 @@ async function fixture(
       "  };",
       '  if (args.includes("--profile")) merge(config, parse(fs.readFileSync(require("node:path").join(process.env.CODEX_HOME, args[args.indexOf("--profile") + 1] + ".config.toml"), "utf8")));',
       '  for (let index = 0; index < args.length; index++) if (["-c", "--config"].includes(args[index])) merge(config, parse(args[++index]));',
-      'record({ kind: args.includes("mcp") ? "mcp" : args.includes("app-server") ? "preflight" : "exec", args, cwd: process.cwd(), surface: process.env.CODEX_SECURITY_SURFACE, profile: config.default_permissions, permissions: config.permissions, mcpServers: config.mcp_servers, literalSetting: config["synthetic.setting"], projects: config.projects, context: process.env.SYNTHETIC_EXECUTION_CONTEXT, workerLimit: config.features?.multi_agent_v2?.max_concurrent_threads_per_session, snapshotLimit: process.env.CODEX_SECURITY_CONFIG_PATH ? parse(fs.readFileSync(process.env.CODEX_SECURITY_CONFIG_PATH, "utf8")).features?.multi_agent_v2?.max_concurrent_threads_per_session : null, selectedProfile: config.profile ?? null, modelProvider: config.model_provider, modelProviders: config.model_providers, model: config.model, effort: config.model_reasoning_effort, modelContextWindow: config.model_context_window, autoCompactTokenLimit: config.model_auto_compact_token_limit, forcedLogin: config.forced_login_method ?? null, forcedWorkspace: config.forced_chatgpt_workspace_id ?? null, apiKey: process.env.CODEX_API_KEY });',
+      'record({ kind: args.includes("mcp") ? "mcp" : args.includes("app-server") ? "preflight" : "exec", args, cwd: process.cwd(), surface: process.env.CODEX_SECURITY_SURFACE, profile: config.default_permissions, permissions: config.permissions, mcpServers: config.mcp_servers, literalSetting: config["synthetic.setting"], projects: config.projects, context: process.env.SYNTHETIC_EXECUTION_CONTEXT, workerLimit: config.features?.multi_agent_v2?.max_concurrent_threads_per_session, snapshotLimit: process.env.CODEX_SECURITY_CONFIG_PATH ? parse(fs.readFileSync(process.env.CODEX_SECURITY_CONFIG_PATH, "utf8")).features?.multi_agent_v2?.max_concurrent_threads_per_session : null, selectedProfile: config.profile ?? null, modelProvider: config.model_provider, endpoint: config.openai_base_url, modelProviders: config.model_providers, model: config.model, effort: config.model_reasoning_effort, modelContextWindow: config.model_context_window, autoCompactTokenLimit: config.model_auto_compact_token_limit, forcedLogin: config.forced_login_method ?? null, forcedWorkspace: config.forced_chatgpt_workspace_id ?? null, apiKey: process.env.CODEX_API_KEY });',
       ...(replaceSelectedPlugin
         ? [
             'const servers = JSON.parse(require("node:child_process").execFileSync(' +
@@ -376,8 +376,11 @@ async function fixture(
         ...(selectedProfile
           ? {
               profile: selectedProfile,
+              openai_base_url: "https://overridden.example.test/v1",
               profiles: {
                 selected: {
+                  openai_base_url:
+                    "https://synthetic-user:synthetic-password@selected.example.test/v1?token=synthetic-token",
                   model_provider: "synthetic.selected",
                   model: "gpt-6-astra",
                   model_reasoning_effort: "high",
@@ -407,6 +410,12 @@ async function fixture(
         preserveCodexHomeConfig,
       }),
       resolvePluginPython: async () => {
+        if (selectedProfile === "selected") {
+          await writeFile(
+            join(codexHome, "config.toml"),
+            'openai_base_url = "https://changed-after-capture.example.test/v1"\n',
+          );
+        }
         if (replacementPlugin !== undefined) {
           await bootstrapPlugin(codexHome, replacementPlugin, pluginOptions);
           replacementPlugin = undefined;
@@ -1191,6 +1200,8 @@ test("selected profile launch survives shared-home settings for fresh and resume
           expect(launch).toMatchObject({
             literalSetting: "literal-top-level-value",
             modelProvider: "synthetic.selected",
+            endpoint:
+              "https://synthetic-user:synthetic-password@selected.example.test/v1?token=synthetic-token",
             modelProviders: {
               "synthetic.selected": {
                 base_url: "https://example.invalid/v1",
