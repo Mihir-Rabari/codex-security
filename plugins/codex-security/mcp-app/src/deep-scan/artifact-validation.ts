@@ -497,7 +497,7 @@ export function projectDiscoveryCoverage(
           ).map((item) => {
             const projected = project("resolvedDeferred", item);
             return {
-              ...projected,
+              ...item,
               id: `${prefix(projected)}-resolved-${item.id}`,
             };
           }),

@@ -32,7 +32,7 @@ for (const resume of [false, true]) {
   }
 }
 
-const { readDeepReductionSources } = await (
+const { readDeepReductionSources, recordCodexSecurityDeepReduction } = await (
   await import("./import-module.ts")
 ).importSource(
   fileURLToPath(new URL("../src/artifact-deep-reducer.ts", import.meta.url)),
@@ -41,6 +41,13 @@ const { recordCodexSecurityWorkerScanDraft } = await (
   await import("./import-module.ts")
 ).importSource(
   fileURLToPath(new URL("../src/artifact-scan-draft.ts", import.meta.url)),
+);
+const { parseDeepReduction } = await (
+  await import("./import-module.ts")
+).importSource(
+  fileURLToPath(
+    new URL("../src/deep-scan/artifact-validation.ts", import.meta.url),
+  ),
 );
 const { workerDraft, scanId } = await import("./scan-draft-fixture.ts");
 const { archiveDirectory } = await (
@@ -135,7 +142,7 @@ for (const mode of ["archived", "fresh", "reassessed"]) {
       const resultPath = path.join(output, "result.json");
       const persisted = JSON.parse(await readFile(resultPath, "utf8"));
       assert.equal(persisted.coverage.resolvedDeferred.length, 1);
-      const sources = await readDeepReductionSources({
+      const reductionContext = {
         root: path.join(
           root,
           "artifacts",
@@ -149,9 +156,11 @@ for (const mode of ["archived", "fresh", "reassessed"]) {
         layout: "reducer",
         deepReducer: {
           scanRoot: root,
+          persistSourceCoverage: true,
           claimedWorkers: [{ id: "worker", attempt: 2, resultPath }],
         },
-      });
+      };
+      const sources = await readDeepReductionSources(reductionContext);
       const projected = sources.discoveries[0].coverage;
       const expectedAttempt = mode === "archived" ? 1 : 2;
       assert.equal(
@@ -161,6 +170,20 @@ for (const mode of ["archived", "fresh", "reassessed"]) {
       assert.equal(projected.resolvedDeferred[0].reason, currentClosure.reason);
       assert.ok(
         projected.reviews.some((review) => review.attempt === expectedAttempt),
+      );
+      await mkdir(reductionContext.root, { recursive: true });
+      await recordCodexSecurityDeepReduction(reductionContext, {
+        scanId,
+        complete: true,
+        findings: [],
+      });
+      const reduced = JSON.parse(
+        await readFile(path.join(reductionContext.root, "result.json"), "utf8"),
+      );
+      const accepted = parseDeepReduction(reduced, true);
+      assert.deepEqual(
+        accepted.sourceCoverage.resolvedDeferred,
+        projected.resolvedDeferred,
       );
       for (const [file, bytes] of saved)
         assert.deepEqual(await readFile(file), bytes);
