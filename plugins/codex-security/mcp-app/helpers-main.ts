@@ -66,7 +66,7 @@ if (command === "config-preflight") {
   command === "make-repo-scope-input" ||
   command === "make-diff-rank-input"
 ) {
-  void inventoryCommand(command, args, posixHome).then((code) => {
+  void inventoryCommand(command, args).then((code) => {
     process.exitCode = code;
   });
 } else if (command === "resolve-security-md") {

@@ -1,4 +1,7 @@
-import { resolvedPathText as canonical } from "./helper-files";
+import {
+  environmentValue,
+  resolvedPathText as canonical,
+} from "./helper-files";
 import {
   spawn,
   type SpawnOptions,
@@ -49,7 +52,7 @@ function trustedGit(target: string): string | undefined {
   let protectedRoot = canonical(target);
   for (const ancestor of ancestors(protectedRoot))
     if (exists(append(ancestor, ".git"))) protectedRoot = ancestor;
-  const configured = process.env.CODEX_SECURITY_GIT;
+  const configured = environmentValue("CODEX_SECURITY_GIT");
   if (configured === "") return undefined;
   if (configured !== undefined && !isAbsolute(configured))
     throw new Error(
@@ -58,7 +61,7 @@ function trustedGit(target: string): string | undefined {
   const candidates =
     configured !== undefined
       ? [configured]
-      : (process.env.PATH ?? "")
+      : (environmentValue("PATH") ?? "")
           .split(delimiter)
           .flatMap((entry) =>
             (windows ? ["git.exe", "git.com"] : ["git"]).map((name) =>
@@ -104,12 +107,22 @@ function trustedGit(target: string): string | undefined {
 function spawnTool(
   command: string,
   args: string[],
-  options: SpawnOptions = {},
+  options: SpawnOptions & {
+    cwd?: string;
+    stdio: ["ignore" | "pipe", "pipe", "pipe"];
+  },
+  inheritedEnvironment: Record<string, string>,
 ) {
+  const raw = (value: string) =>
+    (windows ? /[\ud800-\udfff]/u : /[\udc80-\udcff]/u).test(value);
+  const environment = Object.fromEntries(
+    Object.entries(inheritedEnvironment).filter(([, value]) => raw(value)),
+  );
   const values = [
     command,
     ...args,
     ...(typeof options.cwd === "string" ? [options.cwd] : []),
+    ...Object.values(environment),
   ];
   if (windows) {
     if (!values.some((value) => /[\ud800-\udfff]/u.test(value)))
@@ -117,12 +130,7 @@ function spawnTool(
     const binary = createRequire(import.meta.url).resolve(
       `./native/${nativeTarget}/windows.node`,
     );
-    return spawnWindowsProcess(
-      binary,
-      command,
-      args,
-      options as SpawnOptions & { stdio: ["pipe" | "ignore", "pipe", "pipe"] },
-    );
+    return spawnWindowsProcess(binary, command, args, options, environment);
   }
   if (!values.some((value) => /[\udc80-\udcff]/u.test(value)))
     return spawn(command, args, options);
@@ -138,6 +146,10 @@ function spawnTool(
   };
   const script = [
     "set --",
+    ...Object.entries(environment).flatMap(([name, value]) => [
+      assign(value),
+      `${name}="$value"; export ${name}`,
+    ]),
     ...[command, ...args].flatMap((value) => [
       assign(value),
       'set -- "$@" "$value"',
@@ -148,6 +160,16 @@ function spawnTool(
     'exec "$@"',
   ].join("\n");
   return spawn("/bin/sh", ["-c", script], { ...options, cwd: undefined });
+}
+
+// Both callers inherit these paths; Git's separate repository-variable overrides stay intact.
+function inheritedToolPaths(): Record<string, string> {
+  return Object.fromEntries(
+    ["HOME", "PATH"].flatMap((name) => {
+      const value = environmentValue(name);
+      return value === undefined ? [] : [[name, value]];
+    }),
+  );
 }
 
 function gitProcess(repo: string, args: string[]) {
@@ -172,6 +194,7 @@ function gitProcess(repo: string, args: string[]) {
       ...args,
     ],
     { env, stdio: ["pipe", "pipe", "pipe"] },
+    inheritedToolPaths(),
   ) as ChildProcessWithoutNullStreams;
 }
 
@@ -180,10 +203,15 @@ export async function runTool(
   args: string[],
   cwd: string,
 ): Promise<{ status: number; stdout: Buffer; stderr: string }> {
-  const child = spawnTool(command, args, {
-    cwd,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const child = spawnTool(
+    command,
+    args,
+    {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+    inheritedToolPaths(),
+  );
   return collect(child);
 }
 

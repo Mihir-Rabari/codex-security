@@ -1,4 +1,7 @@
-import { resolvedPathText as canonical } from "./helper-files";
+import {
+  environmentValue,
+  resolvedPathText as canonical,
+} from "./helper-files";
 import { randomBytes } from "node:crypto";
 import {
   closeSync,
@@ -226,7 +229,7 @@ function writeInventory(output: string, rows: Buffer[]): number {
 export async function generateInventory(
   command: InventoryCommand,
   options: InventoryOptions,
-  home = process.env.HOME,
+  home = environmentValue("HOME"),
 ): Promise<number> {
   const repo = canonical(expandHome(options.repo, home));
   if (!directory(repo)) throw new Error(`Repo path not found: ${repo}`);
@@ -450,7 +453,7 @@ export async function generateInventory(
 export async function inventoryCommand(
   command: InventoryCommand,
   args: string[],
-  home = process.env.HOME,
+  home = environmentValue("HOME"),
 ): Promise<number> {
   const inventory = command === "generate-in-scope-files",
     diff = command === "make-diff-rank-input",

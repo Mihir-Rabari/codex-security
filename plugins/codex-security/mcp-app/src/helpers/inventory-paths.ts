@@ -125,7 +125,7 @@ export function* walk(path: string): Iterable<string> {
 }
 export function executable(path: string): boolean {
   try {
-    accessSync(fsPath(path), windows ? constants.F_OK : constants.X_OK);
+    if (!windows) accessSync(fsPath(path), constants.X_OK);
     return stat(path).isFile();
   } catch {
     return false;

@@ -542,3 +542,138 @@ test("explicit scopes preserve literal glob, tilde and colon filenames", () => {
       .map((row) => row.path),
   ).toEqual([...files].sort());
 });
+
+for (const rawExecutable of [false, true])
+  test.skipIf(process.platform === "win32")(
+    `Git children retain raw HOME/PATH and explicit Git filters (raw executable: ${rawExecutable})`,
+    () => {
+      const f = fixture();
+      f.write("visible.py");
+      f.write("hidden.py");
+      const home = Buffer.concat([
+        Buffer.from(f.root + "/home-"),
+        Buffer.from([0xff]),
+      ]);
+      const bin = Buffer.concat([
+        Buffer.from(f.root + "/bin-"),
+        Buffer.from([0xfe]),
+      ]);
+      mkdirSync(home);
+      mkdirSync(bin);
+      writeFileSync(
+        Buffer.concat([home, Buffer.from("/.gitconfig")]),
+        "[core]\nexcludesFile = ~/.gitignore_global\n",
+      );
+      writeFileSync(
+        Buffer.concat([home, Buffer.from("/.gitignore_global")]),
+        "hidden.py\n",
+      );
+      writeFileSync(
+        Buffer.concat([bin, Buffer.from("/inventory-child-tool")]),
+        '#!/bin/sh\nprintf executed > "$INVENTORY_CHILD_MARKER"\n',
+        { mode: 0o700 },
+      );
+      const gitPath = Buffer.concat([
+        Buffer.from(f.root + "/git-"),
+        rawExecutable ? Buffer.from([0xfd]) : Buffer.from("wrapper"),
+      ]);
+      const hostGit = Bun.which("git")!;
+      const quote = (value: string) =>
+        "'" + value.replaceAll("'", "'\\''") + "'";
+      writeFileSync(
+        gitPath,
+        `#!/bin/sh\nset -e\ntest "$GIT_LITERAL_PATHSPECS" = 1\ntest -z "\${GIT_DIR+x}"\ninventory-child-tool\nexec ${quote(hostGit)} "$@"\n`,
+        { mode: 0o700 },
+      );
+      const octal = (bytes: Buffer) =>
+        [...bytes]
+          .map((byte) => `\\0${byte.toString(8).padStart(3, "0")}`)
+          .join("");
+      const marker = join(f.root, "child-ran");
+      const script = [
+        `HOME=$(printf '%b' '${octal(home)}'); export HOME`,
+        `raw_bin=$(printf '%b' '${octal(bin)}'); PATH="$raw_bin"; export PATH`,
+        `CODEX_SECURITY_GIT=$(printf '%b' '${octal(gitPath)}'); export CODEX_SECURITY_GIT`,
+        'exec "$1" "$2" make-repo-rank-input --repo "$3" --out "$4"',
+      ].join("\n");
+      const result = spawnSync(
+        "/bin/sh",
+        [
+          "-c",
+          script,
+          "inventory-env",
+          node,
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          f.repo,
+          f.out,
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            GIT_CONFIG_GLOBAL: undefined,
+            GIT_CONFIG_NOSYSTEM: "1",
+            GIT_DIR: join(f.root, "wrong-git"),
+            GIT_LITERAL_PATHSPECS: "0",
+            INVENTORY_CHILD_MARKER: marker,
+          },
+        },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(
+        readFileSync(f.out, "utf8")
+          .trim()
+          .split(/\r?\n/u)
+          .map((line) => JSON.parse(line).path),
+      ).toEqual(["visible.py"]);
+      expect(readFileSync(marker, "utf8")).toBe("executed");
+    },
+  );
+
+test.skipIf(process.platform === "win32")(
+  "ripgrep children retain raw HOME and PATH",
+  () => {
+    const f = fixture();
+    f.write("visible.py");
+    const home = Buffer.concat([
+      Buffer.from(f.root + "/home-"),
+      Buffer.from([0xff]),
+    ]);
+    const bin = Buffer.concat([
+      Buffer.from(f.root + "/bin-"),
+      Buffer.from([0xfe]),
+    ]);
+    mkdirSync(home);
+    mkdirSync(bin);
+    writeFileSync(Buffer.concat([home, Buffer.from("/marker")]), "raw-home\n");
+    writeFileSync(
+      Buffer.concat([bin, Buffer.from("/rg")]),
+      '#!/bin/sh\nset -e\nIFS= read -r value < "$HOME/marker"\ntest "$value" = raw-home\nprintf "./visible.py\\0"\n',
+      { mode: 0o700 },
+    );
+    const octal = (bytes: Buffer) =>
+      [...bytes]
+        .map((byte) => `\\0${byte.toString(8).padStart(3, "0")}`)
+        .join("");
+    const script = [
+      `HOME=$(printf '%b' '${octal(home)}'); export HOME`,
+      `PATH=$(printf '%b' '${octal(bin)}'); export PATH`,
+      'exec "$1" "$2" generate-in-scope-files --repo "$3" --scope . --out "$4"',
+    ].join("\n");
+    const result = spawnSync(
+      "/bin/sh",
+      [
+        "-c",
+        script,
+        "inventory-env",
+        node,
+        join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+        f.repo,
+        f.out,
+      ],
+      { encoding: "utf8", env: { ...process.env, CODEX_SECURITY_GIT: "" } },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(readFileSync(f.out, "utf8")).toBe("./visible.py\n");
+  },
+);
