@@ -380,8 +380,10 @@ function evaluate(values: Options): Table {
   let discovery: Table | null = null;
   const layers: Layer[] = [];
   if (values.config !== undefined) {
-    for (const file of values.config)
-      layers.push({ path: normalizePath(file), config: readToml(file) });
+    for (const file of values.config) {
+      const normalized = normalizePath(file);
+      layers.push({ path: normalized, config: readToml(normalized) });
+    }
   } else {
     const systemConfig = windows
       ? appendConfigPath(
@@ -799,7 +801,7 @@ export function configPreflightCommand(args: string[]): number {
                 `  --${name} VALUE${repeatedOptions.includes(name as (typeof repeatedOptions)[number]) ? " (repeatable)" : ""}`,
             )
             .join("\n") +
-          "\n  -h, --help",
+          "\n  -h, --help\n\n--multi-agent-session-cap accepts a positive ASCII decimal integer, such as 1000 or +1000.",
       );
       return 0;
     }
@@ -813,7 +815,9 @@ export function configPreflightCommand(args: string[]): number {
       cap !== undefined &&
       (!/^[+]?\d+$/u.test(cap.trim()) || BigInt(cap) < 1n)
     )
-      throw new Error("--multi-agent-session-cap must be a positive integer");
+      throw new Error(
+        "--multi-agent-session-cap must be a positive ASCII decimal integer (optional leading +)",
+      );
   } catch (error) {
     console.error(
       escapeControls(error instanceof Error ? error.message : String(error)),

@@ -92,6 +92,19 @@ const capacity = (payload: Payload) =>
 const goals = (payload: Payload) =>
   payload.results.find((item) => item.capability === "goals_enabled")!;
 
+test.each(["", "."])(
+  "manual config path %j cannot skip a directory",
+  async (file) => {
+    const result = await run(
+      ["--profile", "security_scan", "--config", file],
+      undefined,
+      await temporaryDirectory(),
+    );
+    expect(result.status).toBe(2);
+    expect(result.payload!.status).toBe("error");
+  },
+);
+
 test("bundled profiles route scans and keep optional capabilities advisory", async () => {
   const registry = parseToml(
     await readFile(
@@ -715,7 +728,7 @@ test.skipIf(process.platform !== "win32")(
 );
 
 test.skipIf(process.platform === "win32")(
-  "CODEX_HOME keeps symlink-parent resolution for base and profile files",
+  "config paths keep symlink-parent resolution for base, profile, and manual layers",
   async () => {
     const root = await temporaryDirectory();
     const actual = join(root, "actual");
@@ -758,6 +771,16 @@ test.skipIf(process.platform === "win32")(
         `${home}/${profile ? "work.config" : "config"}.toml`,
       );
     }
+    const manual = await run([
+      "--profile",
+      "security_scan",
+      "--config",
+      `${home}/./config.toml`,
+      ...v1,
+    ]);
+    expect(manual.status).toBe(0);
+    expect(capacity(manual.payload!).actual).toBe(8);
+    expect(manual.payload!.config_paths).toEqual([`${home}/config.toml`]);
   },
 );
 

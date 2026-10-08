@@ -113,6 +113,12 @@ describe("worker progress events", () => {
     '"$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" --helper config-preflight --profile security_scan',
     '& "C:\\plugin\\scripts\\launch_codex_security_mcp.cmd" --helper config-preflight --profile security_scan',
     'node "/plugin/mcp/helpers.mjs" config-preflight --profile security_scan',
+    '/plugin/scripts/launch_codex_security_mcp --helper "config-preflight" --profile security_scan',
+    '& "C:\\plugin\\scripts\\launch_codex_security_mcp.cmd" "--helper" "config-preflight" --profile security_scan',
+    "'/plugin/scripts/launch_codex_security_mcp' '--helper' 'config-preflight' --profile security_scan",
+    'node "/plugin/mcp/helpers.mjs" "config-preflight" --profile security_scan',
+    'node helpers.mjs "config-preflight" --profile security_scan',
+    '"launch_codex_security_mcp" "--helper" "config-preflight" --profile security_scan',
   ])("reads configured worker capacity from preflight: %s", (command) => {
     const output = JSON.stringify({
       profile: "security_scan",

@@ -44,6 +44,8 @@ Multi-agent config mode is auto-detected when static config fully describes it. 
 --multi-agent-runtime-owner native --multi-agent-runtime-version v2 --multi-agent-session-cap <count> --multi-agent-runtime-provenance <app-server|thread-context|tool-surface>
 ```
 
+Pass `--multi-agent-session-cap` as a positive ASCII decimal integer, such as `1000`; an optional leading `+` is accepted. The Node helper does not accept the former Python helper's underscore or localized-digit spellings: use `1000` instead of `1_000` or localized digits.
+
 The V2 session cap includes the root thread. For profiles that evaluate current-session worker capacity, the helper subtracts that root thread when evaluating usable worker slots. For native V2 selected by static config, the documented Codex default session cap is four when no explicit cap is configured. Do not apply that static default to model- or session-selected V2 when a profile needs the active capacity: pass the observed runtime cap, or a blocking capacity requirement remains `incomplete`.
 
 When the active session is actually managed by `codex_bridge`, provide explicit verified ownership. A backend config value alone is not ownership evidence:
