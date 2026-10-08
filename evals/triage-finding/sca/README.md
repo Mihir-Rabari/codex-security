@@ -36,7 +36,9 @@ reviewer supports the reasoning; that metric stays null until reviewed.
 ## Optional model smoke
 
 From `evals/triage-finding`, install the existing pinned Promptfoo dependencies
-with `pnpm run setup`, then:
+with `pnpm run setup`. Before model calls, also follow the checkout policy-helper
+build steps in the [triage eval setup](../README.md). Config validation and
+deterministic tests do not need that helper build. Then:
 
 ```sh
 pnpm run validate:sca
