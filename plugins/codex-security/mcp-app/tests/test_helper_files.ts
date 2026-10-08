@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { mkdir, rm, symlink } from "node:fs/promises";
 import { join, win32 } from "node:path";
 import { after, test } from "node:test";
-import { importSource } from "./import-module.ts";
+import { importModule, importSource } from "./import-module.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 
-const { resolvedPathText } = (await importSource(
+const { resolvedPathText, isMissingPathError } = (await importSource(
   "src/helpers/helper-files.ts",
   {
     define: {
@@ -18,8 +18,34 @@ const { resolvedPathText } = (await importSource(
     },
   },
 )) as typeof import("../src/helpers/helper-files.ts");
+const { windowsFileSystem } = (await importModule({
+  entryPoints: ["../native/windows-files.mts"],
+})) as typeof import("../../native/windows-files.mjs");
 const directories = createTemporaryDirectories(true);
 after(() => directories.cleanup());
+
+test("optional probes recognize unavailable Windows paths while retaining access errors", () => {
+  for (const [winerror, absent] of [
+    [21, true],
+    [123, true],
+    [5, false],
+    [32, false],
+  ] as const) {
+    const native = {
+      windowsAbsolutePath: (path: Buffer) => ({ error: 0, value: path }),
+      openWindowsFile: () => ({ error: winerror, handle: null }),
+    } as unknown as Parameters<typeof windowsFileSystem>[0];
+    assert.throws(
+      () =>
+        windowsFileSystem(native).stat(Buffer.from("R:\\marker", "utf16le")),
+      (error: unknown) => {
+        assert.equal((error as { winerror: number }).winerror, winerror);
+        assert.equal(isMissingPathError(error), absent);
+        return true;
+      },
+    );
+  }
+});
 
 test("resolved text preserves ordinary paths, aliases, and missing suffixes", async () => {
   const root = await directories.create("helper-path-");

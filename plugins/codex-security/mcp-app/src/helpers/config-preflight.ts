@@ -8,6 +8,7 @@ import {
   normalizePath,
   resolvedPathText,
   environmentValue,
+  isMissingPathError,
 } from "./helper-files";
 import { object, stringifyJson } from "./json";
 import { encodePosixPath } from "./posix-path";
@@ -109,12 +110,7 @@ function metadata(path: string) {
       ? windowsFiles().stat(encodePath(path))
       : statSync(encodePath(path));
   } catch (error) {
-    if (
-      ["ENOENT", "ENOTDIR", "ELOOP"].includes(
-        (error as NodeJS.ErrnoException).code ?? "",
-      )
-    )
-      return undefined;
+    if (isMissingPathError(error)) return undefined;
     throw error;
   }
 }

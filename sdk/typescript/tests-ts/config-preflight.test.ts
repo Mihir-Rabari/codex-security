@@ -1,5 +1,5 @@
 import { cp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -849,26 +849,29 @@ test.skipIf(process.platform !== "win32")(
         recursive: true,
       },
     );
-    for (const powershell of launcher.powershells) {
-      const result = await launcher.run(
-        powershell,
-        "references/config-preflight.md",
-        {
-          "<plugin_dir>": launcher.plugin,
-          "<scan-working-directory>": root,
-          "<capability-profile>": "security_scan",
-          "<active-config-argument>": '--config "%CODEX_SECURITY_CONFIG_PATH%"',
-          "<true|false>": "true",
-          "<verified-multi-agent-runtime-arguments>": v1.join(" "),
-        },
-      );
-      expect(result.status, result.diagnostics).toBe(0);
-      expect(result.stdout, result.diagnostics).not.toContain(
-        "expanded-plugin-used",
-      );
-      const payload = JSON.parse(result.stdout) as Payload;
-      expect(payload.config_paths, result.diagnostics).toEqual([config]);
-      expect(capacity(payload).actual, result.diagnostics).toBe(19);
+    for (const cwd of [root, parse(root).root]) {
+      for (const powershell of launcher.powershells) {
+        const result = await launcher.run(
+          powershell,
+          "references/config-preflight.md",
+          {
+            "<plugin_dir>": launcher.plugin,
+            "<scan-working-directory>": cwd,
+            "<capability-profile>": "security_scan",
+            "<active-config-argument>":
+              '--config "%CODEX_SECURITY_CONFIG_PATH%"',
+            "<true|false>": "true",
+            "<verified-multi-agent-runtime-arguments>": v1.join(" "),
+          },
+        );
+        expect(result.status, result.diagnostics).toBe(0);
+        expect(result.stdout, result.diagnostics).not.toContain(
+          "expanded-plugin-used",
+        );
+        const payload = JSON.parse(result.stdout) as Payload;
+        expect(payload.config_paths, result.diagnostics).toEqual([config]);
+        expect(capacity(payload).actual, result.diagnostics).toBe(19);
+      }
     }
   },
 );
@@ -925,6 +928,40 @@ test("absolute project-root markers retain trusted cwd configuration", async () 
   expect(result.payload!.config_discovery?.["project_root"]).toBe(cwd);
   expect(capacity(result.payload!).actual).toBe(19);
 });
+
+test.skipIf(process.platform !== "win32")(
+  "invalid Windows marker names do not hide a later project marker",
+  async () => {
+    const root = await temporaryDirectory(),
+      home = join(root, "home"),
+      repo = join(root, "repo");
+    await mkdir(home);
+    await mkdir(join(repo, ".git"), { recursive: true });
+    await mkdir(join(repo, ".codex"));
+    await writeFile(
+      join(home, "config.toml"),
+      stringifyToml({
+        project_root_markers: ["invalid?marker", ".git"],
+        projects: { [repo]: { trust_level: "trusted" } },
+      }),
+    );
+    await writeFile(
+      join(repo, ".codex/config.toml"),
+      "[agents]\nmax_threads=19\n",
+    );
+    const args = ["--profile", "security_scan", "--cwd", repo, ...v1];
+    const result = await run(args, { CODEX_HOME: home });
+    expect(result.status).toBe(0);
+    expect(result.payload!.config_discovery?.["project_root"]).toBe(repo);
+    expect(capacity(result.payload!).actual).toBe(19);
+    const explicit = await run(
+      [...args, "--config", join(repo, "invalid?config.toml")],
+      { CODEX_HOME: home },
+    );
+    expect(explicit.status).toBe(2);
+    expect(explicit.payload!.status).toBe("error");
+  },
+);
 
 test.skipIf(process.platform === "win32")(
   "looping markers and optional profiles are absent probes, but explicit reads fail",

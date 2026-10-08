@@ -74,17 +74,20 @@ export function environmentValue(name: string): string | undefined {
       : decodePosixBytes(value);
 }
 
-function readError(error: unknown, path: string, label?: string): never {
+export function isMissingPathError(error: unknown): boolean {
   const { code, winerror } = error as NodeJS.ErrnoException & {
     winerror?: number;
   };
+  return (
+    ["ENOENT", "ENOTDIR", "ELOOP"].includes(code ?? "") ||
+    winerror === 21 ||
+    winerror === 123
+  );
+}
+
+function readError(error: unknown, path: string, label?: string): never {
   // Preserve pathlib.exists() diagnostics only for callers with missing-file labels.
-  if (
-    label !== undefined &&
-    (["ENOENT", "ENOTDIR", "ELOOP"].includes(code ?? "") ||
-      winerror === 21 ||
-      winerror === 123)
-  )
+  if (label !== undefined && isMissingPathError(error))
     throw new Error(`${label} missing: ${path}`);
   throw error;
 }
