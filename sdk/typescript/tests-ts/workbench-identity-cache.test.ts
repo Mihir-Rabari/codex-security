@@ -42,7 +42,7 @@ def deep_fixture_dependency(name):
     if name in {
         "require_target", "require_remediation_target", "require_scope", "require_scan",
         "require_workspace", "require_scannable_target", "safe_segment",
-        "register_security_target", "scan_target_identity", "now", "compact_timestamp",
+        "register_security_target", "scan_target_identity", "now",
         "state_dir",
     }:
         return deep_workbench.dependencies()
@@ -507,7 +507,7 @@ with ExitStack() as stack:
                 "scan_target_identity": ("synthetic", "snapshot", 7, metadata[str(target)].st_ino),
                 "directory_snapshot_regular_file_count": 0,
                 "effective_deep_scan_config": {}, "now": timestamp,
-                "compact_timestamp": "synthetic", "state_dir": root,
+                "state_dir": root,
             }.items():
                 mocks.enter_context(patch.object(deep_fixture_dependency(name), name, return_value=value))
             mocks.enter_context(patch.object(deep_workbench.dependencies(), "require_scannable_target"))
