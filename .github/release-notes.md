@@ -115,6 +115,7 @@
 - update Docker-in-Docker and Node devcontainer features ([#1436](https://github.com/openai/codex-security/pull/1436))
 - bump napi-build from 2.5.0 to 2.6.0 in /plugins/codex-security/native ([#1438](https://github.com/openai/codex-security/pull/1438))
 - bump the codex group across 3 directories with 2 updates ([#1439](https://github.com/openai/codex-security/pull/1439))
+- bump the third-party group across 2 directories with 3 updates ([#1514](https://github.com/openai/codex-security/pull/1514))
 
 <!-- release-section: highlights:end -->
 
