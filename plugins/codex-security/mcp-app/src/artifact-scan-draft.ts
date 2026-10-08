@@ -441,7 +441,7 @@ async function preserveScanDraft(
   );
   const savedSources = [...current, ...archived];
   const sources = savedSources.map(({ input }) => input);
-  if (archived.length > 0) {
+  if (context.layout === "worker" && sources.length > 0) {
     // Retained observations keep saved ownership; fresh observations use this worker.
     const activePrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/output/`;
     for (const surface of result.coverage.surfaces as JsonObject[]) {

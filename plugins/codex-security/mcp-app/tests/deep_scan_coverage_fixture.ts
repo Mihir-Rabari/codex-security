@@ -25,6 +25,7 @@ interface CoverageFixtureOptions {
   stopBeforeDraft?: boolean;
   receiptRetry?: boolean;
   firstCheckpointReceipt?: "shared" | "worker";
+  sameAttemptCloseout?: boolean;
   extraReceiptRetry?: boolean;
   rewriteReturnedCoverage?: boolean;
   sameNamedNewSurface?: boolean;
@@ -110,6 +111,7 @@ export async function publishCoverageFixture(
     stopBeforeDraft = false,
     receiptRetry = false,
     firstCheckpointReceipt,
+    sameAttemptCloseout = false,
     extraReceiptRetry = false,
     rewriteReturnedCoverage = false,
     sameNamedNewSurface = false,
@@ -451,13 +453,23 @@ runpy.run_path(sys.argv[0], run_name="__main__")
             {
               id: "first",
               label: "First checkpoint",
-              disposition: "no_issue_found",
+              disposition: sameAttemptCloseout
+                ? "needs_follow_up"
+                : "no_issue_found",
               receiptRefs: [firstRef],
               provenance: { scanReceiptRefs: [firstRef] },
             },
           ],
           explicitExclusions: [],
-          deferred: [],
+          deferred: sameAttemptCloseout
+            ? [
+                {
+                  id: "first-gap",
+                  reason: "Verify the same boundary.",
+                  surfaceIds: ["first"],
+                },
+              ]
+            : [],
         },
       });
       for (const name of await readdir(path.join(artifactDir, "checkpoints"))) {
@@ -480,14 +492,23 @@ runpy.run_path(sys.argv[0], run_name="__main__")
           completeness: status,
           surfaces: [
             {
-              id: "later",
-              label: "Later checkpoint",
+              id: sameAttemptCloseout ? "first" : "later",
+              label: sameAttemptCloseout
+                ? "First checkpoint"
+                : "Later checkpoint",
               disposition: "no_issue_found",
               receiptRefs: [nextRef],
             },
           ],
           explicitExclusions: [],
           deferred: [],
+          ...(sameAttemptCloseout
+            ? {
+                resolvedDeferred: [
+                  { id: "first-gap", reason: "The same boundary is verified." },
+                ],
+              }
+            : {}),
         },
       });
       const resultPath = path.join(artifactDir, "result.json");
@@ -1033,6 +1054,31 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       coverage.deferred.map((row) => row.id),
       stopAfterDraft || stopBeforeDraft ? ["scan-stopped"] : [],
     );
+    if (sameAttemptCloseout) {
+      const surface = coverage.surfaces.find(
+        (row) => row.label === "First checkpoint",
+      );
+      assert.ok(surface);
+      assert.equal(surface.disposition, "no_issue_found");
+      assert.equal(surface.receiptRefs.length, 2);
+      const receipts = await Promise.all(
+        surface.receiptRefs.map((ref) =>
+          readFile(path.join(run.scanDir, ref), "utf8"),
+        ),
+      );
+      assert.deepEqual(
+        receipts.sort(),
+        [
+          "Synthetic first checkpoint.\n",
+          "Synthetic later checkpoint.\n",
+        ].sort(),
+      );
+      assert.equal(
+        Object.hasOwn(surface.provenance ?? {}, "scanReceiptRefs"),
+        false,
+      );
+      return { scanDir: run.scanDir, threadId, terminal };
+    }
     for (const [label, expected] of [
       ["First checkpoint", "Synthetic first checkpoint.\n"],
       ["Later checkpoint", "Synthetic later checkpoint.\n"],

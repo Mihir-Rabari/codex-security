@@ -374,3 +374,25 @@ for (const resume of [false, true]) {
     }
   }
 }
+
+for (const resume of [false, true]) {
+  for (const [name, firstCheckpointReceipt, receiptCollision] of [
+    ["shared same-name collision", "shared", true],
+    ["shared distinct-name control", "shared", false],
+    ["worker-local priority control", "worker", false],
+  ] as const) {
+    test(`same attempt closeout retains both receipt owners: ${name}, ${resume ? "reconstructed" : "live"}`, async () => {
+      const root = await mkdtemp(path.join(tmpdir(), "same-attempt-closeout-"));
+      try {
+        await publishCoverageFixture(root, "complete", {
+          firstCheckpointReceipt,
+          sameAttemptCloseout: true,
+          receiptCollision,
+          resume,
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
