@@ -61,7 +61,7 @@ function trustedGit(target: string): string | undefined {
   const candidates =
     configured !== undefined
       ? [configured]
-      : (environmentValue("PATH") ?? "")
+      : (environmentValue("PATH") ?? (windows ? ".;C:\\bin" : "/usr/bin:/bin"))
           .split(delimiter)
           .flatMap((entry) =>
             (windows ? ["git.exe", "git.com"] : ["git"]).map((name) =>
@@ -163,9 +163,9 @@ function spawnTool(
 }
 
 // Both callers inherit these paths; Git's separate repository-variable overrides stay intact.
-function inheritedToolPaths(): Record<string, string> {
+function inheritedToolPaths(additional: string[] = []): Record<string, string> {
   return Object.fromEntries(
-    ["HOME", "PATH"].flatMap((name) => {
+    ["HOME", "PATH", "XDG_CONFIG_HOME", ...additional].flatMap((name) => {
       const value = environmentValue(name);
       return value === undefined ? [] : [[name, value]];
     }),
@@ -176,10 +176,22 @@ function gitProcess(repo: string, args: string[]) {
   const command = trustedGit(repo);
   if (!command) return undefined;
   const env: NodeJS.ProcessEnv = { ...process.env };
+  const inherited = inheritedToolPaths();
   for (const name of Object.keys(env)) {
     const key = windows ? name.toUpperCase() : name;
     if (repositoryEnvironment.includes(key) || key === "GIT_LITERAL_PATHSPECS")
       delete env[name];
+    else if (
+      [
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_PARAMETERS",
+      ].includes(key) ||
+      /^GIT_CONFIG_VALUE_\d+$/u.test(key)
+    ) {
+      const value = environmentValue(name);
+      if (value !== undefined) inherited[name] = value;
+    }
   }
   env.GIT_LITERAL_PATHSPECS = "1";
   return spawnTool(
@@ -194,7 +206,7 @@ function gitProcess(repo: string, args: string[]) {
       ...args,
     ],
     { env, stdio: ["pipe", "pipe", "pipe"] },
-    inheritedToolPaths(),
+    inherited,
   ) as ChildProcessWithoutNullStreams;
 }
 
@@ -210,7 +222,7 @@ export async function runTool(
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
     },
-    inheritedToolPaths(),
+    inheritedToolPaths(["RIPGREP_CONFIG_PATH"]),
   );
   return collect(child);
 }
@@ -442,11 +454,11 @@ export async function blobSamples(
             classified.length -
             (bom.length || sample.length < 2 ? classified.length % 2 : 0);
           if (classifyLength)
-            binary ||= isBinarySample(
-              bom.length
-                ? Buffer.concat([bom, classified.subarray(0, classifyLength)])
-                : classified.subarray(0, classifyLength),
-            );
+            binary ||= bom.length
+              ? isBinarySample(
+                  Buffer.concat([bom, classified.subarray(0, classifyLength)]),
+                )
+              : classified.subarray(0, classifyLength).includes(0);
           unitTail = classified.subarray(classifyLength);
           remaining -= length;
           pending = pending.subarray(length);

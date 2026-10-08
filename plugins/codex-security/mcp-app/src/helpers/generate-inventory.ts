@@ -10,11 +10,11 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, relative, sep } from "node:path";
+import { dirname, isAbsolute, parse, relative, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { isUtf8 } from "node:buffer";
 import { mkdir, readFile, writeFile } from "./helper-files";
-import { expandHome, windowsFiles } from "./resolve-security-md";
+import { expandHome, windowsFiles, windowsJoin } from "./resolve-security-md";
 import { decodePosixBytes, encodePosixPath } from "./posix-path";
 import { stringifyJson } from "./json";
 import {
@@ -72,14 +72,22 @@ function scopePath(
 ): string {
   const requested = explicit ? scope : expandHome(scope, home);
   rejectStreams(requested);
-  const path = isAbsolute(requested) ? requested : append(repo, requested);
+  const requestedRoot = parse(requested).root;
+  const path = windows
+    ? append(
+        windowsFiles()
+          .absolute(Buffer.from(windowsJoin(repo, requestedRoot), "utf16le"))
+          .toString("utf16le"),
+        requested.slice(requestedRoot.length),
+      )
+    : isAbsolute(requested)
+      ? requested
+      : append(repo, requested);
   if (rejectLinks) {
     inside(repo, path);
     // Do not normalize away a link before checking link/.. scopes.
     let ancestor = repo;
-    const lexical = isAbsolute(requested)
-      ? requested.slice(repo.length + 1)
-      : requested;
+    const lexical = path.slice(repo.length + (repo.endsWith(sep) ? 0 : 1));
     for (const part of lexical.split(windows ? /[\\/]/u : /\//u)) {
       if (!part || part === ".") continue;
       if (part === "..") {
@@ -92,7 +100,7 @@ function scopePath(
       const info = lstat(ancestor);
       if (
         info.isSymbolicLink() ||
-        ("isReparsePoint" in info && info.isReparsePoint())
+        ("isNameSurrogate" in info && info.isNameSurrogate())
       )
         throw new Error(
           `Requested scope must not contain symbolic links: ${ancestor}`,

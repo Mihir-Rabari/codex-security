@@ -45,8 +45,11 @@ export function previewForBytes(
   if (isBinarySample(data)) return ["", true];
   if (budget <= 0) return ["", false];
   let lines = decodeSource(data).replace(/\r\n?/gu, "\n").split("\n");
-  while (lines.length && !lines[0]!.trim()) lines.shift();
-  while (lines.length && !lines.at(-1)!.trim()) lines.pop();
+  let first = 0,
+    last = lines.length;
+  while (first < last && !lines[first]!.trim()) first++;
+  while (last > first && !lines[last - 1]!.trim()) last--;
+  lines = lines.slice(first, last);
   const complete = lines.join("\n");
   if (Buffer.byteLength(complete) <= budget) return [complete, false];
   const nonblank = lines.filter((line) => line.trim());
@@ -112,11 +115,10 @@ export function sampleFile(path: string): [Buffer, boolean] {
         sample = chunk;
         first = false;
       }
-      const candidate =
-        bomEncoding(sample) === "utf-8" || chunk === sample
-          ? chunk
-          : Buffer.concat([sample.subarray(0, 2), chunk]);
-      binary = isBinarySample(candidate);
+      binary =
+        bomEncoding(sample) === "utf-8"
+          ? chunk.includes(0)
+          : isBinarySample(Buffer.concat([sample.subarray(0, 2), chunk]));
       return !binary;
     };
     if (process.platform === "win32")

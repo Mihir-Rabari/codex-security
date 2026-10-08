@@ -10,7 +10,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, parse, relative, sep } from "node:path";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { nodeCommand } from "./support/shell.js";
 import { git } from "./git-fixture.js";
@@ -165,6 +165,17 @@ for (const encoding of ["utf8", "utf16le", "utf16be"] as const) {
         "late-binary",
         Buffer.concat([Buffer.alloc(96 * 1024, 120), Buffer.from([0])]),
       );
+      for (const bom of [
+        [0xff, 0xfe],
+        [0xfe, 0xff],
+      ])
+        f.write(
+          `late-bom-${bom[0]}`,
+          Buffer.concat([
+            Buffer.alloc(64 * 1024, 120),
+            Buffer.from([...bom, 104, 0, 105, 0]),
+          ]),
+        );
       if (mode === "revisions") f.commit();
       const rows =
         mode === "repo"
@@ -175,7 +186,10 @@ for (const encoding of ["utf8", "utf16le", "utf16be"] as const) {
       );
       expect(
         rows.some(
-          (row) => row.path === "late-binary" || row.path === "encoded-binary",
+          (row) =>
+            row.path === "late-binary" ||
+            row.path === "encoded-binary" ||
+            row.path.startsWith("late-bom-"),
         ),
       ).toBe(false);
     });
@@ -677,3 +691,170 @@ test.skipIf(process.platform === "win32")(
     expect(readFileSync(f.out, "utf8")).toBe("./visible.py\n");
   },
 );
+
+test.skipIf(process.platform === "win32")(
+  "Git discovery distinguishes absent and empty PATH",
+  () => {
+    const f = fixture();
+    f.write(".gitignore", "retained.txt\n");
+    f.write("retained.txt");
+    git(f.repo, "add", "--force", "retained.txt");
+    const env = {
+      ...process.env,
+      CODEX_SECURITY_GIT: undefined,
+      PATH: undefined,
+    };
+    const result = f.run("make-repo-rank-input", [], env);
+    expect(result.status, result.stderr).toBe(0);
+    expect(
+      readFileSync(f.out, "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line).path),
+    ).toContain("retained.txt");
+    expect(
+      f.run("make-repo-rank-input", [], { ...env, PATH: "" }).status,
+    ).not.toBe(0);
+  },
+);
+
+for (const setting of [
+  "GIT_CONFIG_GLOBAL",
+  "GIT_CONFIG_SYSTEM",
+  "XDG_CONFIG_HOME",
+  "GIT_CONFIG_PARAMETERS",
+  "GIT_CONFIG_VALUE_0",
+  "RIPGREP_CONFIG_PATH",
+])
+  test.skipIf(process.platform === "win32")(
+    `inventory tools retain raw ${setting} configuration`,
+    () => {
+      const f = fixture();
+      f.write("visible.py");
+      f.write("hidden.py");
+      const rawPath = Buffer.concat([
+        Buffer.from(f.root + "/configuration-"),
+        Buffer.from([0xff]),
+      ]);
+      const ignore = join(f.root, "ignore");
+      writeFileSync(ignore, "hidden.py\n");
+      let value = rawPath;
+      if (
+        setting === "GIT_CONFIG_PARAMETERS" ||
+        setting === "GIT_CONFIG_VALUE_0"
+      ) {
+        writeFileSync(rawPath, "hidden.py\n");
+        if (setting === "GIT_CONFIG_PARAMETERS")
+          value = Buffer.concat([
+            Buffer.from("'core.excludesFile="),
+            rawPath,
+            Buffer.from("'"),
+          ]);
+      } else {
+        let config = rawPath;
+        if (setting === "XDG_CONFIG_HOME") {
+          mkdirSync(Buffer.concat([rawPath, Buffer.from("/git")]), {
+            recursive: true,
+          });
+          config = Buffer.concat([rawPath, Buffer.from("/git/config")]);
+        }
+        writeFileSync(
+          config,
+          setting === "RIPGREP_CONFIG_PATH"
+            ? "--glob\n!hidden.py\n"
+            : `[core]\nexcludesFile = ${JSON.stringify(ignore)}\n`,
+        );
+      }
+      const octal = [...value]
+        .map((byte) => `\\0${byte.toString(8).padStart(3, "0")}`)
+        .join("");
+      const command =
+        setting === "RIPGREP_CONFIG_PATH"
+          ? "generate-in-scope-files"
+          : "make-repo-rank-input";
+      const result = spawnSync(
+        "/bin/sh",
+        [
+          "-c",
+          `${setting}=$(printf '%b' '${octal}'); export ${setting}\nexec "$1" "$2" "$3" --repo "$4" --out "$5" --scope .`,
+          "inventory-config",
+          node,
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          command,
+          f.repo,
+          f.out,
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            ...(setting === "RIPGREP_CONFIG_PATH" ? {} : { HOME: f.root }),
+            CODEX_SECURITY_GIT: Bun.which("git")!,
+            GIT_CONFIG_GLOBAL:
+              setting === "XDG_CONFIG_HOME" ? undefined : "/dev/null",
+            GIT_CONFIG_SYSTEM: "/dev/null",
+            GIT_CONFIG_PARAMETERS: undefined,
+            GIT_CONFIG_COUNT:
+              setting === "GIT_CONFIG_VALUE_0" ? "1" : undefined,
+            GIT_CONFIG_KEY_0: "core.excludesFile",
+            GIT_CONFIG_VALUE_0: undefined,
+            GIT_CONFIG_NOSYSTEM: undefined,
+            XDG_CONFIG_HOME: undefined,
+            RIPGREP_CONFIG_PATH: undefined,
+          },
+        },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      const lines = readFileSync(f.out, "utf8").trim().split("\n");
+      expect(
+        setting === "RIPGREP_CONFIG_PATH"
+          ? lines
+          : lines.map((line) => JSON.parse(line).path),
+      ).toEqual([
+        setting === "RIPGREP_CONFIG_PATH" ? "./visible.py" : "visible.py",
+      ]);
+    },
+  );
+
+test("absolute file scopes work when the repository is a filesystem root", () => {
+  const f = fixture();
+  const source = f.write("source.py");
+  const scopes = join(f.root, "scopes.json");
+  writeFileSync(scopes, JSON.stringify([source]));
+  const root = parse(f.repo).root;
+  const result = f.run("make-repo-scope-input", [
+    "--repo",
+    root,
+    "--scopes-file",
+    scopes,
+  ]);
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(readFileSync(f.out, "utf8")).path).toBe(
+    relative(root, source).split(sep).join("/"),
+  );
+});
+
+test.skipIf(process.platform !== "win32")(
+  "drive-relative scopes stay anchored to the repository",
+  () => {
+    const f = fixture();
+    f.write("src/source.py");
+    const scope = `${parse(f.repo).root.slice(0, 2)}src`;
+    expect(
+      f.rows("make-repo-rank-input", ["--scope", scope]).map((row) => row.path),
+    ).toEqual(["src/source.py"]);
+    const scopes = join(f.root, "scopes.json");
+    writeFileSync(scopes, JSON.stringify([scope]));
+    expect(
+      f
+        .rows("make-repo-scope-input", ["--scopes-file", scopes])
+        .map((row) => row.path),
+    ).toEqual(["src/source.py"]);
+  },
+);
+
+test("preview trimming handles a full sample of leading blank lines", () => {
+  const f = fixture();
+  f.write("source.py", "\n".repeat(64_000) + "kept\n");
+  expect(f.rows()[0]!.preview).toBe("kept");
+});

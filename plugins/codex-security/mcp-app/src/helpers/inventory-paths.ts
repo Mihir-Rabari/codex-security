@@ -97,7 +97,7 @@ export function linkedParent(scope: string, path: string): boolean {
     const info = lstat(parent);
     if (
       info.isSymbolicLink() ||
-      ("isReparsePoint" in info && info.isReparsePoint())
+      ("isNameSurrogate" in info && info.isNameSurrogate())
     )
       return true;
   }
@@ -118,7 +118,7 @@ export function* walk(path: string): Iterable<string> {
     const info = lstat(child);
     if (
       info.isDirectory() &&
-      !("isReparsePoint" in info && info.isReparsePoint())
+      !("isNameSurrogate" in info && info.isNameSurrogate())
     )
       yield* walk(child);
   }

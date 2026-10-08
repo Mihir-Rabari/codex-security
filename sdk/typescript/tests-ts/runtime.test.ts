@@ -490,7 +490,7 @@ describe("plugin runtime preparation", () => {
         { encoding: "utf8" },
       );
       expect(inventory.status).toBe(2);
-      expect(inventory.stderr).toContain("NTFS alternate data streams");
+      expect(inventory.stderr).toContain("NTFS alternate data stream");
 
       const rankInput = spawnSync(
         nodeCommand().command,
