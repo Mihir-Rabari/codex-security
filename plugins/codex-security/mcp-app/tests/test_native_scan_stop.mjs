@@ -29,6 +29,7 @@ const bundle = await build({
           export class NativeScanHost {
             run(...args) { return fixture.run(...args); }
             cancel(...args) { return fixture.cancel(...args); }
+            wait(...args) { return fixture.wait(...args); }
             async close() {}
           }`,
           "./src/python_command.js": `
@@ -283,7 +284,10 @@ for (const [operation, owner] of ["cancel", "fail"].flatMap((operation) =>
         { _meta: { "openai/threadId": "synthetic-owner" } },
       );
     await assert.rejects(call(), /Wrong scan owner or claim/);
-    assert.deepEqual(events, [`${operation}-scan`]);
+    assert.deepEqual(
+      events,
+      Array(operation === "cancel" ? 2 : 1).fill(`${operation}-scan`),
+    );
     assert.equal(active, true);
     rejectAuthority = false;
     events.length = 0;
@@ -454,5 +458,131 @@ for (const completed of [false, true]) {
         ? ["begin-deep-scan", "complete-scan"]
         : ["begin-deep-scan", "complete-scan", "get-scan"],
     );
+  });
+}
+
+for (const lostAcknowledgment of [false, true]) {
+  test(`overlapping native cancels settle retained publication (lost acknowledgment=${lostAcknowledgment})`, async () => {
+    const scan = {
+      scanId: "synthetic-parent",
+      scanDir: "/synthetic/scan",
+      handoffClaimToken: "synthetic-claim",
+      progress: { status: "running" },
+      findings: [],
+    };
+    const responseLost = new Error(
+      "Synthetic committed cancellation response lost",
+    );
+    const publication = Promise.withResolvers();
+    const release = Promise.withResolvers();
+    let cancelWrites = 0;
+    let published = 0;
+    let drained = false;
+    const workspace = () => ({
+      setup: { submitted: true },
+      results: { ...scan, findings: [...scan.findings] },
+    });
+    const server = serverFor({
+      async workbench([command]) {
+        if (command === "cancel-scan") {
+          cancelWrites++;
+          scan.progress.status = "canceled";
+          if (lostAcknowledgment && cancelWrites === 1) throw responseLost;
+          return workspace();
+        }
+        if (command === "get-scan") return { scan, workspace: workspace() };
+        assert.equal(command, "preserve-scan-results");
+        assert.equal(drained, true);
+        published++;
+        publication.resolve();
+        await release.promise;
+        scan.findings.push("synthetic-retained-finding");
+        return { scan, workspace: workspace() };
+      },
+      async cancel() {
+        drained = true;
+      },
+    });
+    const call = () =>
+      server.tools.get("cancel_codex_security_scan_from_app")({
+        scanId: scan.scanId,
+      });
+    let firstSettled = false;
+    const first = call()
+      .then(
+        (value) => ({ value }),
+        (error) => ({ error }),
+      )
+      .finally(() => {
+        firstSettled = true;
+      });
+    await publication.promise;
+    const second = call();
+    await Promise.resolve();
+    assert.equal(firstSettled, false);
+    release.resolve();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    if (lostAcknowledgment) assert.equal(firstResult.error, responseLost);
+    else
+      assert.deepEqual(
+        firstResult.value.structuredContent.workspace,
+        workspace(),
+      );
+    assert.deepEqual(secondResult.structuredContent.workspace, workspace());
+    assert.equal(published, 1);
+    assert.equal(cancelWrites, lostAcknowledgment ? 3 : 2);
+  });
+}
+
+for (const status of ["failed", "complete", "running"]) {
+  test(`native cancel preserves the durable ${status} outcome after local execution ends`, async () => {
+    const scan = {
+      scanId: "synthetic-parent",
+      scanDir: "/synthetic/scan",
+      handoffClaimToken: "synthetic-claim",
+      progress: { status },
+      failureMessage: status === "failed" ? "Synthetic original failure" : null,
+    };
+    let aborts = 0;
+    let waits = 0;
+    let publications = 0;
+    const workspace = () => ({
+      setup: { submitted: true },
+      results: { ...scan },
+    });
+    const server = serverFor({
+      async workbench([command]) {
+        if (command === "cancel-scan") {
+          if (scan.progress.status === "running")
+            scan.progress.status = "canceled";
+          return workspace();
+        }
+        if (command === "get-scan") return { scan, workspace: workspace() };
+        assert.equal(command, "preserve-scan-results");
+        publications++;
+        return { scan, workspace: workspace() };
+      },
+      async cancel() {
+        aborts++;
+      },
+      async wait() {
+        waits++;
+      },
+    });
+    const result = await server.tools.get(
+      "cancel_codex_security_scan_from_app",
+    )({ scanId: scan.scanId });
+    assert.deepEqual(result.structuredContent.workspace, workspace());
+    assert.equal(
+      scan.progress.status,
+      status === "running" ? "canceled" : status,
+    );
+    assert.equal(
+      scan.failureMessage,
+      status === "failed" ? "Synthetic original failure" : null,
+    );
+    assert.equal(aborts, status === "running" ? 1 : 0);
+    assert.equal(waits, status === "running" ? 0 : 1);
+    assert.equal(publications, status === "complete" ? 0 : 1);
   });
 }

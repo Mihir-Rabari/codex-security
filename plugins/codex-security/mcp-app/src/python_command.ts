@@ -103,6 +103,8 @@ export function missingPythonHelperMessage(
 export function workbenchCommandTimeout(command: string | undefined): number {
   return [
     "begin-deep-scan",
+    "cancel-scan",
+    "fail-scan",
     "complete-scan",
     "export-findings",
     "get-scan",

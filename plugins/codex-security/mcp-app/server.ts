@@ -603,6 +603,7 @@ export function createCodexSecurityServer(): McpServer {
     },
   );
   const nativeScans = new NativeScanHost();
+  const stoppingScans = new Map<string, Promise<JsonObject>>();
   const authenticatedArtifactClaims = new Map<
     string,
     {
@@ -1184,16 +1185,57 @@ export function createCodexSecurityServer(): McpServer {
   );
 
   const cancelSecurityScan = async (scanId: string, threadId?: string) => {
-    await runWorkbench([
+    const args = [
       "cancel-scan",
       "--scan-id",
       scanId,
       "--defer-publication",
       ...optionalArg("--thread-id", threadId),
-    ]);
-    const retained = await finalizeNativeStoppedScan(scanId, nativeScans, {
-      threadId,
-    });
+    ];
+    let persistenceError: unknown;
+    let workspace: JsonObject;
+    try {
+      workspace = await runWorkbench(args);
+    } catch (error) {
+      // A lost response may follow a committed stop. Recheck authority before draining.
+      try {
+        workspace = await runWorkbench(args);
+      } catch {
+        throw error;
+      }
+      persistenceError = error;
+    }
+    const result = isJsonObject(workspace.results)
+      ? workspace.results
+      : undefined;
+    const progress =
+      result && isJsonObject(result.progress) ? result.progress : undefined;
+    if (progress?.status === "complete") {
+      await nativeScans.wait(scanId);
+      if (persistenceError !== undefined) throw persistenceError;
+      const current = await runWorkbench(["get-scan", "--scan-id", scanId]);
+      return workspaceResult(current.workspace as unknown as WorkspaceState);
+    }
+    let pending = stoppingScans.get(scanId);
+    if (pending === undefined) {
+      pending = finalizeNativeStoppedScan(scanId, nativeScans, {
+        threadId,
+        waitOnly: progress?.status === "failed",
+      }).finally(() => stoppingScans.delete(scanId));
+      stoppingScans.set(scanId, pending);
+    }
+    let retained: JsonObject;
+    try {
+      retained = await pending;
+    } catch (error) {
+      if (persistenceError !== undefined)
+        throw new AggregateError(
+          [persistenceError, error],
+          `Canceling the scan failed: ${deepScanInvocationFailureMessage(persistenceError)}. Preserving its results also failed: ${deepScanInvocationFailureMessage(error)}`,
+        );
+      throw error;
+    }
+    if (persistenceError !== undefined) throw persistenceError;
     return workspaceResult(retained.workspace as unknown as WorkspaceState);
   };
 
@@ -2339,9 +2381,14 @@ function nativeCompletionMetadata(value: unknown): JsonObject {
 async function finalizeNativeStoppedScan(
   scanId: string,
   nativeScans: NativeScanHost,
-  { threadId, message }: { threadId?: string; message?: string } = {},
+  {
+    threadId,
+    message,
+    waitOnly,
+  }: { threadId?: string; message?: string; waitOnly?: boolean } = {},
 ) {
-  await nativeScans.cancel(scanId, message);
+  if (waitOnly) await nativeScans.wait(scanId);
+  else await nativeScans.cancel(scanId, message);
   const current = await runWorkbench(["get-scan", "--scan-id", scanId]);
   const scan = isJsonObject(current.scan) ? current.scan : undefined;
   const release = await acquireScanExecution(
@@ -2518,6 +2565,7 @@ export async function executeWorkbench(
     workbenchArgs.splice(userContextIndex, 2, "--user-context-stdin");
   }
   const workbenchInput = input ?? userContext;
+  const timeout = workbenchCommandTimeout(args[0]);
   const execution = execFileAsync(
     pythonCommand,
     [workbenchScriptPath(), ...workbenchArgs],
@@ -2530,7 +2578,7 @@ export async function executeWorkbench(
       encoding: "utf8" as const,
       // Artifact bytes are base64-encoded here; retain the existing file-size behavior.
       maxBuffer: args[0] === "read-artifact" ? Infinity : 4 * 1024 * 1024,
-      timeout: workbenchCommandTimeout(args[0]),
+      timeout,
     },
   );
   if (workbenchInput !== undefined) {
@@ -2539,7 +2587,21 @@ export async function executeWorkbench(
     });
     execution.child.stdin!.end(workbenchInput);
   }
-  const { stdout } = await execution;
+  const { stdout } = await execution.catch((error: unknown) => {
+    if (
+      error instanceof Error &&
+      "killed" in error &&
+      error.killed === true &&
+      "signal" in error &&
+      error.signal === "SIGTERM"
+    ) {
+      throw new Error(
+        `Codex Security workbench ${args[0]} timed out after ${timeout / 1000} seconds: ${error.message}`,
+        { cause: error },
+      );
+    }
+    throw error;
+  });
   const result = JSON.parse(stdout) as unknown;
   if (!isJsonObject(result)) {
     throw new Error("Codex Security workbench helper returned invalid JSON.");

@@ -17,8 +17,10 @@ const { executeWorkbench } = await loadSourceModule(
           build.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({
             contents: `
         export function execFile() {}
-        execFile[Symbol.for("nodejs.util.promisify.custom")] = async (_command, _args, options) =>
-          ({ stdout: JSON.stringify({ timeout: options.timeout }) });
+        execFile[Symbol.for("nodejs.util.promisify.custom")] = async (_command, _args, options) => {
+          if (globalThis.workbenchProcessFailure) throw globalThis.workbenchProcessFailure;
+          return { stdout: JSON.stringify({ timeout: options.timeout }) };
+        };
         export function spawn() { throw new Error("Unexpected process launch"); }
         export function execFileSync() { throw new Error("Unexpected process launch"); }
       `,
@@ -34,6 +36,10 @@ test("workbench gives scan preparation the long timeout at the process boundary"
     "start-prompt-only-scan",
     "start-scan",
     "begin-deep-scan",
+    "cancel-scan",
+    "fail-scan",
+    "preserve-scan-results",
+    "complete-scan",
   ])
     assert.deepEqual(await executeWorkbench("fixture-python", [operation]), {
       timeout: 300_000,
@@ -42,4 +48,30 @@ test("workbench gives scan preparation the long timeout at the process boundary"
     await executeWorkbench("fixture-python", ["other-operation"]),
     { timeout: 30_000 },
   );
+});
+
+test("workbench timeout retains the command and diagnostic", async () => {
+  const failure = Object.assign(
+    new Error("Command failed: fixture-python\nfixture diagnostic"),
+    {
+      killed: true,
+      signal: "SIGTERM",
+      stderr: "fixture diagnostic",
+      stdout: "",
+    },
+  );
+  globalThis.workbenchProcessFailure = failure;
+  try {
+    await assert.rejects(
+      executeWorkbench("fixture-python", ["cancel-scan"]),
+      (error) => {
+        assert.match(error.message, /cancel-scan.*timed out.*300/);
+        assert.match(error.message, /fixture diagnostic/);
+        assert.equal(error.cause, failure);
+        return true;
+      },
+    );
+  } finally {
+    delete globalThis.workbenchProcessFailure;
+  }
 });

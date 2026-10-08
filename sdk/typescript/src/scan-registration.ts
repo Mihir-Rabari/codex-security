@@ -47,7 +47,6 @@ export async function registerScan(options: {
   recipe: JsonObject;
   expectation: ScanExpectation;
   scanDir: string;
-  archivedScanDir: string | null;
   workbench: (args: readonly string[], input?: string) => Promise<JsonObject>;
 }) {
   const {
@@ -55,7 +54,6 @@ export async function registerScan(options: {
     recipe,
     expectation,
     scanDir,
-    archivedScanDir,
     workbench,
   } = options;
   const repo = expectation.repository;
@@ -78,9 +76,6 @@ export async function registerScan(options: {
             ...(scanOptions.archiveExisting === true
               ? ["--archive-existing"]
               : []),
-            ...(archivedScanDir === null
-              ? []
-              : ["--archived-scan-dir", archivedScanDir]),
             ...(scanOptions.parentScanId === undefined
               ? []
               : ["--parent-scan-id", scanOptions.parentScanId]),

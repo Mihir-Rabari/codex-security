@@ -104,6 +104,10 @@ export class NativeScanHost {
     await active.promise.catch(() => undefined);
   }
 
+  async wait(scanId: string): Promise<void> {
+    await this.active.get(scanId)?.promise.catch(() => undefined);
+  }
+
   async close(): Promise<void> {
     this.closed = true;
     const active = [...this.active.values()];

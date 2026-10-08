@@ -35,6 +35,10 @@ def test_workbench_records_scan_failure(tmp_path: Path) -> None:
     )
     assert failed["scan"]["progress"]["status"] == "failed"
     assert failed["scan"]["failureMessage"] == "Repository checkout became unavailable."
+    retained = scan_command(state_dir, "cancel-scan", scan_id, "--defer-publication")
+    assert retained["results"]["progress"]["status"] == "failed"
+    assert retained["results"]["failureMessage"] == failed["scan"]["failureMessage"]
+    assert retained["results"]["canceledAt"] is None
 
     delivered = mark_handoff_delivered(state_dir, scan_id, claim_token)
     assert delivered["results"]["handoffStatus"] == "delivered"
@@ -108,6 +112,22 @@ def test_workbench_cancels_running_scan_and_rejects_late_updates(tmp_path: Path)
     rejected = cancel_scan(state_dir, restarted_scan_id, thread_id, check=False)
     assert rejected["returncode"] != 0
     assert "Only a running scan can be canceled" in str(rejected["stderr"])
+    retained = scan_command(
+        state_dir, "cancel-scan", restarted_scan_id, "--thread-id", thread_id, "--defer-publication"
+    )
+    assert retained["results"]["progress"]["status"] == "complete"
+    assert retained["results"]["canceledAt"] is None
+    rejected = scan_command(
+        state_dir,
+        "cancel-scan",
+        restarted_scan_id,
+        "--thread-id",
+        "other-thread",
+        "--defer-publication",
+        check=False,
+    )
+    assert rejected["returncode"] != 0
+    assert "owning Codex thread" in str(rejected["stderr"])
 
 
 @pytest.mark.parametrize("thread_id", [None, "thread-unclaimed-owner"])

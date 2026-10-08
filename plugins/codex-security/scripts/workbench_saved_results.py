@@ -2501,6 +2501,9 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             connection.commit()
             return db.workspace_state(connection, scan["workspace_id"])
         if scan["status"] != "running":
+            if getattr(args, "defer_publication", False):
+                connection.commit()
+                return db.workspace_state(connection, scan["workspace_id"])
             raise SystemExit("Only a running scan can be canceled.")
         updated = connection.execute(
             """

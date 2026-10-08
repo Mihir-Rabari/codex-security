@@ -31,7 +31,6 @@ for (const continuation of ["resume", "registered"] as const) {
       recipe,
       expectation,
       scanDir: "/synthetic/scan",
-      archivedScanDir: null,
       workbench: async () => ({
         scanId: "saved",
         scanDir: "/synthetic/scan",
@@ -85,7 +84,6 @@ for (const continuation of ["resume", "registered"] as const) {
             mode: "deep",
           },
           scanDir: "/synthetic/scan",
-          archivedScanDir: null,
           workbench: async () => ({
             scanId: "saved",
             recipe: {

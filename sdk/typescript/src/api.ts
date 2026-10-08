@@ -255,6 +255,7 @@ import {
   planOutputArchive,
   prepareScanArtifactRestorer,
   prepareOutputDir,
+  prepareScanRegistrationOutput,
   preparePersistentOutputRoot,
   probeCodexSandbox,
   requireModelSafeOutputDir,
@@ -1253,7 +1254,6 @@ export class CodexSecurity {
       [...passCosts.values()].includes(null) ? null : combinedCost(current);
     let scanDir = "";
     let reportWorkspace: string | undefined;
-    let archivedScanDir: string | null = null;
     let targetPathsFile: string | null = null;
     let knowledgeBase: PreparedKnowledgeBase | null = null;
     let costTracker: ScanCostTracker | null = null;
@@ -1510,13 +1510,13 @@ export class CodexSecurity {
           releaseExecution ??= await (
             this.#dependencies.acquireScanExecution ?? acquireScanExecution
           )(stateDirectory, scanDir, await bundledPluginRoot());
+          checkOpen();
           const registered = await registerScan({
             scan: options,
             parentScanRole: this.#parentScanRole,
             recipe,
             expectation,
             scanDir: requestedOutput!,
-            archivedScanDir: null,
             workbench: (args, input) => workbench(readOptions, args, input),
           });
           if (registered.sealed) {
@@ -1675,20 +1675,24 @@ export class CodexSecurity {
         options.resumeScanId !== undefined ||
         options.registeredScan !== undefined
           ? requestedOutput!
-          : await (this.#dependencies.prepareOutputDir ?? prepareOutputDir)(
+          : await (
+              this.#dependencies.prepareOutputDir ??
+              prepareScanRegistrationOutput
+            )(
               requestedOutput ?? undefined,
               basename(repo),
               scanOutputRoot,
               (path) => requireOutputOutsideRepository(protectedRoot, path),
               options.archiveExisting,
-              archiveObserver(options, (path) => (archivedScanDir = path)),
             );
       requireOutputOutsideRepository(protectedRoot, scanDir);
       requireModelSafeOutputDir(scanDir);
       releaseExecution ??= await (
         this.#dependencies.acquireScanExecution ?? acquireScanExecution
       )(stateDirectory, scanDir, await bundledPluginRoot());
-      notifyObserver(options, "onOutputDirReady")(scanDir);
+      if (!options.archiveExisting) {
+        notifyObserver(options, "onOutputDirReady")(scanDir);
+      }
       checkOpen();
       const instructionsFile = session.sessionConfig["model_instructions_file"];
       if (mode === "deep" && typeof instructionsFile === "string") {
@@ -1743,13 +1747,13 @@ export class CodexSecurity {
         discoveryPrompt = skill.discoveryPrompt;
         session.sessionConfig = skill.config;
       }
+      checkOpen();
       const registered = await registerScan({
         scan: options,
         parentScanRole: this.#parentScanRole,
         recipe,
         expectation,
         scanDir,
-        archivedScanDir,
         workbench: (args, input) => workbench(workbenchOptions, args, input),
       });
       const {
@@ -1763,6 +1767,16 @@ export class CodexSecurity {
         targetRevision,
         sealed,
       } = registered;
+      if (!sealed) activeScan = { id: scanId, options: workbenchOptions };
+      if (typeof registration["archivedScanDir"] === "string") {
+        notifyObserver(
+          options,
+          "onOutputArchived",
+        )(registration["archivedScanDir"]);
+      }
+      if (options.archiveExisting)
+        notifyObserver(options, "onOutputDirReady")(scanDir);
+      throwIfAborted(signal, scanDir);
       let { resumeThreadId } = registered;
       scanThreadId =
         typeof resumeThreadId === "string" ? resumeThreadId : undefined;
@@ -1970,7 +1984,6 @@ export class CodexSecurity {
             compositionCheckpointFromWorkbench(registration),
           );
         }
-        activeScan = { id: scanId, options: workbenchOptions };
       }
       await options.onRegisteredScan?.(registration);
       if (mode === "deep" && !sealed) {
@@ -3612,22 +3625,23 @@ export class CodexSecurity {
               basename(local.repository),
             )
           : undefined;
-      let archivedScanDir: string | undefined;
-      scanDir = await prepareOutputDir(
+      scanDir = await prepareScanRegistrationOutput(
         local.outputDir ?? undefined,
         basename(local.repository),
         outputRoot,
         (path) => requireOutputOutsideRepository(local.protectedRoot, path),
         options.archiveExisting,
-        archiveObserver(options, (path) => (archivedScanDir = path)),
       );
       requireModelSafeOutputDir(scanDir);
-      notifyObserver(options, "onOutputDirReady")(scanDir);
+      if (!options.archiveExisting) {
+        notifyObserver(options, "onOutputDirReady")(scanDir);
+      }
       const revision = await repositoryRevision(local.repository, signal);
       const { model } = scanModelConfiguration({
         ...DEFAULT_CODEX_CONFIG,
         ...this.config.codexOverrides,
       });
+      throwIfAborted(signal, scanDir);
       const registration = await workbench(
         workbenchOptions,
         [
@@ -3638,9 +3652,6 @@ export class CodexSecurity {
           scanDir,
           "--registration-json-stdin",
           ...(options.archiveExisting ? ["--archive-existing"] : []),
-          ...(archivedScanDir === undefined
-            ? []
-            : ["--archived-scan-dir", archivedScanDir]),
           ...(options.parentScanId === undefined
             ? []
             : ["--parent-scan-id", options.parentScanId]),
@@ -3680,6 +3691,16 @@ export class CodexSecurity {
         );
       }
       activeScan = { id: scanId, options: workbenchOptions };
+      if (typeof registration["archivedScanDir"] === "string") {
+        notifyObserver(
+          options,
+          "onOutputArchived",
+        )(registration["archivedScanDir"]);
+      }
+      if (options.archiveExisting) {
+        notifyObserver(options, "onOutputDirReady")(scanDir);
+      }
+      throwIfAborted(signal, scanDir);
       notifyObserver(options, "onScanStarted")();
       await writeMockScanDraft(
         scanDir,
@@ -4263,12 +4284,6 @@ export function formatEnvironmentVariableRemovalGuidance(
   }
   return `remove ${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]} from the environment`;
 }
-
-const archiveObserver =
-  (options: ScanOptions, save: (path: string) => void) => (path: string) => {
-    save(path);
-    notifyObserver(options, "onOutputArchived")(path);
-  };
 
 export function scanRuntimeCodexConfig(
   config: JsonObject,
