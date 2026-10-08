@@ -2894,11 +2894,13 @@ export class CodexSecurity {
       );
       const approvalPolicy = scanApprovalPolicy(effectiveConfig);
       const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
-      const providers = resolveCodexProfile(effectiveConfig)["model_providers"];
+      const resolvedConfig = resolveCodexProfile(effectiveConfig);
+      const providers = resolvedConfig["model_providers"];
       if (
         deepScan &&
         ((typeof modelProvider === "string" && modelProvider !== "openai") ||
-          (isRecord(providers) && Object.keys(providers).length > 0)) &&
+          (isRecord(providers) && Object.keys(providers).length > 0) ||
+          resolvedConfig["openai_base_url"] !== undefined) &&
         (runtime.deepScanConfigPath === undefined ||
           !(await pluginSupportsWorkerProviderSnapshot(
             runtime.plugin.pluginRoot,
@@ -4915,6 +4917,7 @@ function selectedWorkerRuntimeConfig(
       [
         "analytics",
         "responses_api_metadata",
+        "openai_base_url",
         "features",
         "model_auto_compact_token_limit",
         "model_context_window",
