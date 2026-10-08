@@ -872,7 +872,11 @@ describe("multiscan", () => {
       });
       expect(await readFile(join(dir, "checkpoint"), "utf8")).toBe("keep");
       if (!failure) {
-        expect(await runMultiscan(options(paths, client(runs)))).toMatchObject({
+        expect(
+          await runMultiscan(
+            options(paths, client(runs), { config: { pythonPath: PYTHON } }),
+          ),
+        ).toMatchObject({
           completed: 1,
           skipped: 1,
           failed: 0,
@@ -2925,16 +2929,17 @@ describe("multiscan", () => {
       { knowledgeBasePaths: [document], maxAttempts: 1 },
     );
     await runMultiscan(configured);
-    const oldReport = join(
+    const oldCoverage = join(
       paths.output,
       "artifacts",
       "repo",
       "attempt-1",
-      "report.md",
+      "coverage.json",
     );
-    await rm(oldReport);
+    const originalCoverage = await readFile(oldCoverage);
+    await rm(oldCoverage);
     expect(await runMultiscan(configured)).toMatchObject({ failed: 1 });
-    await writeFile(oldReport, "{}\n");
+    await writeFile(oldCoverage, originalCoverage);
     await rm(document);
     expect(await runMultiscan(configured)).toMatchObject({ failed: 1 });
     await writeFile(document, "Original context.");
@@ -3167,6 +3172,10 @@ describe("multiscan", () => {
       const completedReceipt = (
         await results(join(paths.output, "results.jsonl"))
       ).at(-1)!;
+      const completedReport = await readFile(
+        join(completedReceipt["outputDir"] as string, "report.md"),
+        "utf8",
+      );
       await writeFile(document, Buffer.from([0xff]));
       await expect(
         run([knowledge], { scanPrompt: "Changed review scope." }),
@@ -3183,7 +3192,7 @@ describe("multiscan", () => {
           join(completedReceipt["outputDir"] as string, "report.md"),
           "utf8",
         ),
-      ).toBe("{}\n");
+      ).toBe(completedReport);
       await writeFile(document, "Original context.");
       expect(await run([knowledge], perMode ? recover : {})).toMatchObject({
         completed: 1,
@@ -3614,7 +3623,7 @@ describe("multiscan", () => {
         completedScan(scanDir),
       );
       const config: MultiscanOptions["config"] = {
-        [field]: join(paths.root, "selected-runtime"),
+        [field]: field === "pythonPath" ? PYTHON : PLUGIN_ROOT,
       };
       const configured = options(paths, security, {
         config,
@@ -3716,9 +3725,11 @@ describe("multiscan", () => {
         `id,repository,revision\nconfiguration,${source.path},${source.revision}\n`,
       );
       let calls = 0;
-      const security = client(async (_repository, scanOptions = {}) => {
+      const security = client(async (repository, scanOptions = {}) => {
         calls++;
-        return completedScan(scanOptions.outputDir!);
+        return configuredModes
+          ? completedConfiguredPaths(repository, scanOptions)
+          : completedScan(scanOptions.outputDir!);
       });
       const initial = options(paths, security, {
         ...(configuredModes
@@ -6903,7 +6914,12 @@ for (const configured of [false, true]) {
       `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
     );
     const runs = mock(completeRun);
-    const initial = await runMultiscan(options(paths, client(runs)));
+    const python = basename(PYTHON);
+    const initial = await runMultiscan(
+      options(paths, client(runs), {
+        config: configured ? { pythonPath: python } : {},
+      }),
+    );
     const receipt = (await results(initial.resultsPath)).find(
       (row) => row["status"] === "completed",
     )!;
@@ -6916,7 +6932,6 @@ for (const configured of [false, true]) {
     git(paths.root, "clone", "--quiet", source.path, checkout);
     await rm(join(checkout, ".git"), { recursive: true });
     await rm(source.path, { recursive: true });
-    const python = basename(PYTHON);
     const code = `import {runMultiscan} from ${JSON.stringify(join(dirname(import.meta.path), "..", "src", "multiscan.ts"))};
       const options=${JSON.stringify({ inputPath: paths.input, outputDir: paths.output, workers: 1, mode: "standard", maxAttempts: 2, config: configured ? { pythonPath: python } : {} })};
       options.createSecurity=()=>({run:async()=>{throw new Error("Completed receipt must be reused");},close:async()=>{}});
@@ -7052,9 +7067,6 @@ test("retained spelling recovery restores a tracked interpreter selection", asyn
     paths.input,
     `id,repository,revision\nrepo,${source.path},${revision}\n`,
   );
-  await runMultiscan(
-    options(paths, client(rejecting("Interrupted")), { maxAttempts: 1 }),
-  );
   const checkout = join(
     paths.output,
     "recovery-checkouts",
@@ -7064,6 +7076,12 @@ test("retained spelling recovery restores a tracked interpreter selection", asyn
   const alias = join(
     checkout,
     process.platform === "win32" ? "python" : "python.exe",
+  );
+  await runMultiscan(
+    options(paths, client(rejecting("Interrupted")), {
+      maxAttempts: 1,
+      config: { pythonPath: alias },
+    }),
   );
   const runs = mock(
     async (
@@ -7343,8 +7361,12 @@ for (const { parentThroughLink, missing } of [
         paths.input,
         `id,repository,revision,scope\nrepo,${source.path},${source.revision},alias/app.ts\n`,
       );
+      const config = { pythonPath: PYTHON };
       await runMultiscan(
-        options(paths, client(rejecting("Interrupted")), { maxAttempts: 1 }),
+        options(paths, client(rejecting("Interrupted")), {
+          maxAttempts: 1,
+          config,
+        }),
       );
       const runs = mock(
         async (
@@ -7354,6 +7376,7 @@ for (const { parentThroughLink, missing } of [
       );
       const campaign = options(paths, client(runs), {
         recoverScan: async () => undefined,
+        config,
       });
       const initial = await runMultiscan(campaign);
       expect(initial).toMatchObject({ completed: 1, skipped: 0 });
@@ -7385,7 +7408,7 @@ for (const { parentThroughLink, missing } of [
         define: { "import.meta.url": JSON.stringify(sourceModule.href) },
       });
       const code = `const {runMultiscan} = require(process.argv[1]);
-      const options=${JSON.stringify({ inputPath: paths.input, outputDir: paths.output, workers: 1, mode: "standard", maxAttempts: 2, config: { pythonPath: PYTHON } })};
+      const options=${JSON.stringify({ inputPath: paths.input, outputDir: paths.output, workers: 1, mode: "standard", maxAttempts: 2, config })};
       options.createSecurity=()=>({run:async()=>{throw new Error("Completed receipt must be reused");},close:async()=>{}});
       options.recoverScan=async()=>undefined;
       runMultiscan(options).then((result)=>console.log(JSON.stringify(result)),(error)=>{console.error(error);process.exitCode=1});`;
@@ -7562,7 +7585,11 @@ for (const automatic of [false, true]) {
           return completedScan(settings.outputDir!, "complete", checkout);
         },
       );
-      const initial = await runMultiscan(options(paths, client(runs)));
+      const initial = await runMultiscan(
+        options(paths, client(runs), {
+          config: automatic ? {} : { pythonPath: "python3" },
+        }),
+      );
       const rows = await results(initial.resultsPath);
       expect(initial).toMatchObject({ completed: 1, skipped: 0 });
       const receipt = rows.find((row) => row["status"] === "completed")!;
