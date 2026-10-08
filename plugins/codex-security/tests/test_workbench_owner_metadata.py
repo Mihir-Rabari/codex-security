@@ -512,3 +512,103 @@ def test_saved_malformed_reducer_candidates_preserve_valid_parent(
     assert any(row.get("id") == "pending-reducer" for row in result[2]["deferred"]) is (
         isinstance(unresolved, list) and bool(unresolved)
     )
+
+
+@pytest.mark.parametrize("owner_field", ["sourceWorkerId", "workerId"])
+@pytest.mark.parametrize("reference_suffix", ["0", "opaque"])
+@pytest.mark.parametrize("saved_owner", ["worker-one", "worker-two"])
+@pytest.mark.parametrize("registered_candidate", [None, "different-candidate", "saved-candidate"])
+def test_retained_finding_owner_is_not_rebound_from_source_reference(
+    tmp_path: Path,
+    workbench_api,
+    owner_field: str,
+    reference_suffix: str,
+    saved_owner: str,
+    registered_candidate: str | None,
+) -> None:
+    scan_id = "legacy-source-owner"
+    scan_dir, manifest, finding, _ = saved_parent(tmp_path, scan_id)
+    finding["provenance"].update(candidateId="saved-candidate", **{owner_field: saved_owner})
+    original = copy.deepcopy(finding)
+    finding["provenance"]["sourceFindings"] = [
+        {"id": f"worker-one:{reference_suffix}", "finding": original}
+    ]
+    (scan_dir / "findings.json").write_text(json.dumps({"findings": [finding]}))
+    worker = scan_dir / "worker"
+    worker.mkdir()
+    result_path = worker / "result.json"
+    registered = copy.deepcopy(original)
+    registered["provenance"]["candidateId"] = registered_candidate
+    if registered_candidate == "different-candidate":
+        registered["identity"] = {"anchor": "independent-registered-finding"}
+        registered["summary"] = "Independent registered worker evidence."
+    expected_owner = (
+        "worker-one"
+        if reference_suffix == "0" and registered_candidate == "saved-candidate"
+        else saved_owner
+    )
+    result_path.write_text(
+        json.dumps(
+            {
+                "scanId": scan_id,
+                "complete": True,
+                "findings": [registered] if registered_candidate else [],
+                "coverage": {
+                    "completeness": "complete",
+                    "surfaces": [],
+                    "explicitExclusions": [],
+                    "deferred": [],
+                },
+            }
+        )
+    )
+    originals = {path: path.read_bytes() for path in scan_dir.rglob("*.json")}
+    workers = [
+        {
+            "id": "worker-one",
+            "kind": "discovery",
+            "status": "succeeded",
+            "artifact_dir": str(worker),
+            "result_manifest_path": str(result_path),
+            "attempt": 1,
+        }
+    ]
+    binding = {
+        "status": "failed",
+        "allowedTargetKinds": ["directory_snapshot"],
+        "target": manifest["scan"]["target"],
+        "scope": manifest["scan"]["scope"],
+        "coverageMode": "deep_repository",
+    }
+    module = workbench_api["saved_results"]
+    first = module.merge_saved_results(
+        scan_dir, scan_id, binding, workers, [], stopped=True, reason="Synthetic interruption."
+    )
+    assert first is not None
+    replay = module.merge_saved_results(
+        scan_dir,
+        scan_id,
+        binding,
+        workers,
+        [],
+        stopped=True,
+        reason="Synthetic interruption.",
+        frozen_source_digests=first[0]["scan"]["preservedSources"],
+    )
+    for result in (first, replay):
+        assert result is not None
+        retained = [
+            item
+            for item in result[1]["findings"]
+            if item["provenance"].get("sourceFindings") == finding["provenance"]["sourceFindings"]
+        ]
+        assert len(retained) == 1
+        provenance = retained[0]["provenance"]
+        assert (provenance.get("sourceWorkerId") or provenance.get("workerId")) == expected_owner
+        if registered_candidate == "different-candidate":
+            assert any(
+                item["provenance"].get("candidateId") == registered_candidate
+                for item in result[1]["findings"]
+            )
+        assert provenance["sourceFindings"] == finding["provenance"]["sourceFindings"]
+    assert all(path.read_bytes() == value for path, value in originals.items())

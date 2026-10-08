@@ -584,6 +584,7 @@ export async function runCustomValidation(options: {
     }
     if (validation.disposition !== "reportable") continue;
     const finding = candidate.finding;
+    delete finding.provenance["candidateReopened"];
     finding.validation = {
       ...validation,
       summary: validation.evidence.join("\n"),

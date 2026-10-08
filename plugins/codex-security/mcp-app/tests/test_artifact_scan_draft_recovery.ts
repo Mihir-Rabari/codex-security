@@ -1563,25 +1563,27 @@ for (const layout of ["standard", "diff", "worker"] as const) {
   });
 
   for (const reverse of [false, true]) {
-    test(`${layout}: reject cross-row candidate identity ownership, reverse=${reverse}`, async (t) => {
+    test(`${layout}: canonical task IDs stay distinct from candidate aliases, reverse=${reverse}`, async (t) => {
       const f = await fixture(t, layout);
       const deferred = [
         { id: "candidate-a", ...generic },
         { id: "candidate-task", candidateId: "candidate-a", ...generic },
       ];
       if (reverse) deferred.reverse();
+      await f.write(f.draft({ deferred }));
+      assert.deepEqual((await f.read()).deferred, deferred);
       await assert.rejects(
-        f.write(f.draft({ deferred })),
+        f.write(
+          f.draft({
+            deferred: [
+              { id: "candidate-a", ...generic },
+              { id: "candidate-a", candidateId: "candidate-a", ...generic },
+            ],
+          }),
+        ),
         /coverage\.deferred repeats candidate-a/,
       );
-      assert.deepEqual(await readdir(f.root), []);
-      await f.write(
-        f.draft({
-          deferred: [
-            { id: "candidate-a", candidateId: "candidate-a", ...generic },
-          ],
-        }),
-      );
+      assert.deepEqual((await f.read()).deferred, deferred);
       await f.write(
         f.draft(
           {
@@ -1596,6 +1598,12 @@ for (const layout of ["standard", "diff", "worker"] as const) {
           },
           true,
         ),
+      );
+      assert.deepEqual((await f.read()).deferred, [
+        { id: "candidate-a", ...generic },
+      ]);
+      await f.write(
+        f.draft({ resolvedDeferred: [close("candidate-a")] }, true),
       );
       assert.deepEqual((await f.read()).deferred, []);
     });
@@ -1687,10 +1695,27 @@ for (const layout of ["standard", "diff", "worker"] as const) {
               outcome,
             );
         }
-        await assert.rejects(
-          f.write(f.draft({ resolvedDeferred: [close(task.id)] }, true)),
-          /ambiguous saved deferred work/,
-        );
+        if (alias === "id") {
+          await assert.rejects(
+            f.write(f.draft({ resolvedDeferred: [close(task.id)] }, true)),
+            /ambiguous saved deferred work/,
+          );
+        } else {
+          // Distinct canonical task IDs remain closable beside candidate aliases.
+          for (const input of [
+            f.draft({ resolvedDeferred: [close(task.id)] }, true),
+            f.draft({}, true),
+          ]) {
+            const result = await f.write(input);
+            assert.deepEqual(result.coverage.deferred, []);
+            assert.deepEqual(
+              result.coverage.resolvedDeferred
+                .map((row: { id: string }) => row.id)
+                .sort(),
+              [other.id, task.id].sort(),
+            );
+          }
+        }
       });
     }
   }

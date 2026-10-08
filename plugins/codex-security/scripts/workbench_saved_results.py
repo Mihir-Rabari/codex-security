@@ -718,7 +718,9 @@ def _bind_finding_worker(
     provenance.setdefault("workerId", worker_id)
 
 
-def _bind_retained_source_owners(draft: dict[str, Any], worker_ids: set[str]) -> dict[str, Any]:
+def _bind_retained_source_owners(
+    draft: dict[str, Any], source_owners: dict[tuple[str, str], str]
+) -> dict[str, Any]:
     result = copy.deepcopy(draft)
     for finding in result["findings"]:
         if not isinstance(finding, dict) or not isinstance(finding.get("provenance"), dict):
@@ -728,12 +730,11 @@ def _bind_retained_source_owners(draft: dict[str, Any], worker_ids: set[str]) ->
         if candidate_id is None or not isinstance(originals, list):
             continue
         owners = {
-            source["id"].rsplit(":", 1)[0]
+            source_owners[(source["id"], candidate_id)]
             for source in originals
             if isinstance(source, dict)
             and isinstance(source.get("id"), str)
-            and ":" in source["id"]
-            and source["id"].rsplit(":", 1)[0] in worker_ids
+            and (source["id"], candidate_id) in source_owners
             and isinstance(source.get("finding"), dict)
             and finding_candidate_id(source["finding"]) == candidate_id
         }
@@ -1561,12 +1562,20 @@ def merge_saved_results(
 
     worker_ids = {worker["id"] for worker in workers if worker["kind"] == "discovery"}
     if worker_ids:
+        source_owners = {
+            (f"{owner}:{index}", candidate_id): owner
+            for _, draft, owner in sources
+            if owner is not None
+            for index, finding in enumerate(draft["findings"])
+            if isinstance(finding, dict)
+            and (candidate_id := finding_candidate_id(finding)) is not None
+        }
         if parent is not None:
-            parent = _bind_retained_source_owners(parent, worker_ids)
+            parent = _bind_retained_source_owners(parent, source_owners)
         sources = [
             (
                 relative,
-                _bind_retained_source_owners(draft, worker_ids) if owner is None else draft,
+                _bind_retained_source_owners(draft, source_owners) if owner is None else draft,
                 owner,
             )
             for relative, draft, owner in sources
@@ -1915,9 +1924,11 @@ def merge_saved_results(
         reopened = [
             active
             for (owner, identity), active in active_deferred.items()
-            if owner == key[0] and identity == key[1] and active[0] >= order
+            if owner == key[0]
+            and (identity == key[1] or active[1].get("candidateId") == key[1])
+            and active[0] >= order
         ]
-        if key in unclosable_tasks or reopened:
+        if key in unclosable_tasks or any(row.get("id") == key[1] for _, row, _ in reopened):
             del closed_deferred[key]
         for _, item, _ in reopened:
             reopened_rows.append((key[0], item))
