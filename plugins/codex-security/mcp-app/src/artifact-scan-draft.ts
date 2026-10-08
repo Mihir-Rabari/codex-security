@@ -723,7 +723,16 @@ function reconcileScanDraft(
             );
           })
         : [];
-      if (inferredMatches.length > 0) {
+      const inferredIdentities = inferredMatches.map((current) => {
+        const owner = (current.provenance as JsonObject).workerId;
+        return JSON.stringify([
+          scanFindingIdentity(generated[result.findings.indexOf(current)]!),
+          findingLocationKeys(current),
+          typeof owner === "string" && owner ? owner : undefined,
+          findingSiblingSource(current),
+        ]);
+      });
+      if (new Set(inferredIdentities).size === 1) {
         for (const current of inferredMatches)
           preserveFindingDetails(current, finding);
       } else if (
@@ -2348,11 +2357,7 @@ function identifyFindings(findings: JsonObject[]): JsonObject[] {
   return findings.map((finding, index) => {
     if (finding.identity !== undefined) return { ...finding };
     const identity: JsonObject = { anchor: anchors[index] };
-    const extensions = finding.extensions as JsonObject | undefined;
-    const siblingSource = [extensions?.reportId, extensions?.ledgerRowId].find(
-      (value): value is string =>
-        typeof value === "string" && Boolean(value.trim()),
-    );
+    const siblingSource = findingSiblingSource(finding);
     const ruleScopedAnchor = `${finding.ruleId}\0${identity.anchor}`;
     if (
       siblingSource !== undefined ||
@@ -2368,6 +2373,14 @@ function identifyFindings(findings: JsonObject[]): JsonObject[] {
       identity,
     };
   });
+}
+
+function findingSiblingSource(finding: JsonObject): string | undefined {
+  const extensions = finding.extensions as JsonObject | undefined;
+  return [extensions?.reportId, extensions?.ledgerRowId].find(
+    (value): value is string =>
+      typeof value === "string" && Boolean(value.trim()),
+  );
 }
 
 function findingLocationKeys(finding: JsonObject): string[] {
