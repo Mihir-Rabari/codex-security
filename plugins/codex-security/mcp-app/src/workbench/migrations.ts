@@ -403,6 +403,30 @@ export function applyMigrations(
       "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)",
     );
     normalizeHistory(database);
+    moveMigration(
+      database,
+      48,
+      50,
+      "bind original deep scan parent usage turn",
+    );
+    moveMigration(
+      database,
+      47,
+      49,
+      "freeze stopped scan checkpoint selections",
+    );
+    moveMigration(
+      database,
+      46,
+      48,
+      "persist selected deep scan finalization input",
+    );
+    moveMigration(
+      database,
+      45,
+      47,
+      "retain deep scan attempts and exact merge inputs",
+    );
     const applied = new Set(
       database
         .prepare("SELECT version FROM schema_migrations")

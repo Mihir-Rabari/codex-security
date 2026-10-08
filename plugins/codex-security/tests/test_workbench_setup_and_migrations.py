@@ -84,10 +84,13 @@ EXPECTED_MIGRATIONS = [
     (41, "checkpoint finding severity assessments"),
     (42, "editable scan names"),
     (43, "preserve severity assessments per scan"),
-    (45, "retain deep scan attempts and exact merge inputs"),
-    (46, "persist selected deep scan finalization input"),
-    (47, "freeze stopped scan checkpoint selections"),
-    (48, "bind original deep scan parent usage turn"),
+    (44, "version local finding embedding inputs"),
+    (45, "separate local and service embedding caches"),
+    (46, "invalidate local embeddings when finding bodies change"),
+    (47, "retain deep scan attempts and exact merge inputs"),
+    (48, "persist selected deep scan finalization input"),
+    (49, "freeze stopped scan checkpoint selections"),
+    (50, "bind original deep scan parent usage turn"),
     (51, "bind original deep scan execution settings"),
 ]
 

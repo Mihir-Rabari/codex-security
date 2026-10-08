@@ -65,6 +65,14 @@ def apply_migrations(
             """
         )
         normalize_pre_release_migrations(connection, now())
+        move_pre_release_migration(connection, 48, 50, "bind original deep scan parent usage turn")
+        move_pre_release_migration(connection, 47, 49, "freeze stopped scan checkpoint selections")
+        move_pre_release_migration(
+            connection, 46, 48, "persist selected deep scan finalization input"
+        )
+        move_pre_release_migration(
+            connection, 45, 47, "retain deep scan attempts and exact merge inputs"
+        )
         applied = {
             row["version"] for row in connection.execute("SELECT version FROM schema_migrations")
         }
