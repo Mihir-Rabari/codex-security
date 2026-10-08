@@ -257,8 +257,9 @@ async function publishCloudPayload(
 }
 
 async function readCloudCredentials(environment: NodeJS.ProcessEnv) {
+  const configuredHome = environment["CODEX_HOME"];
   let home = expandHome(
-    environment["CODEX_HOME"]?.trim() || "~/.codex",
+    configuredHome?.trim() ? configuredHome : "~/.codex",
     environment,
   );
   let requireFileStorage = true;
