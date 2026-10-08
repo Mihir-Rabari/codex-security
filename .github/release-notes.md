@@ -108,6 +108,7 @@
 - retry container releases without replacing a newer latest tag ([#1046](https://github.com/openai/codex-security/pull/1046))
 - read compressed Codex session logs ([#1428](https://github.com/openai/codex-security/pull/1428))
 - deduplicate saved scans with local SQLite ([#1338](https://github.com/openai/codex-security/pull/1338))
+- preserve manual line breaks ([#186](https://github.com/openai/codex-security/pull/186))
 
 <!-- release-section: highlights:end -->
 
