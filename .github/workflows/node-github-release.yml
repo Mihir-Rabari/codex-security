@@ -435,7 +435,7 @@ jobs:
           trap 'rm -rf "$release_workspace"' EXIT
 
           node --input-type=module --eval '
-            import { publishGitHubRelease } from "./.github/scripts/publish-github-release.mjs";
+            import { publishGitHubRelease } from "./sdk/typescript/scripts/publish-github-release.mjs";
             try {
               publishGitHubRelease(process.env, process.argv[1]);
             } catch (error) {

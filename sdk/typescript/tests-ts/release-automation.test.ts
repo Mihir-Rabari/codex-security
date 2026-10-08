@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, spyOn, test } from "bun:test";
-import { publishGitHubRelease } from "../../../.github/scripts/publish-github-release.mjs";
+import { publishGitHubRelease } from "../scripts/publish-github-release.mjs";
 import { bashCommand, runCommand } from "./support/shell.js";
 
 import {

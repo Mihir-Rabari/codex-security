@@ -6,7 +6,7 @@ import {
   composeReleaseNotes,
   resolveReleaseSummary,
   verifyGitHubRelease,
-} from "../../sdk/typescript/scripts/release-automation.mjs";
+} from "./release-automation.mjs";
 
 function runCommand(program, args, stderr = "inherit", stdout = "pipe") {
   return spawnSync(program, args, {
