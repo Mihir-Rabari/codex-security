@@ -160,8 +160,6 @@ Recommended outcomes:
 - `Not applicable`: the risk class does not apply to that surface.
 - `Needs follow-up`: essential in-scope review remains unresolved because of a concrete blocker or proof gap; this blocks complete coverage.
 
-Write the same content, or a slightly more detailed version, to `<coverage_dir>/reviewed_surfaces.md`.
-
 The generated `## Incomplete Requested Work` section lists deferred work and unresolved in-scope surfaces. Put optional investigations in `## Open Questions And Follow Up`, including for an otherwise complete scoped scan. Use concrete, copyable prompts grounded in the selected source and findings. Do not invent follow-ups or broaden the current scan.
 
 Follow-up prompts should be tailored to the actual scan results:
