@@ -91,6 +91,10 @@
 - preserve saved results when scans stop or restart ([#1269](https://github.com/openai/codex-security/pull/1269))
 - keep usable bundles after failures and preserve release labels ([#1263](https://github.com/openai/codex-security/pull/1263))
 - preserve distinct fixes from merged findings ([#905](https://github.com/openai/codex-security/pull/905))
+- read source excerpts from the scanned target ([#1063](https://github.com/openai/codex-security/pull/1063))
+- exclude inherited parent events from saved worker logs ([#1060](https://github.com/openai/codex-security/pull/1060))
+- report worker capacity from merged Codex settings ([#1055](https://github.com/openai/codex-security/pull/1055))
+- simplify action cleanup and stabilize provider isolation tests ([#1421](https://github.com/openai/codex-security/pull/1421))
 
 <!-- release-section: highlights:end -->
 
