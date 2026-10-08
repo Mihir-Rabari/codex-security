@@ -1,3 +1,4 @@
+import { readJson } from "./support/json.js";
 import {
   mkdir,
   mkdtemp,
@@ -31,12 +32,9 @@ import { rejecting } from "./support/errors.js";
 const servers: Server[] = [];
 const directories: string[] = [];
 const example = (
-  JSON.parse(
-    await readFile(
-      join(PLUGIN_ROOT, "examples/completed-scan/findings.json"),
-      "utf8",
-    ),
-  ) as FindingsDocument
+  await readJson<FindingsDocument>(
+    join(PLUGIN_ROOT, "examples/completed-scan/findings.json"),
+  )
 ).findings[0]!;
 
 function finding(index = 1): Finding {
