@@ -253,6 +253,7 @@ async function testWorkbenchStateFallback() {
 
     const scanRoot = path.join(fixtureRoot, "fallback-scans");
     const fallbackServer = startServer(serverBundlePath, {
+      CODEX_HOME: path.join(fixtureRoot, "fallback-home"),
       CODEX_SECURITY_SCAN_ROOT: scanRoot,
       CODEX_SECURITY_STATE_DIR: undefined,
       FAKE_PYTHON_ALWAYS_FAIL: undefined,
@@ -399,7 +400,12 @@ async function testWorkbenchStateFallback() {
       issueIdentifier: "APP-1",
       operation: "create",
     };
-    for (const existingStore of ["missing", "empty", "populated"]) {
+    for (const existingStore of [
+      "missing",
+      "empty",
+      "populated",
+      "empty-write-first",
+    ]) {
       await writeFile(invocationLog, "");
       const issueScanRoot = path.join(
         fixtureRoot,
@@ -414,21 +420,29 @@ async function testWorkbenchStateFallback() {
       );
       const receipts = existingStore === "populated" ? [issueReceipt] : [];
       if (existingStore !== "missing") {
-        execFileSync(
-          realPython,
-          [
-            path.join(pluginRoot, "scripts", "workbench_db.py"),
-            "finding-issues",
-          ],
-          {
-            env: { ...process.env, CODEX_SECURITY_STATE_DIR: issueState },
-            input: JSON.stringify({
-              ...issueInput,
-              action: "record",
-              receipts,
-            }),
-          },
-        );
+        for (const state of [
+          issueState,
+          path.join(issueScanRoot, "workbench-state"),
+        ]) {
+          execFileSync(
+            realPython,
+            [
+              path.join(pluginRoot, "scripts", "workbench_db.py"),
+              "finding-issues",
+            ],
+            {
+              env: { ...process.env, CODEX_SECURITY_STATE_DIR: state },
+              input: JSON.stringify({
+                ...issueInput,
+                action: "record",
+                receipts:
+                  state === issueState
+                    ? receipts
+                    : [{ ...issueReceipt, issueIdentifier: "FALLBACK-1" }],
+              }),
+            },
+          );
+        }
       }
       const issueServer = startServer(serverBundlePath, {
         CODEX_HOME: issueHome,
@@ -438,12 +452,39 @@ async function testWorkbenchStateFallback() {
         FAKE_PYTHON_FAILURE:
           "sqlite3.OperationalError: unable to open database file",
         FAKE_PYTHON_LOG: invocationLog,
-        FAKE_PYTHON_PERSISTENT_SUCCESSES: "1",
+        FAKE_PYTHON_PERSISTENT_SUCCESSES:
+          existingStore === "empty-write-first" ? "0" : "1",
         FAKE_REAL_PYTHON: realPython,
         PYTHON: fakePythonPath,
       });
       try {
         await initialize(issueServer, 1);
+        if (existingStore === "empty-write-first") {
+          assertNoError(
+            await issueServer.request(2, "tools/call", {
+              name: "record_codex_security_finding_issues",
+              arguments: { ...issueInput, receipts: [issueReceipt] },
+            }),
+          );
+          const saved = await issueServer.request(3, "tools/call", {
+            name: "get_codex_security_finding_issues",
+            arguments: issueInput,
+          });
+          assertNoError(saved);
+          assert.deepEqual(
+            saved.result.structuredContent.receipts.map(
+              (receipt: { issueIdentifier: string }) => receipt.issueIdentifier,
+            ),
+            ["FALLBACK-1", "APP-1"],
+          );
+          const fallbackStateDir = path.join(issueScanRoot, "workbench-state");
+          assert.deepEqual(
+            (await readJsonLines(invocationLog)).map((entry) => entry.stateDir),
+            [null, fallbackStateDir, fallbackStateDir],
+            "A first write failure must retain the existing SQLite-error fallback.",
+          );
+          continue;
+        }
         const inspected = await issueServer.request(2, "tools/call", {
           name: "get_codex_security_finding_issues",
           arguments: issueInput,
@@ -459,7 +500,7 @@ async function testWorkbenchStateFallback() {
         );
         assert.equal(
           await pathExists(path.join(issueScanRoot, "workbench-state")),
-          false,
+          existingStore !== "missing",
           "Inspecting absent fallback history must not create its directory.",
         );
         const recorded = await issueServer.request(3, "tools/call", {
@@ -480,7 +521,7 @@ async function testWorkbenchStateFallback() {
           );
           assert.deepEqual(
             (await readJsonLines(invocationLog)).map((entry) => entry.stateDir),
-            [null, fallbackStateDir, null, fallbackStateDir, fallbackStateDir],
+            [null, null, fallbackStateDir, fallbackStateDir],
           );
         } else {
           assertToolError(recorded, /unable to open database file/);
@@ -488,7 +529,7 @@ async function testWorkbenchStateFallback() {
             (await readJsonLines(invocationLog)).map((entry) => entry.stateDir),
             [null, null],
           );
-          assert.equal(await pathExists(fallbackStateDir), false);
+          assert.equal(await pathExists(fallbackStateDir), true);
         }
         assert.equal(
           issueServer
@@ -500,41 +541,56 @@ async function testWorkbenchStateFallback() {
         await issueServer.stop();
       }
       if (existingStore === "missing") {
-        const restarted = startServer(serverBundlePath, {
-          CODEX_HOME: issueHome,
-          CODEX_SECURITY_SCAN_ROOT: issueScanRoot,
-          CODEX_SECURITY_STATE_DIR: undefined,
-          PYTHON: realPython,
-        });
-        try {
-          await initialize(restarted, 1);
-          const inspected = await restarted.request(2, "tools/call", {
-            name: "get_codex_security_finding_issues",
-            arguments: issueInput,
+        for (const firstOperation of ["inspect", "record"]) {
+          const restarted = startServer(serverBundlePath, {
+            CODEX_HOME: issueHome,
+            CODEX_SECURITY_SCAN_ROOT: issueScanRoot,
+            CODEX_SECURITY_STATE_DIR: undefined,
+            PYTHON: realPython,
           });
-          assertNoError(inspected);
-          assert.deepEqual(
-            inspected.result.structuredContent.receipts.map(
-              (receipt: { issueIdentifier: string }) => receipt.issueIdentifier,
-            ),
-            ["APP-1"],
-            "Inspection after restart must recover the existing fallback receipts.",
-          );
-          const reused = await restarted.request(3, "tools/call", {
-            name: "record_codex_security_finding_issues",
-            arguments: {
-              ...issueInput,
-              receipts: [{ ...issueReceipt, operation: "reuse" }],
-            },
-          });
-          assertNoError(reused);
-          assert.equal(
-            await pathExists(path.join(issueState, "workbench.sqlite3")),
-            false,
-            "Recording after restart must keep using the recovered fallback store.",
-          );
-        } finally {
-          await restarted.stop();
+          try {
+            await initialize(restarted, 1);
+            if (firstOperation === "record") {
+              assertNoError(
+                await restarted.request(2, "tools/call", {
+                  name: "record_codex_security_finding_issues",
+                  arguments: {
+                    ...issueInput,
+                    receipts: [{ ...issueReceipt, operation: "reuse" }],
+                  },
+                }),
+              );
+            }
+            const inspected = await restarted.request(3, "tools/call", {
+              name: "get_codex_security_finding_issues",
+              arguments: issueInput,
+            });
+            assertNoError(inspected);
+            assert.equal(
+              inspected.result.structuredContent.receipts.some(
+                (receipt: { issueIdentifier: string; operation: string }) =>
+                  receipt.issueIdentifier === "APP-1" &&
+                  receipt.operation === "create",
+              ),
+              true,
+              `${firstOperation}-first restart must recover the existing fallback receipt.`,
+            );
+            const reused = await restarted.request(4, "tools/call", {
+              name: "record_codex_security_finding_issues",
+              arguments: {
+                ...issueInput,
+                receipts: [{ ...issueReceipt, operation: "reuse" }],
+              },
+            });
+            assertNoError(reused);
+            assert.equal(
+              await pathExists(path.join(issueState, "workbench.sqlite3")),
+              false,
+              "Recording after restart must keep using the recovered fallback store.",
+            );
+          } finally {
+            await restarted.stop();
+          }
         }
       }
     }
@@ -583,6 +639,7 @@ async function testWorkbenchStateFallback() {
     await writeFile(invocationLog, "");
     const genericScanRoot = path.join(fixtureRoot, "generic-scans");
     const genericServer = startServer(serverBundlePath, {
+      CODEX_HOME: path.join(fixtureRoot, "generic-home"),
       CODEX_SECURITY_SCAN_ROOT: genericScanRoot,
       CODEX_SECURITY_STATE_DIR: undefined,
       FAKE_PYTHON_ALWAYS_FAIL: "1",

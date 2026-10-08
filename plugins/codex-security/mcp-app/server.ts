@@ -8,7 +8,7 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
@@ -2456,6 +2456,18 @@ async function executeWorkbenchWithStateSelection(
     if (persistentWorkbenchStateSucceeded) {
       return await executeWorkbench(pythonCommand, args, undefined, input);
     }
+    if (CONFIGURED_SCAN_ROOT) {
+      const primary = await executeWorkbench(pythonCommand, [
+        "resolve-scan-root",
+      ]);
+      if (!(await workbenchStoreExists(dirname(primary.scanRoot as string)))) {
+        const fallback = join(await scanRoot(), "workbench-state");
+        if (await workbenchStoreExists(fallback)) {
+          fallbackWorkbenchStateDir = Promise.resolve(fallback);
+          return await executeWorkbench(pythonCommand, args, fallback, input);
+        }
+      }
+    }
     try {
       const result = await executeWorkbench(
         pythonCommand,
@@ -2463,29 +2475,8 @@ async function executeWorkbenchWithStateSelection(
         undefined,
         input,
       );
-      // Recover a known fallback after restart before reporting missing history.
-      if (
-        args[0] === "finding-issues" &&
-        input !== undefined &&
-        JSON.parse(input.toString()).action === "inspect" &&
-        result.storeExists === false
-      ) {
-        if (CONFIGURED_SCAN_ROOT) {
-          const stateDir = join(await scanRoot(), "workbench-state");
-          const fallback = await executeWorkbench(
-            pythonCommand,
-            args,
-            stateDir,
-            input,
-          );
-          if (fallback.storeExists === true) {
-            fallbackWorkbenchStateDir = Promise.resolve(stateDir);
-            return fallback;
-          }
-        }
-      } else {
+      if (result.storeExists !== false)
         persistentWorkbenchStateSucceeded = true;
-      }
       return result;
     } catch (error) {
       if (!isUnwritableSqliteOpenError(error)) throw error;
@@ -2505,6 +2496,16 @@ async function executeWorkbenchWithStateSelection(
       );
     }
   });
+}
+
+async function workbenchStoreExists(stateDir: string): Promise<boolean> {
+  try {
+    await fs.stat(join(stateDir, "workbench.sqlite3"));
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 async function executeWorkbench(
