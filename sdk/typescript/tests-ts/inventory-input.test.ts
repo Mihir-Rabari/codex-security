@@ -936,3 +936,21 @@ test("diff inventory expands a home-relative repository scope", () => {
   expect(result.status, result.stderr).toBe(0);
   expect(readFileSync(f.out, "utf8")).toBe("source.py\n");
 });
+
+test.skipIf(process.platform === "win32")(
+  "inventory falls back to ripgrep when selected Git's interpreter is missing",
+  () => {
+    const f = fixture();
+    f.write("source.py");
+    const selectedGit = join(f.root, "git");
+    writeFileSync(selectedGit, `#!${join(f.root, "missing-interpreter")}\n`, {
+      mode: 0o700,
+    });
+    const result = f.run("make-repo-rank-input", [], {
+      ...process.env,
+      CODEX_SECURITY_GIT: selectedGit,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(f.out, "utf8")).path).toBe("source.py");
+  },
+);

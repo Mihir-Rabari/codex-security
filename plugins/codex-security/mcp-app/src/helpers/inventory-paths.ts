@@ -82,8 +82,8 @@ export function sameFile(left: string, right: string): boolean {
         b = windowsFiles().identity(Buffer.from(right, "utf16le"));
       return a.volume === b.volume && a.fileId.equals(b.fileId);
     }
-    const a = statSync(fsPath(left)),
-      b = statSync(fsPath(right));
+    const a = statSync(fsPath(left), { bigint: true }),
+      b = statSync(fsPath(right), { bigint: true });
     return a.dev === b.dev && a.ino === b.ino;
   } catch {
     return false;

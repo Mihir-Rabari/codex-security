@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import { importSource } from "./import-module.ts";
 import { windowsFileSystem } from "../../native/windows-files.mjs";
 import type { WindowsBinding } from "../../native/windows-binding.mjs";
 
@@ -28,3 +31,32 @@ for (const [name, reparseTag, surrogate] of [
     assert.equal(info.isNameSurrogate(), surrogate);
     if (!surrogate) assert.equal(info.isDirectory(), true);
   });
+
+test("POSIX file identities retain all 64 inode bits", async () => {
+  const original = fs.statSync;
+  fs.statSync = ((path, options) => {
+    if (!["left", "right"].includes(String(path)))
+      return original(path, options);
+    const ino = String(path) === "left" ? 9007199254740992n : 9007199254740993n;
+    return options?.bigint ? { dev: 1n, ino } : { dev: 1, ino: Number(ino) };
+  }) as typeof fs.statSync;
+  syncBuiltinESMExports();
+  try {
+    const { sameFile } = await importSource("src/helpers/inventory-paths.ts", {
+      define: {
+        "process.platform": '"linux"',
+        "import.meta.url": JSON.stringify(
+          new URL(
+            "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
+            import.meta.url,
+          ).href,
+        ),
+      },
+    });
+    assert.equal(sameFile("left", "right"), false);
+    assert.equal(sameFile("left", "left"), true);
+  } finally {
+    fs.statSync = original;
+    syncBuiltinESMExports();
+  }
+});

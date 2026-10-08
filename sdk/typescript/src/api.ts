@@ -9,6 +9,7 @@ import {
   readFile,
   realpath,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -1807,7 +1808,7 @@ export class CodexSecurity {
       }
       checkOpen();
       const basePrompt = scanPrompt(
-        normalized,
+        await targetInstruction(normalized, shellPluginRoot),
         mode,
         skillName,
         scanId,
@@ -4005,7 +4006,7 @@ function trustedAccessWarning(
 }
 
 function scanPrompt(
-  target: NormalizedTarget,
+  targetDescription: string,
   mode: ScanMode,
   skillName: string,
   scanId: string,
@@ -4083,7 +4084,7 @@ function scanPrompt(
         ]
       : []),
     "Runtime paths are environment-backed; keep references quoted. Use $NAME in POSIX shells, $env:NAME in PowerShell expressions, and %NAME% inside CMD command strings. Do not copy or reparse their values.",
-    targetInstruction(target),
+    targetDescription,
     ...(skillName === "security-scan" || enforceCostLimit || customValidation
       ? [
           "Write the complete canonical scan-manifest.json, findings.json, and coverage.json, but do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
@@ -4107,7 +4108,10 @@ function skillNameFor(target: NormalizedTarget, mode: ScanMode): string {
   return mode === "deep" ? "deep-security-scan" : "security-scan";
 }
 
-function targetInstruction(target: NormalizedTarget): string {
+async function targetInstruction(
+  target: NormalizedTarget,
+  pluginRoot: string,
+): Promise<string> {
   if (target.kind === "repository")
     return "Scan target: the entire repository.";
   if (target.kind === "paths") {
@@ -4118,9 +4122,19 @@ function targetInstruction(target: NormalizedTarget): string {
     const scopes = shellEnvironmentReference(
       "CODEX_SECURITY_TARGET_PATHS_FILE",
     );
-    const makeScope =
-      process.platform === "win32"
-        ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper make-repo-scope-input --repo "%CODEX_SECURITY_REPOSITORY%" --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --out "%CODEX_SECURITY_SCAN_DIR%\scoped-source-input.jsonl""'`
+    let legacyGenerator = false;
+    try {
+      legacyGenerator = (
+        await stat(join(pluginRoot, "scripts", "generate_rank_input.py"))
+      ).isFile();
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+    }
+    const makeScope = legacyGenerator
+      ? `${pluginPythonCommand()} ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/scripts/generate_rank_input.py")} make-repo-scope-input --repo ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")} --scopes-file ${scopes} --out ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scoped-source-input.jsonl")}`
+      : process.platform === "win32"
+        ? String.raw`cmd.exe /d /v:off /s /c '""%CODEX_SECURITY_PLUGIN_ROOT%\scripts\launch_codex_security_mcp.cmd" --helper make-repo-scope-input --repo "%CODEX_SECURITY_REPOSITORY%\." --scopes-file "%CODEX_SECURITY_TARGET_PATHS_FILE%" --out "%CODEX_SECURITY_SCAN_DIR%\scoped-source-input.jsonl""'`
         : `${helper} --helper make-repo-scope-input --repo ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")} --scopes-file ${scopes} --out ${shellEnvironmentReference("CODEX_SECURITY_SCAN_DIR", "/scoped-source-input.jsonl")}`;
     // CMD expands the environment references once, preserving percent signs in path values.
     const bindScopes =

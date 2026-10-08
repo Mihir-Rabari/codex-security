@@ -246,10 +246,16 @@ async function collect(
 }
 
 export async function git(repo: string, args: string[]) {
-  const child = gitProcess(repo, args);
-  if (!child) return { status: 127, stdout: Buffer.alloc(0), stderr: "" };
-  child.stdin.end();
-  return collect(child);
+  try {
+    const child = gitProcess(repo, args);
+    if (child) {
+      child.stdin.end();
+      return await collect(child);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  return { status: 127, stdout: Buffer.alloc(0), stderr: "" };
 }
 
 function gitLine(data: Buffer): string {
