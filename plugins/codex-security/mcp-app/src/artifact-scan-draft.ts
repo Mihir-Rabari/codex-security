@@ -23,6 +23,7 @@ import type { RunArtifactWorkbench } from "./artifact-context.js";
 import {
   preserveDiffCandidateDecisions,
   preserveUnresolvedDiffCandidates,
+  readCandidateLedger,
   readDiffCandidates,
   refreshDiffCandidateHistory,
   type DiffCandidates,
@@ -125,14 +126,29 @@ export async function recordCodexSecurityScanDraft(
     const candidates = await readDiffCandidates(context);
     if (submitted === undefined) {
       // Bind authored proof gaps once; publication retries may observe a newer phase.
+      const findingKeys = new Set(
+        parsed.findings.map((finding) => findingCandidateKey(finding)),
+      );
+      const needsSnapshot = (pending: JsonObject) => {
+        const key = coverageCandidateKey(pending);
+        return (
+          pending.candidate === undefined &&
+          key !== undefined &&
+          key === candidateKey(pending.candidateId) &&
+          !findingKeys.has(key)
+        );
+      };
+      const snapshotCandidates =
+        candidates ??
+        (context.mode === "deep" &&
+        (parsed.coverage.deferred as JsonObject[]).some(needsSnapshot)
+          ? await readCandidateLedger(context)
+          : undefined);
       const ledger = new Map(
-        candidates?.map((candidate) => [
+        snapshotCandidates?.map((candidate) => [
           candidateKey(candidate.candidate_id)!,
           candidate,
         ]),
-      );
-      const findingKeys = new Set(
-        parsed.findings.map((finding) => findingCandidateKey(finding)),
       );
       submitted = {
         ...parsed,
@@ -142,9 +158,7 @@ export async function recordCodexSecurityScanDraft(
             (pending) => {
               const key = coverageCandidateKey(pending);
               const candidate = ledger.get(key ?? "");
-              return pending.candidate === undefined &&
-                candidate &&
-                !findingKeys.has(key)
+              return candidate && needsSnapshot(pending)
                 ? { ...pending, candidate: structuredClone(candidate) }
                 : pending;
             },

@@ -20,8 +20,15 @@ import { candidateSchemaV1 } from "./deep-scan/artifact-contracts.js";
 type JsonObject = Record<string, unknown>;
 
 export async function readDiffCandidates(context: ArtifactContext) {
-  if (context.mode !== "diff") return undefined;
-  const label = "diff candidate ledger";
+  return context.mode === "diff"
+    ? readCandidateLedger(context, "diff candidate ledger")
+    : undefined;
+}
+
+export async function readCandidateLedger(
+  context: ArtifactContext,
+  label = "candidate ledger",
+) {
   try {
     return await readArtifactJsonl(
       context,
