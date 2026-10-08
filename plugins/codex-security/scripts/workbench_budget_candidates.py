@@ -400,6 +400,8 @@ def preserve_budget_candidates(
     # Keep that reopening tied to the ledger decision it invalidated; a new phase
     # or an independent saved terminal decision can still resolve the candidate.
     receipt_reopened = set(receipt_reopened or ())
+    finding_keys = {finding_candidate_key(finding) for finding in findings}
+    pending_decisions = set()
     candidates_by_key = {(None, candidate["candidate_id"]): candidate for candidate in candidates}
     for item in coverage["deferred"]:
         if not isinstance(item, dict):
@@ -409,6 +411,14 @@ def preserve_budget_candidates(
         if candidate is None:
             continue
         phase = _diff_candidate_phase_snapshot(candidate)
+        previous = item.get("candidate")
+        # A saved proof gap authored against this phase is newer than its ledger decision.
+        if (
+            key not in finding_keys
+            and isinstance(previous, dict)
+            and _diff_candidate_phase_snapshot(previous) == phase
+        ):
+            pending_decisions.add(key)
         if key in receipt_reopened and diff_candidate_disposition(candidate) in (
             "rejected",
             "not_applicable",
@@ -424,7 +434,7 @@ def preserve_budget_candidates(
             else terminal_decisions.get((None, candidate["candidate_id"]))
             or (
                 diff_candidate_disposition(candidate)
-                if (None, candidate["candidate_id"]) not in receipt_reopened
+                if (None, candidate["candidate_id"]) not in receipt_reopened | pending_decisions
                 else None
             )
             or "needs_follow_up"

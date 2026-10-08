@@ -1,0 +1,263 @@
+import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
+import { readFile, readdir, rm } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { test } from "node:test";
+import { importSource } from "./import-module.ts";
+import { finding } from "./scan-draft-fixture.ts";
+import { temporaryDirectory } from "./support/temporary-directories.ts";
+
+const { recordCodexSecurityScanDraft } = await importSource(
+  new URL("../src/artifact-scan-draft.ts", import.meta.url).pathname,
+);
+const { recordCodexSecurityCandidateValidations } = await importSource(
+  new URL("../src/artifact-validation-phase.ts", import.meta.url).pathname,
+);
+const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
+const python = process.env.PYTHON?.trim() || "python3";
+const reason = "New evidence requires another review";
+
+for (const modern of [false, true]) {
+  for (const resolution of modern
+    ? ["pending"]
+    : ["pending", "new-phase", "finding", "terminal"]) {
+    for (const interrupted of [false, true]) {
+      test(`budget completion preserves authored review: ${modern ? "modern" : "legacy"}, ${resolution}, interrupted=${interrupted}`, async (t) => {
+        const root = await temporaryDirectory("budget-authored-review-", true);
+        t.after(() => rm(root, { recursive: true, force: true }));
+        const scan = JSON.parse(
+          execFileSync(
+            python,
+            [
+              "-c",
+              `
+import json, sqlite3, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from workbench_test_support import begin_deep_scan, get_scan, run_workbench
+root = Path(sys.argv[2])
+state, target, directory = root / "state", root / "target", root / "scan"
+target.mkdir(); directory.mkdir(mode=0o700)
+(target / "app.py").write_text("print('synthetic source')\\n")
+registered = run_workbench(state, "register-cli-scan", "--scan-dir", str(directory),
+    "--repository", str(target), "--recipe-json", json.dumps({
+        "config": {}, "mode": "deep", "repository": str(target),
+        "target": {"kind": "repository", "paths": []}, "maxCostUsd": 0.005}))
+scan_id = registered["scanId"]
+begin_deep_scan(state, "synthetic-thread", "--scan-id", scan_id,
+    environment={"CODEX_HOME": str(root / "codex-home")})
+discovery = directory / "artifacts/02_discovery"
+discovery.mkdir(parents=True, exist_ok=True)
+(discovery / "in_scope_files.txt").write_text("app.py\\n")
+(discovery / "candidate_ledger.jsonl").write_text(json.dumps({
+    "candidate_id": "review", "cwe_ids": [], "summary": "Synthetic authorization review",
+    "evidence": "Synthetic source evidence",
+    "locations": [{"path": "app.py", "start_line": 1, "end_line": 1, "role": "evidence"}]
+}) + "\\n")
+manifest = directory / "artifacts/deep_discovery/coordinator-manifest.json"
+manifest.parent.mkdir(parents=True, exist_ok=True)
+manifest.write_text('{"status":"succeeded"}')
+with sqlite3.connect(state / "workbench.sqlite3") as connection:
+    connection.execute("UPDATE deep_scan_runs SET status = 'succeeded', phase = 'terminal', terminal_reason = 'saturated', manifest_path = ?, completed_at = updated_at WHERE scan_id = ?",
+        (str(directory / "scan-manifest.json" if sys.argv[3] == "true" else manifest), scan_id))
+print(json.dumps(get_scan(state, scan_id)["scan"]))
+`,
+              path.join(pluginRoot, "tests"),
+              root,
+              String(modern),
+            ],
+            { encoding: "utf8" },
+          ),
+        );
+        const context = {
+          root: scan.scanDir,
+          repoRoot: scan.targetPath,
+          layout: "scan",
+          scanId: scan.scanId,
+          scope: scan.scope,
+          targetContract: scan.contract,
+          targetRevision: scan.targetRevision,
+          status: scan.progress.status,
+          mode: scan.mode,
+        };
+        const ledger = path.join(
+          scan.scanDir,
+          "artifacts/02_discovery/candidate_ledger.jsonl",
+        );
+        const original = JSON.parse((await readFile(ledger, "utf8")).trim());
+        const validation = {
+          disposition: "suppressed",
+          method: "Source review",
+          confidence: "high",
+          confidence_rationale: "Original source trace",
+          rubric: "Synthetic review",
+          evidence: "Original source evidence",
+          counterevidence_or_proof_gap: "Old assessment",
+          remaining_uncertainty: "",
+        };
+        await recordCodexSecurityCandidateValidations(context, {
+          validations: [{ candidateId: original.candidate_id, validation }],
+        });
+        const candidate = JSON.parse((await readFile(ledger, "utf8")).trim());
+        const pending = {
+          id: "new-proof",
+          candidateId: candidate.candidate_id,
+          candidate,
+          reason,
+        };
+        const draft = {
+          scanId: scan.scanId,
+          findings: [],
+          coverage: {
+            completeness: "partial",
+            surfaces: [],
+            explicitExclusions: [],
+            deferred: [pending],
+          },
+        };
+        await recordCodexSecurityScanDraft(context, draft);
+        const checkpoints = path.join(scan.scanDir, "checkpoints");
+        const saved = new Map(
+          await Promise.all(
+            (await readdir(checkpoints)).map(
+              async (name) =>
+                [name, await readFile(path.join(checkpoints, name))] as const,
+            ),
+          ),
+        );
+        const args = [
+          path.join(pluginRoot, "scripts/workbench_db.py"),
+          "complete-budget-exhausted-scan",
+          "--scan-id",
+          scan.scanId,
+          "--cost-json",
+          JSON.stringify({
+            model: "synthetic-model",
+            inputTokens: 1250,
+            cachedInputTokens: 200,
+            cacheWriteInputTokens: 0,
+            outputTokens: 30,
+            estimatedUsd: 0.00625,
+          }),
+          "--message",
+          "Synthetic budget stop.",
+        ];
+        const env = {
+          ...process.env,
+          CODEX_SECURITY_STATE_DIR: path.join(root, "state"),
+        };
+        if (interrupted) {
+          for (let attempt = 0; attempt < 2; attempt++) {
+            const result = spawnSync(
+              python,
+              [
+                "-B",
+                "-c",
+                `
+import os, runpy, sys
+script = sys.argv[1]; sys.argv = sys.argv[1:]
+def interrupt(frame, event, arg):
+    if event == 'call' and frame.f_code.co_name == 'complete_scan_locked':
+        os._exit(75)
+    return interrupt
+sys.settrace(interrupt)
+runpy.run_path(script, run_name='__main__')
+`,
+                ...args,
+              ],
+              { encoding: "utf8", env },
+            );
+            assert.equal(result.status, 75, result.stderr);
+            const coverage = JSON.parse(
+              await readFile(path.join(scan.scanDir, "coverage.json"), "utf8"),
+            );
+            assert.ok(
+              coverage.deferred.some((row: any) => row.reason === reason),
+            );
+          }
+        }
+        if (resolution === "new-phase") {
+          await recordCodexSecurityCandidateValidations(context, {
+            validations: [
+              {
+                candidateId: candidate.candidate_id,
+                validation: {
+                  ...validation,
+                  counterevidence_or_proof_gap:
+                    "Later validation resolved the new evidence",
+                },
+              },
+            ],
+          });
+        } else if (resolution === "finding") {
+          const confirmed = finding("authored-review", "app.py");
+          confirmed.locations[0]!.endLine = 1;
+          await recordCodexSecurityScanDraft(context, {
+            ...draft,
+            findings: [
+              {
+                ...confirmed,
+                provenance: {
+                  ...confirmed.provenance,
+                  candidateId: candidate.candidate_id,
+                },
+              },
+            ],
+            coverage: { ...draft.coverage, deferred: [] },
+          });
+        } else if (resolution === "terminal") {
+          await recordCodexSecurityScanDraft(context, {
+            ...draft,
+            coverage: {
+              ...draft.coverage,
+              deferred: [],
+              surfaces: [
+                {
+                  id: "reviewed",
+                  candidateId: candidate.candidate_id,
+                  label: "New evidence reviewed",
+                  disposition: "rejected",
+                  notes: "The new proof gap is resolved",
+                  receiptRefs: [],
+                },
+              ],
+            },
+          });
+        }
+        const ledgerBefore = await readFile(ledger);
+        const completed = JSON.parse(
+          execFileSync(python, args, { encoding: "utf8", env }),
+        ).scan;
+        const coverage = JSON.parse(
+          await readFile(path.join(scan.scanDir, "coverage.json"), "utf8"),
+        );
+        assert.equal(
+          completed.progress.candidates.unresolved,
+          Number(resolution === "pending"),
+        );
+        assert.equal(completed.findingCount, Number(resolution === "finding"));
+        if (resolution === "pending") {
+          assert.deepEqual(
+            coverage.deferred.find((row: any) => row.id === pending.id),
+            pending,
+          );
+          assert.ok(
+            (
+              await readFile(path.join(scan.scanDir, "report.md"), "utf8")
+            ).includes(reason),
+          );
+        } else {
+          assert.ok(
+            !coverage.deferred.some(
+              (row: any) => row.candidateId === candidate.candidate_id,
+            ),
+          );
+        }
+        assert.deepEqual(await readFile(ledger), ledgerBefore);
+        for (const [name, bytes] of saved)
+          assert.deepEqual(await readFile(path.join(checkpoints, name)), bytes);
+      });
+    }
+  }
+}

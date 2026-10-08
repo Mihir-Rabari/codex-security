@@ -240,8 +240,9 @@ def test_budget_exhaustion_reconciles_saved_candidate_rows_without_losing_other_
 
 @pytest.mark.parametrize("decision", ["reported", "suppressed", "not_applicable"])
 @pytest.mark.parametrize("saved_payload", ["finding", "previousFindings"])
+@pytest.mark.parametrize("newer_phase", [False, True])
 def test_budget_exhaustion_retains_original_deferred_finding_evidence(
-    tmp_path: Path, decision: str, saved_payload: str
+    tmp_path: Path, decision: str, saved_payload: str, newer_phase: bool
 ) -> None:
     state_dir, target, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
     candidate = json.loads(ledger.read_text())
@@ -273,18 +274,28 @@ def test_budget_exhaustion_retains_original_deferred_finding_evidence(
     ]
     coverage_path.write_text(json.dumps(coverage))
 
+    if newer_phase:
+        candidate["validation"]["counterevidence_or_proof_gap"] = "Later review resolved the gap."
+        ledger.write_text(json.dumps(candidate) + "\n")
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"
-    assert completed["progress"]["candidates"]["unresolved"] == 0
+    still_pending = decision != "reported" and not newer_phase
+    assert completed["progress"]["candidates"]["unresolved"] == int(still_pending)
     preserved = json.loads(coverage_path.read_text())
-    assert not any(
-        row.get("candidateId") == candidate["candidate_id"] for row in preserved["deferred"]
-    )
-    surface = next(
-        row for row in preserved["surfaces"] if row.get("candidateId") == candidate["candidate_id"]
-    )
-    assert original in surface["previousFindings"]
+    pending = [
+        row for row in preserved["deferred"] if row.get("candidateId") == candidate["candidate_id"]
+    ]
+    assert bool(pending) is still_pending
+    if still_pending:
+        assert pending[0] == coverage["deferred"][0]
+    else:
+        surface = next(
+            row
+            for row in preserved["surfaces"]
+            if row.get("candidateId") == candidate["candidate_id"]
+        )
+        assert original in surface["previousFindings"]
 
 
 @pytest.mark.parametrize("decision", ["suppressed", "deferred"])
@@ -737,14 +748,13 @@ def test_budget_exhaustion_refreshes_generated_terminal_draft_after_resume(
 
     assert completed["progress"]["status"] == "complete"
     assert completed["findingCount"] == 0
-    assert completed["progress"]["candidates"]["unresolved"] == int(decision != "not_applicable")
+    still_pending = saved_pending or decision != "not_applicable"
+    assert completed["progress"]["candidates"]["unresolved"] == int(still_pending)
     preserved = json.loads(coverage_path.read_text())
     assert generic in preserved["deferred"]
     assert other_owner in preserved["surfaces"]
     refreshed = next(row for row in preserved["surfaces"] if row["id"] == surface["id"])
-    assert refreshed["disposition"] == (
-        "not_applicable" if decision == "not_applicable" else "needs_follow_up"
-    )
+    assert refreshed["disposition"] == ("needs_follow_up" if still_pending else "not_applicable")
     assert refreshed["label"] == candidate["summary"]
     assert refreshed["notes"] == candidate["evidence"]
     assert refreshed["reviewContext"] == surface["reviewContext"]
@@ -752,7 +762,7 @@ def test_budget_exhaustion_refreshes_generated_terminal_draft_after_resume(
     pending = [
         row for row in preserved["deferred"] if row.get("candidateId") == candidate["candidate_id"]
     ]
-    assert bool(pending) is (decision != "not_applicable")
+    assert bool(pending) is still_pending
 
 
 @pytest.mark.parametrize("edited_field", [None, "reason", "paths", "surfaceIds", "candidate"])
