@@ -468,6 +468,12 @@ with ExitStack() as stack:
             "refusedOnly": repository_counts(target_id="refused"),
             "notScanned": repository_counts(status="not_scanned"),
             "openIds": open_repositories["ids"],
+            "ordinaryPage": repository_counts(limit=2),
+            "offsetPage": repository_counts(limit=2, offset=1),
+            "pastEnd": repository_counts(limit=2, offset=99),
+            "emptyQuery": repository_counts(query="no-matching-repository", limit=2),
+            "openPage": page,
+            "openPastEnd": repository_counts(status="open_findings", limit=2, offset=99),
             "pagePreserved": page["ids"] == open_repositories["ids"][1:3] and page["nextOffset"] == 3,
         }))
     elif scenario == "scan-writers":
@@ -1615,6 +1621,7 @@ test("counts findings in each selected repository scope and preserves absent dec
   const result = run("repository-counts");
   const all = result["all"] as {
     counts: Record<string, number>;
+    ids: string[];
     calls: Array<string | null>;
     inspections: string[];
   };
@@ -1675,6 +1682,43 @@ test("counts findings in each selected repository scope and preserves absent dec
     "second",
   ]);
   expect(result["pagePreserved"]).toBe(true);
+  for (const [name, offset] of [
+    ["ordinaryPage", 0],
+    ["offsetPage", 1],
+    ["pastEnd", 99],
+  ] as const) {
+    const page = result[name] as typeof all & { nextOffset: number | null };
+    const ids = all.ids.slice(offset, offset + 2);
+    expect(page.ids).toEqual(ids);
+    expect(page.counts).toEqual(
+      Object.fromEntries(ids.map((id) => [id, all.counts[id]])),
+    );
+    expect(page.calls.toSorted()).toEqual(
+      ids.filter((id) => id !== "refused").toSorted(),
+    );
+    expect(page.inspections).toEqual(ids.toSorted());
+    expect(page.nextOffset).toBe(
+      offset + ids.length < all.ids.length ? offset + ids.length : null,
+    );
+  }
+  expect(result["emptyQuery"]).toEqual({
+    counts: {},
+    ids: [],
+    calls: [],
+    inspections: [],
+    nextOffset: null,
+  });
+  for (const name of ["openPage", "openPastEnd"]) {
+    const page = result[name] as typeof all;
+    expect(page.calls.toSorted()).toEqual(all.calls.toSorted());
+    expect(page.inspections).toEqual(all.inspections);
+  }
+  const openPastEnd = result["openPastEnd"] as typeof all & {
+    nextOffset: number | null;
+  };
+  expect(openPastEnd.ids).toEqual([]);
+  expect(openPastEnd.counts).toEqual({});
+  expect(openPastEnd.nextOffset).toBeNull();
 });
 
 test("records generation explicitly in both transactional parent scan writers", () => {

@@ -5,6 +5,7 @@ import sqlite3
 import sys
 from collections import Counter
 from collections.abc import Iterator
+from functools import cache
 from itertools import islice
 from pathlib import Path
 from typing import Any
@@ -386,9 +387,9 @@ def list_repositories(
             or query in target["current_path"].casefold()
         )
     ]
-    scopes = {target_id: identities.scope(target_id) for target_id, _, _ in selected_targets}
     legacy_generations = _legacy_generations(connection, identities)
 
+    @cache
     def open_findings_count(scope: RepositoryScanScope) -> int:
         if not scope.available:
             return 0
@@ -402,37 +403,38 @@ def list_repositories(
             )
         )
 
-    repositories = [
-        {
-            "checkoutAvailable": Path(target["current_path"]).is_dir(),
-            "displayName": target["display_name"],
-            "latestScan": latest_scan,
-            "openFindingsCount": open_findings_count(scopes[target_id]),
-            "scanCount": scan_count_by_target[target_id],
-            "targetId": target_id,
-            "targetPath": target["current_path"],
+    if args is not None and args.status == "open_findings":
+        selected_targets = [
+            entry
+            for entry in selected_targets
+            if open_findings_count(identities.scope(entry[0])) > 0
+        ]
+    pagination = {}
+    if args is not None and (args.limit is not None or args.offset != 0):
+        limit = min(args.limit or FINDINGS_PAGE_MAX, FINDINGS_PAGE_MAX)
+        page = selected_targets[args.offset : args.offset + limit]
+        next_offset = args.offset + len(page)
+        pagination = {
+            "limit": limit,
+            "nextOffset": next_offset if next_offset < len(selected_targets) else None,
+            "offset": args.offset,
         }
-        for target_id, latest_scan, target in selected_targets
-    ]
-    if args is None:
-        return {"repositories": repositories}
+        selected_targets = page
 
-    repositories = [
-        repository
-        for repository in repositories
-        if args.status != "open_findings" or repository["openFindingsCount"] > 0
-    ]
-    if args.limit is None and args.offset == 0:
-        return {"repositories": repositories}
-
-    limit = min(args.limit or FINDINGS_PAGE_MAX, FINDINGS_PAGE_MAX)
-    page = repositories[args.offset : args.offset + limit]
-    next_offset = args.offset + len(page)
     return {
-        "repositories": page,
-        "limit": limit,
-        "nextOffset": next_offset if next_offset < len(repositories) else None,
-        "offset": args.offset,
+        "repositories": [
+            {
+                "checkoutAvailable": Path(target["current_path"]).is_dir(),
+                "displayName": target["display_name"],
+                "latestScan": latest_scan,
+                "openFindingsCount": open_findings_count(identities.scope(target_id)),
+                "scanCount": scan_count_by_target[target_id],
+                "targetId": target_id,
+                "targetPath": target["current_path"],
+            }
+            for target_id, latest_scan, target in selected_targets
+        ],
+        **pagination,
     }
 
 
