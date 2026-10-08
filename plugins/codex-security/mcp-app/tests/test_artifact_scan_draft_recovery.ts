@@ -2767,52 +2767,55 @@ for (const layout of ["standard", "diff"] as const) {
 
 for (const layout of ["standard", "diff"] as const) {
   for (const firstInstance of ["first", "synthetic-review-finding"]) {
-    test(`${layout}: stronger raw replay keeps generated identity beside explicit siblings, instance=${firstInstance}`, async (t) => {
-      const f = await fixture(t, layout);
-      const finding = findingFor("candidate-shared-observation");
-      const explicit = [firstInstance, "second"].map((instance) => ({
-        ...finding,
-        identity: { anchor: "synthetic-review-finding", instance },
-      }));
-      const draft = {
-        ...f.draft(),
-        findings: [...explicit, finding, structuredClone(finding)],
-      };
-      await f.write(draft);
-      const before = (await readJson(f.root, "findings.json")).findings as {
-        identity: { anchor: string; instance?: string };
-      }[];
-      const stronger = {
-        ...draft,
-        findings: [
-          ...explicit,
-          { ...finding, severity: { level: "high" } },
-          { ...finding, severity: { level: "high" } },
-        ],
-      };
-      await f.write(stronger);
-      const replay = (await readJson(f.root, "findings.json")).findings as {
-        identity: { anchor: string; instance?: string };
-      }[];
-      assert.equal(replay.length, 4, JSON.stringify({ before, replay }));
-      assert.deepEqual(
-        replay.map((row) => row.identity),
-        before.map((row) => row.identity),
-      );
-      const recovered = await recoverPublishedFindings(f);
-      assert.equal(recovered.length, 3);
-      const generated = recovered.find(
-        (row) =>
-          JSON.stringify(row.identity) === JSON.stringify(before[2]!.identity),
-      );
-      assert.equal(generated?.severity.level, "high");
-      await f.write(stronger);
-      assert.deepEqual(
-        (await readJson(f.root, "findings.json")).findings.map(
-          (row: { identity: unknown }) => row.identity,
-        ),
-        before.map((row) => row.identity),
-      );
-    });
+    for (const unequal of [false, true]) {
+      test(`${layout}: stronger raw replay keeps generated identity beside explicit siblings, instance=${firstInstance}, unequal=${unequal}`, async (t) => {
+        const f = await fixture(t, layout);
+        const finding = findingFor("candidate-shared-observation");
+        const explicit = [firstInstance, "second"].map((instance) => ({
+          ...finding,
+          identity: { anchor: "synthetic-review-finding", instance },
+        }));
+        const draft = {
+          ...f.draft(),
+          findings: [...explicit, finding, structuredClone(finding)],
+        };
+        await f.write(draft);
+        const before = (await readJson(f.root, "findings.json")).findings as {
+          identity: { anchor: string; instance?: string };
+        }[];
+        const stronger = {
+          ...draft,
+          findings: [
+            ...explicit,
+            { ...finding, severity: { level: "high" } },
+            { ...finding, severity: { level: unequal ? "critical" : "high" } },
+          ],
+        };
+        await f.write(stronger);
+        const replay = (await readJson(f.root, "findings.json")).findings as {
+          identity: { anchor: string; instance?: string };
+        }[];
+        assert.equal(replay.length, 4, JSON.stringify({ before, replay }));
+        assert.deepEqual(
+          replay.map((row) => row.identity),
+          before.map((row) => row.identity),
+        );
+        const recovered = await recoverPublishedFindings(f);
+        assert.equal(recovered.length, 3);
+        const generated = recovered.find(
+          (row) =>
+            JSON.stringify(row.identity) ===
+            JSON.stringify(before[2]!.identity),
+        );
+        assert.equal(generated?.severity.level, unequal ? "critical" : "high");
+        await f.write(stronger);
+        assert.deepEqual(
+          (await readJson(f.root, "findings.json")).findings.map(
+            (row: { identity: unknown }) => row.identity,
+          ),
+          before.map((row) => row.identity),
+        );
+      });
+    }
   }
 }

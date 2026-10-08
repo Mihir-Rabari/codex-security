@@ -723,12 +723,7 @@ function reconcileScanDraft(
             );
           })
         : [];
-      if (
-        inferredMatches.length > 0 &&
-        inferredMatches.every((current) =>
-          isDeepStrictEqual(current, inferredMatches[0]),
-        )
-      ) {
+      if (inferredMatches.length > 0) {
         for (const current of inferredMatches)
           preserveFindingDetails(current, finding);
       } else if (
