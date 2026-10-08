@@ -1691,7 +1691,9 @@ test("counts findings in each selected repository scope and preserves absent dec
     const ids = all.ids.slice(offset, offset + 2);
     expect(page.ids).toEqual(ids);
     expect(page.counts).toEqual(
-      Object.fromEntries(ids.map((id) => [id, all.counts[id]])),
+      Object.fromEntries(
+        Object.entries(all.counts).filter(([id]) => ids.includes(id)),
+      ),
     );
     expect(page.calls.toSorted()).toEqual(
       ids.filter((id) => id !== "refused").toSorted(),
