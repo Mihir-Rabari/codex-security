@@ -80,7 +80,10 @@ export interface CoordinatorOptions {
   handoffClaimToken?: string;
   threadId?: string;
   heartbeatIntervalMs?: number;
-  observeReplacement?: (run: DeepScanRunState) => Promise<DeepScanRunState>;
+  observeReplacement?: (
+    run: DeepScanRunState,
+    signal: AbortSignal,
+  ) => Promise<DeepScanRunState>;
   onComplete?: (
     draft: ScanDraftInput,
     signal: AbortSignal,
@@ -96,6 +99,7 @@ export class DeepScanCoordinator {
   private readonly abortController = new AbortController();
   private readonly discoveryAbortController = new AbortController();
   private readonly publicationAbortController = new AbortController();
+  private readonly observationAbortController = new AbortController();
   private readonly clock: DeepScanClock;
   private readonly log: DeepScanLogger;
   private readonly artifacts: DeepScanArtifacts;
@@ -115,7 +119,7 @@ export class DeepScanCoordinator {
   private cancellationPersistence?: {
     promise: Promise<void>;
     resolve: () => void;
-    reject: (error: unknown) => void;
+    failure?: { error: unknown };
   };
   private started = false;
   private terminal = false;
@@ -243,6 +247,7 @@ export class DeepScanCoordinator {
     });
     this.abortController.abort(reason);
     this.publicationAbortController.abort(reason);
+    this.observationAbortController.abort(reason);
     // The cancel operation returns promptly. Terminal waiters remain attached
     // until worker cleanup and stopped-result publication settle.
   }
@@ -251,24 +256,25 @@ export class DeepScanCoordinator {
     reason: string,
     persistCancellation: () => Promise<void>,
   ): Promise<DeepScanRunState> {
-    if (this.terminal) return await this.settled();
+    if (this.terminal || this.state.status !== "running")
+      return await this.settled();
     if (!this.cancellationPersistence) {
       let resolve!: () => void;
-      let reject!: (error: unknown) => void;
-      const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+      const promise = new Promise<void>((resolvePromise) => {
         resolve = resolvePromise;
-        reject = rejectPromise;
       });
-      this.cancellationPersistence = { promise, resolve, reject };
+      this.cancellationPersistence = { promise, resolve };
     }
     this.cancel(reason);
     await this.cancellationReady;
     try {
       await persistCancellation();
-      this.cancellationPersistence.resolve();
     } catch (error) {
-      this.cancellationPersistence.reject(error);
-      throw error;
+      this.cancellationPersistence.failure = { error };
+    } finally {
+      // Cleanup still inspects durable state and preserves results when the
+      // process lost a committed response, then reports the persistence failure.
+      this.cancellationPersistence.resolve();
     }
     return await this.settled();
   }
@@ -331,14 +337,14 @@ export class DeepScanCoordinator {
         },
       );
       if (this.canceled || this.externallyFailed) return;
-      this.state = await this.finishWithReplay(schedulerResult);
+      const completed = await this.finishWithReplay(schedulerResult);
       if (this.canceled || this.externallyFailed) return;
+      this.state = completed;
       this.log({
         event: "coordinator_terminal",
         scanId: this.state.scanId,
         reason: schedulerResult.reason,
       });
-      if (this.stopLocally()) this.resolveTerminal(cloneState(this.state));
     } catch (error) {
       if (this.canceled || this.externallyFailed) {
         return;
@@ -372,13 +378,17 @@ export class DeepScanCoordinator {
       }
       this.abortController.abort(message);
       await this.settleSchedulerWork();
+      if (this.canceled || this.externallyFailed) return;
       try {
-        this.state = await this.options.store.fail(
+        const failed = await this.options.store.fail(
           this.state.scanId,
           persistedMessage,
           "failed",
         );
+        if (this.canceled || this.externallyFailed) return;
+        this.state = failed;
       } catch (persistError) {
+        if (this.canceled || this.externallyFailed) return;
         this.state = {
           ...this.state,
           status: "failed",
@@ -399,6 +409,7 @@ export class DeepScanCoordinator {
       // A worker can finish an atomic draft write while cancellation is being
       // persisted. Publish saved output only after every local writer settles.
       await this.settleSchedulerWork();
+      await this.ownershipCheck;
       this.resolveCancellationReady();
       await this.cancellationPersistence?.promise;
       if (this.options.onStopped && this.options.threadId) {
@@ -469,6 +480,9 @@ export class DeepScanCoordinator {
           scanId: this.state.scanId,
         });
       }
+      if (this.cancellationPersistence?.failure) {
+        throw this.cancellationPersistence.failure.error;
+      }
       if (this.canceled) this.state = { ...this.state, status: "canceled" };
       if (this.stopLocally()) this.resolveTerminal(cloneState(this.state));
     }
@@ -534,6 +548,7 @@ export class DeepScanCoordinator {
   private scheduleHeartbeat(): void {
     if (
       this.terminal ||
+      this.externallyFailed ||
       !this.options.threadId ||
       !this.state.coordinatorGeneration
     ) {
@@ -592,9 +607,10 @@ export class DeepScanCoordinator {
         scanId: this.state.scanId,
         reason: errorKind(readError),
       });
-      if (!leaseLossConfirmed) return false;
+      if (!leaseLossConfirmed) return this.externallyFailed;
       current = this.state;
     }
+    if (this.externallyFailed || this.terminal) return this.externallyFailed;
     const replacementConfirmed =
       leaseLossConfirmed ||
       (current.status === "running" &&
@@ -613,11 +629,17 @@ export class DeepScanCoordinator {
     }
 
     this.externallyFailed = true;
+    this.state = current;
+    clearTimeout(this.heartbeatTimeout);
+    this.heartbeatTimeout = undefined;
     this.abortController.abort("deep_scan_coordinator_lease_lost");
     this.publicationAbortController.abort("deep_scan_coordinator_lease_lost");
     if (replacementConfirmed && this.options.observeReplacement) {
       try {
-        this.state = await this.options.observeReplacement(current);
+        this.state = await this.options.observeReplacement(
+          current,
+          this.observationAbortController.signal,
+        );
       } catch (observeError) {
         this.log({
           event: "coordinator_replacement_observation_failed",
@@ -633,7 +655,6 @@ export class DeepScanCoordinator {
     } else {
       this.state = current;
     }
-    if (this.stopLocally()) this.resolveTerminal(cloneState(this.state));
     return true;
   }
 
@@ -673,18 +694,33 @@ export class DeepScanCoordinator {
     let reducer: Promise<DedupOutcome> | undefined;
     let previousReducerResultPath = recoveredReducers.resultPath;
     let dispatched = this.state.dispatchedCount;
-    let workerSequence = Math.max(
-      dispatched,
+    const [discoveryLabels, reducerLabels] = await Promise.all([
+      fs.readdir(this.artifacts.workersRoot),
+      fs.readdir(this.artifacts.dedupRoot),
+    ]);
+    let workerSequence = [
+      BigInt(dispatched),
+      ...discoveryLabels.map((label) =>
+        workerLabelSequence(label, "discovery"),
+      ),
       ...(this.state.persistedWorkers ?? [])
         .filter((worker) => worker.kind === "discovery")
-        .map((worker) => workerLabelSequence(worker, "discovery")),
-    );
-    let reducerSequence = Math.max(
-      0,
+        .map((worker) =>
+          workerLabelSequence(
+            basename(dirname(worker.promptPath)),
+            "discovery",
+          ),
+        ),
+    ].reduce((maximum, value) => (value > maximum ? value : maximum), 0n);
+    let reducerSequence = [
+      0n,
+      ...reducerLabels.map((label) => workerLabelSequence(label, "dedup")),
       ...(this.state.persistedWorkers ?? [])
         .filter((worker) => worker.kind === "dedup")
-        .map((worker) => workerLabelSequence(worker, "dedup")),
-    );
+        .map((worker) =>
+          workerLabelSequence(basename(dirname(worker.promptPath)), "dedup"),
+        ),
+    ].reduce((maximum, value) => (value > maximum ? value : maximum), 0n);
     let stopReason: DeepScanTerminalReason | undefined;
     let lastReplaceableFailure:
       Extract<DiscoveryOutcome, { status: "failed" }> | undefined;
@@ -815,7 +851,7 @@ export class DeepScanCoordinator {
         );
         return outcome.error;
       }
-      this.state = outcome.run;
+      if (!this.canceled && !this.externallyFailed) this.state = outcome.run;
       previousReducerResultPath = outcome.resultPath;
       mergedDiscoveries.push(...outcome.consumed);
       latestResult = outcome.result;
@@ -846,7 +882,7 @@ export class DeepScanCoordinator {
           dispatched < config.maxDiscoveryRuns
         ) {
           dispatched += 1;
-          workerSequence += 1;
+          workerSequence += 1n;
           const workerLabel = `discovery-${String(workerSequence).padStart(4, "0")}`;
           const workerId = randomUUID();
           const workerPromise = this.trackSchedulerWork(
@@ -868,7 +904,7 @@ export class DeepScanCoordinator {
         ) {
           const consumed = [...buffer].sort(compareCompletionSequence);
           buffer = [];
-          reducerSequence += 1;
+          reducerSequence += 1n;
           reducer = this.trackSchedulerWork(
             this.workers.runReducer({
               id: randomUUID(),
@@ -986,7 +1022,7 @@ export class DeepScanCoordinator {
         throw thresholdError;
       }
       reducerFailures = 0;
-      this.state = outcome.run;
+      if (!this.canceled && !this.externallyFailed) this.state = outcome.run;
       previousReducerResultPath = outcome.resultPath;
       mergedDiscoveries.push(...outcome.consumed);
       latestResult = outcome.result;
@@ -1079,12 +1115,21 @@ export class DeepScanCoordinator {
       .filter(
         (worker) => worker.kind === "dedup" && worker.status === "succeeded",
       )
-      .sort(
-        (left, right) =>
-          workerLabelSequence(left, "dedup") -
-            workerLabelSequence(right, "dedup") ||
-          left.id.localeCompare(right.id),
-      );
+      .sort((left, right) => {
+        const leftSequence = workerLabelSequence(
+          basename(dirname(left.promptPath)),
+          "dedup",
+        );
+        const rightSequence = workerLabelSequence(
+          basename(dirname(right.promptPath)),
+          "dedup",
+        );
+        return leftSequence < rightSequence
+          ? -1
+          : leftSequence > rightSequence
+            ? 1
+            : left.id.localeCompare(right.id);
+      });
     for (const worker of completedReducers) {
       // A later merge claim can retain a legacy aggregate's accepted reference.
       const resultPath =
@@ -1255,11 +1300,11 @@ function compareCompletionSequence(
 }
 
 function workerLabelSequence(
-  worker: PersistedDeepScanWorker,
+  label: string,
   kind: "discovery" | "dedup",
-): number {
-  const match = worker.promptPath.match(new RegExp(`${kind}-(\\d+)`));
-  return match ? Number(match[1]) : 0;
+): bigint {
+  const match = label.match(new RegExp(`^${kind}-(\\d+)$`));
+  return match ? BigInt(match[1]!) : 0n;
 }
 
 function cloneState(state: DeepScanRunState): DeepScanRunState {

@@ -24,6 +24,7 @@ export interface DeepScanCoordinatorStartOptions extends CoordinatorOptions {
 /** Owns the live coordinators in this MCP server process. */
 export class DeepScanCoordinatorRegistry {
   private readonly coordinators = new Map<string, DeepScanCoordinator>();
+  private readonly observers = new Set<DeepScanCoordinator>();
 
   get(scanId: string): DeepScanCoordinator | undefined {
     return this.coordinators.get(scanId);
@@ -36,15 +37,20 @@ export class DeepScanCoordinatorRegistry {
     let coordinator!: DeepScanCoordinator;
     coordinator = new DeepScanCoordinator({
       ...options,
-      observeReplacement: async (run) => {
+      observeReplacement: async (run, signal) => {
         if (this.coordinators.get(run.scanId) === coordinator) {
           this.coordinators.delete(run.scanId);
         }
-        return await new DeepScanRemoteCoordinator({
-          run,
-          registry: this,
-          options,
-        }).wait(undefined);
+        this.observers.add(coordinator);
+        try {
+          return await new DeepScanRemoteCoordinator({
+            run,
+            registry: this,
+            options,
+          }).wait(signal);
+        } finally {
+          this.observers.delete(coordinator);
+        }
       },
     });
     this.coordinators.set(options.run.scanId, coordinator);
@@ -72,6 +78,7 @@ export class DeepScanCoordinatorRegistry {
   shutdown(reason: string): void {
     for (const coordinator of this.coordinators.values())
       coordinator.cancel(reason);
+    for (const coordinator of this.observers) coordinator.cancel(reason);
   }
 }
 

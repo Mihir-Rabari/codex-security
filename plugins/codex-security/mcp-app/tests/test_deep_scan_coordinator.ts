@@ -19,6 +19,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import { testDeepScanLifecycle } from "./deep_scan_lifecycle_cases.ts";
 import {
   DeepScanCoordinatorRegistry,
   DeepScanNonRetryableError,
@@ -3777,6 +3778,14 @@ async function testNonRetryableReducerAbortsScanWithoutRetry(
 
 try {
   await testStaleDiscoveryCheckpointRetriesBeforeAcceptance();
+  await testDeepScanLifecycle({
+    fixtureRun,
+    FakeStore,
+    FakeExecutor,
+    createCoordinator,
+    DeepScanCoordinatorRegistry,
+    immediateClock,
+  });
   await testCappedQueueAndSerialDedup();
   await testStandardWorkersReceiveExistingFalsePositiveFeedback();
   await testDiscoveryWorkersKeepOneContextAfterPersistedUpdate();

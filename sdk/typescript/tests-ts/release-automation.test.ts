@@ -8,8 +8,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { bashCommand, runCommand } from "./support/shell.js";
 
@@ -3935,7 +3935,7 @@ describe("GitHub release workflow safeguards", () => {
         "      printf '%s\\n' enhancement skip-release-notes",
         "      ;;",
         '    "GET repos/test/codex-security/issues/17/timeline?per_page=100")',
-        "      printf '%s\\n' 'github-actions[bot]' 'trusted-reviewer'",
+        "      printf '%b\\n' 'enhancement\\tgithub-actions[bot]' 'skip-release-notes\\tgithub-actions[bot]' 'skip-release-notes\\ttrusted-reviewer'",
         "      ;;",
         '    "DELETE repos/test/codex-security/issues/17/labels/enhancement")',
         "      printf '%s\\n' 'removed a stale managed category'",
@@ -4003,9 +4003,9 @@ describe("GitHub release workflow safeguards", () => {
       "      ;;",
       '    "GET repos/test/codex-security/issues/17/timeline?per_page=100")',
       '      if [[ "$*" == *"__unattributed__"* ]]; then',
-      "        printf '%s\\n' 'github-actions[bot]' '__unattributed__'",
+      "        printf '%b\\n' 'skip-release-notes\\tgithub-actions[bot]' 'skip-release-notes\\t__unattributed__'",
       "      else",
-      "        printf '%s\\n' 'github-actions[bot]' ''",
+      "        printf '%b\\n' 'skip-release-notes\\tgithub-actions[bot]' 'skip-release-notes\\t'",
       "      fi",
       "      ;;",
       '    "DELETE repos/test/codex-security/issues/17/labels/skip-release-notes")',
@@ -4066,7 +4066,7 @@ describe("GitHub release workflow safeguards", () => {
         "      printf '%s\\n' skip-release-notes",
         "      ;;",
         '    "GET repos/test/codex-security/issues/17/timeline?per_page=100")',
-        "      printf '%s\\n' 'github-actions[bot]'",
+        "      printf '%b\\n' 'skip-release-notes\\tgithub-actions[bot]'",
         "      ;;",
         '    "DELETE repos/test/codex-security/issues/17/labels/skip-release-notes")',
         "      printf '%s\\n' 'removed automatically applied skip-release-notes'",
@@ -4227,3 +4227,122 @@ describe("GitHub release workflow safeguards", () => {
     expect(result.stderr).toContain("GitHub release JSON from stdin");
   });
 });
+
+test.skipIf(process.platform === "win32")(
+  "preserves manual release categories while replacing stale automated labels",
+  async () => {
+    const script = workflowStepShell(
+      releaseLabelsWorkflow,
+      "Categorize pull request without checking out its code",
+    );
+    const fixture = `gh() {
+    case "$*" in
+      "api repos/test/codex-security/issues/17 --jq "*) printf '%s' 'feat: synthetic feature' | base64 ;;
+      "api repos/test/codex-security/issues/17/labels --jq "*) printf '%s\\n' breaking-change bug ;;
+      "api repos/test/codex-security/issues/17/timeline?per_page=100 "*) printf '%b\\n' 'breaking-change\\tsynthetic-reviewer' 'bug\\tgithub-actions[bot]' ;;
+      "api --method DELETE repos/test/codex-security/issues/17/labels/bug --silent") echo removed-stale-bug ;;
+      "api --method DELETE "*) echo removed-manual-label; return 70 ;;
+      "api --method POST repos/test/codex-security/issues/17/labels "*) printf '%s\\n' "$*" ;;
+      "api repos/test/codex-security/labels/enhancement --silent") return 0 ;;
+      *) echo "Unexpected request: $*" >&2; return 65 ;;
+    esac
+  }`;
+    const result = await runCommand(bash, ["-c", `${fixture}\n${script}`], {
+      env: {
+        ...process.env,
+        GITHUB_REPOSITORY: "test/codex-security",
+        PR_NUMBER: "17",
+      },
+      timeout: 10_000,
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(
+      "Preserving existing breaking-change label.",
+    );
+    expect(result.stdout).toContain("removed-stale-bug");
+    expect(result.stdout).not.toContain("labels[]=enhancement");
+    expect(result.stdout).not.toContain("removed-manual-label");
+  },
+);
+
+test("imports maintainer utilities from Node stdin and eval modules", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "maintainer-stdin-"));
+  const packageRoot = resolve(import.meta.dir, "..");
+  try {
+    const build = await runCommand(
+      "node",
+      [
+        join(packageRoot, "node_modules", "typescript", "bin", "tsc"),
+        "--project",
+        join(packageRoot, "tsconfig.ci.json"),
+        "--outDir",
+        workspace,
+      ],
+      { timeout: 30_000 },
+    );
+    expect(build.status, build.stdout + build.stderr).toBe(0);
+    const checker = pathToFileURL(
+      join(workspace, "plugins/codex-security/native/check.mjs"),
+    ).href;
+    const source = `import { releaseVersion } from "./scripts/release-automation.mjs"; import { buildBundledPlugin } from "./scripts/build-plugin.mjs"; import { buildMcpApp } from "../../plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs"; import { checkPrivatePaths } from ${JSON.stringify(checker)}; console.log(typeof releaseVersion, typeof buildBundledPlugin, typeof buildMcpApp, typeof checkPrivatePaths);`;
+    for (const args of [
+      ["--input-type=module", "-"],
+      ["--input-type=module", "--eval", source, "synthetic-virtual-entrypoint"],
+    ]) {
+      const result = spawnSync("node", args, {
+        cwd: packageRoot,
+        input: source,
+        encoding: "utf8",
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout.trim()).toBe("function function function function");
+    }
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test.skipIf(process.platform === "win32").each([
+  {
+    title: "fix: synthetic correction",
+    manual: "documentation",
+    stale: "enhancement",
+  },
+  { title: "feat: synthetic feature", manual: "bug", stale: "documentation" },
+  { title: "feat: synthetic feature", manual: "bug", stale: "enhancement" },
+])(
+  "uses the manual $manual release category over stale $stale after retitling to $title",
+  async ({ title, manual, stale }) => {
+    const script = workflowStepShell(
+      releaseLabelsWorkflow,
+      "Categorize pull request without checking out its code",
+    );
+    const fixture = `gh() {
+    case "$*" in
+      "api repos/test/codex-security/issues/17 --jq "*) printf '%s' "$MOCK_PR_TITLE" | base64 ;;
+      "api repos/test/codex-security/issues/17/labels --jq "*) printf '%s\\n' "$MANUAL_LABEL" "$STALE_LABEL" ;;
+      "api repos/test/codex-security/issues/17/timeline?per_page=100 "*) printf '%s\\t%s\\n' "$MANUAL_LABEL" synthetic-reviewer "$STALE_LABEL" 'github-actions[bot]' ;;
+      "api --method DELETE repos/test/codex-security/issues/17/labels/$STALE_LABEL --silent") echo removed-stale-label ;;
+      "api --method DELETE "*) echo removed-manual-label; return 70 ;;
+      "api --method POST "*) echo added-automatic-category ;;
+      *) return 65 ;;
+    esac
+  }`;
+    const result = await runCommand(bash, ["-c", `${fixture}\n${script}`], {
+      env: {
+        ...process.env,
+        GITHUB_REPOSITORY: "test/codex-security",
+        PR_NUMBER: "17",
+        MOCK_PR_TITLE: title,
+        MANUAL_LABEL: manual,
+        STALE_LABEL: stale,
+      },
+      timeout: 10_000,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain(`Preserving existing ${manual} label.`);
+    expect(result.stdout).toContain("removed-stale-label");
+    expect(result.stdout).not.toContain("removed-manual-label");
+    expect(result.stdout).not.toContain("added-automatic-category");
+  },
+);
