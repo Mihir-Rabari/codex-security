@@ -139,6 +139,7 @@ import {
   type KnowledgeBaseSnapshot,
 } from "./knowledge-base.js";
 import { FindingWorkflow, workflowDigest } from "./finding-workflow.js";
+import { reviewSqliteHome } from "./deduplication/codex-review.js";
 import {
   ScanResult,
   type RepositoryFinding,
@@ -240,6 +241,7 @@ import {
 } from "./targets.js";
 import {
   inspectTrustedExecutable,
+  isWithin,
   type InspectedExecutable,
 } from "./trusted-executable.js";
 
@@ -769,6 +771,7 @@ export class CodexSecurity {
       let checkpoint:
         | { workflow: FindingWorkflow; binding: JsonObject; key: string }
         | undefined;
+      const privateStatePaths: string[] = [];
       const outputRoot =
         inputs.outputDir === null
           ? await preparePersistentOutputRoot(
@@ -842,9 +845,28 @@ export class CodexSecurity {
           session.python,
           { workbenchOptions },
         );
-        const source = await workflow.sourceSnapshot(inputs.repository, {
-          optional: true,
-        });
+        const sqliteHome = await canonicalConfigPath(
+          reviewSqliteHome(
+            {
+              ...withoutCodexHome(git.environment),
+              CODEX_HOME: runtime.codexHome,
+            },
+            resolveCodexProfile(session.sessionConfig),
+          ),
+        );
+        let source: JsonObject | null = null;
+        // Caching is optional when private storage would exclude the entire target.
+        if (!isWithin(sqliteHome, inputs.repository)) {
+          if (isWithin(inputs.repository, sqliteHome)) {
+            // Native startup owns the database files; create missing parents before snapshotting.
+            await mkdir(sqliteHome, { recursive: true, mode: 0o700 });
+            privateStatePaths.push(sqliteHome);
+          }
+          source = await workflow.sourceSnapshot(inputs.repository, {
+            optional: true,
+            privateStatePaths,
+          });
+        }
         if (source !== null) {
           const model = scanModelConfiguration(session.effectiveConfig);
           const binding = {
@@ -913,6 +935,7 @@ export class CodexSecurity {
             await checkTarget();
             const current = await workflow.sourceSnapshot(inputs.repository, {
               optional: true,
+              privateStatePaths,
             });
             if (current !== null) {
               if (workflowDigest(current) !== workflowDigest(source)) {
@@ -998,6 +1021,7 @@ export class CodexSecurity {
         const { workflow, binding, key } = checkpoint;
         const current = await workflow.sourceSnapshot(inputs.repository, {
           optional: true,
+          privateStatePaths,
         });
         if (current !== null) {
           if (workflowDigest(current) !== workflowDigest(binding["source"])) {

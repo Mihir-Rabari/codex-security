@@ -2,15 +2,21 @@ import {
   copyFile,
   mkdir,
   readFile,
+  realpath,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { CodexSecurity } from "../src/api.js";
-import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
+import {
+  environmentWithGit,
+  resolvePluginPython,
+  runWorkbench,
+} from "../src/runtime.js";
+import { inspectTrustedExecutable } from "../src/trusted-executable.js";
 import { PLUGIN_ROOT, copyCompletedScan } from "./plugin-root.js";
 import {
   codexFactory,
@@ -415,6 +421,134 @@ test("empty scan validation preserves configured Python and Git ignore rules", a
       }
     } finally {
       scan.mockRestore();
+    }
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("empty scan validation preserves knowledge-base Git exclusions", async () => {
+  if (
+    runTestInSubprocess(
+      import.meta.path,
+      "empty scan validation preserves knowledge-base Git exclusions",
+    )
+  )
+    return;
+  const root = await temporaryDirectory("empty-scan-knowledge-git-");
+  const repository = join(root, "repository");
+  const knowledge = join(root, "knowledge");
+  const python = await resolvePluginPython();
+  const hostGit = await realpath(Bun.which("git")!);
+  const previous = {
+    PATH: process.env["PATH"],
+    CODEX_SECURITY_STATE_DIR: process.env["CODEX_SECURITY_STATE_DIR"],
+  };
+  await mkdir(repository);
+  await mkdir(knowledge);
+  git(repository, "init", "-q", "-b", "main");
+  await writeFile(join(repository, "source.ts"), "export const value = 1;\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-qm", "initial");
+  const revision = git(repository, "rev-parse", "HEAD");
+  await writeFile(join(knowledge, "policy.md"), "Synthetic project policy.\n");
+  const pythonHome = join(knowledge, "python-runtime");
+  execNodePython(
+    python,
+    ["-m", "venv", "--without-pip", "--system-site-packages", pythonHome],
+    process.env,
+  );
+  const tools = join(
+    pythonHome,
+    process.platform === "win32" ? "Scripts" : "bin",
+  );
+  const suffix = process.platform === "win32" ? ".exe" : "";
+  const selectedPython = join(tools, `selected-python${suffix}`);
+  await copyFile(join(tools, `python${suffix}`), selectedPython);
+  await symlink(hostGit, join(tools, `git${suffix}`), "file");
+  process.env["CODEX_SECURITY_STATE_DIR"] = join(root, "state");
+  try {
+    for (const trustedFallback of [false, true]) {
+      process.env["PATH"] = [
+        tools,
+        ...(trustedFallback ? [dirname(hostGit)] : []),
+      ].join(delimiter);
+      const scanDir = join(root, `scan-${trustedFallback}`);
+      await mkdir(scanDir, { mode: 0o700 });
+      const scan = spyOn(CodexSecurity.prototype, "run").mockImplementation(
+        async (_repository, options = {}) => {
+          expect(options.knowledgeBaseSnapshot?.protectedRoots).toEqual([
+            await realpath(knowledge),
+          ]);
+          const selectedGit = await inspectTrustedExecutable(
+            "git",
+            process.env,
+            [repository, ...options.knowledgeBaseSnapshot!.protectedRoots!],
+          );
+          const workbenchOptions = {
+            python: selectedPython,
+            pluginRoot: PLUGIN_ROOT,
+            environment: environmentWithGit(
+              selectedGit.environment,
+              selectedGit,
+            ),
+          };
+          const registered = await runWorkbench(workbenchOptions, [
+            "register-cli-scan",
+            "--repository",
+            repository,
+            "--scan-dir",
+            scanDir,
+            "--recipe-json",
+            JSON.stringify({
+              repository,
+              mode: "standard",
+              target: { kind: "repository", paths: [] },
+              config: {},
+            }),
+          ]);
+          expect(registered["targetRevision"]).toBe(
+            trustedFallback ? revision : "unversioned",
+          );
+          const result = fakeResult();
+          result.manifest.scan.id = String(registered["scanId"]);
+          await runWorkbench(workbenchOptions, [
+            "get-scan",
+            "--scan-id",
+            result.manifest.scan.id,
+            "--check-target",
+          ]);
+          return result;
+        },
+      );
+      try {
+        const cli = createCliTest(main);
+        const exitCode = await cli.runCli(
+          [
+            "scan",
+            repository,
+            "--python",
+            selectedPython,
+            "--knowledge-base",
+            knowledge,
+            "--validate",
+            "--json",
+          ],
+          undefined,
+        );
+        expect(exitCode, cli.stderr.text()).toBe(0);
+        expect(JSON.parse(cli.stdout.text()).validation).toEqual({
+          status: "complete",
+          findings: 0,
+        });
+        expect(scan).toHaveBeenCalledTimes(1);
+      } finally {
+        scan.mockRestore();
+      }
     }
   } finally {
     for (const [name, value] of Object.entries(previous)) {

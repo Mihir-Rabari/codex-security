@@ -1,4 +1,5 @@
 import { once } from "node:events";
+import { Database } from "bun:sqlite";
 import { createServer, type Socket } from "node:net";
 import {
   appendFile,
@@ -74,6 +75,7 @@ import {
 } from "../src/runtime.js";
 import * as runtime from "../src/runtime.js";
 import { matchScanFindingsInternal } from "../src/scan-comparison.js";
+import { reviewSqliteHome } from "../src/deduplication/codex-review.js";
 import { normalizeTarget } from "../src/targets.js";
 import {
   copyCompletedScan,
@@ -786,6 +788,140 @@ describe("CodexSecurity finding validation", () => {
     await client.close();
     expect(await readFile(evidence, "utf8")).toBe("synthetic evidence");
   });
+
+  test.each([
+    "environment",
+    "root configuration",
+    "selected profile",
+    "repository root",
+    "repository ancestor",
+  ] as const)(
+    "keeps native SQLite state out of validation cache snapshots: %s",
+    async (setting) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const coversRepository =
+        setting === "repository root" || setting === "repository ancestor";
+      const sqliteHome =
+        setting === "repository root"
+          ? repository
+          : setting === "repository ancestor"
+            ? root
+            : join(repository, ".native-state", "nested");
+      let modelCalls = 0;
+      let changeSource = false;
+      const writeNativeState = async () => {
+        await mkdir(sqliteHome, { recursive: true, mode: 0o700 });
+        const database = new Database(join(sqliteHome, "state.sqlite"));
+        try {
+          database.run("CREATE TABLE IF NOT EXISTS events (message TEXT)");
+          database
+            .query("INSERT INTO events VALUES (?)")
+            .run("Synthetic validation thread");
+        } finally {
+          database.close();
+        }
+      };
+      async function* events(): AsyncGenerator<ThreadEvent> {
+        modelCalls++;
+        expect(fixture.captured.codex?.env?.["CODEX_HOME"]).toBe(
+          fixture.codexHome,
+        );
+        expect(
+          reviewSqliteHome(
+            fixture.captured.codex!.env!,
+            resolveCodexProfile(fixture.captured.codex!.config as JsonObject),
+          ),
+        ).toBe(sqliteHome);
+        await writeNativeState();
+        if (changeSource)
+          await writeFile(join(repository, "source.txt"), "Changed source.\n");
+        yield* validationEvents();
+      }
+      const python = await resolvePluginPython();
+      const fixture = await validationClient(
+        events,
+        PLUGIN_ROOT,
+        python,
+        root,
+        {
+          CODEX_HOME: join(root, "ambient-home"),
+          CODEX_SQLITE_HOME:
+            setting === "root configuration" || setting === "selected profile"
+              ? join(root, "unused-environment-storage")
+              : sqliteHome,
+        },
+      );
+      await using client = fixture.client;
+      if (setting === "root configuration")
+        client.config.codexOverrides!["sqlite_home"] = relative(
+          fixture.codexHome,
+          sqliteHome,
+        );
+      if (setting === "selected profile") {
+        client.config.codexOverrides!["sqlite_home"] = join(
+          root,
+          "unused-root-storage",
+        );
+        client.config.codexOverrides!["profile"] = "selected";
+        client.config.codexOverrides!["profiles"] = {
+          selected: { sqlite_home: relative(fixture.codexHome, sqliteHome) },
+        };
+      }
+      await writeFile(join(repository, "source.txt"), "Original source.\n");
+      await writeFile(join(repository, ".gitignore"), ".native-state/\n");
+      gitText(["-C", repository, "init", "-q"]);
+      gitText(["-C", repository, "add", "."]);
+      gitText([
+        "-C",
+        repository,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.com",
+        "commit",
+        "-qm",
+        "initial",
+      ]);
+      const snapshots: JsonObject[] = [];
+      fixture.workbench.mockImplementation(async (options, args, input) => {
+        if (args[0] === "finding-workflow" && input !== undefined) {
+          const request = JSON.parse(input) as JsonObject;
+          if (request["action"] === "source") snapshots.push(request);
+        }
+        return await runWorkbench(options, args, input);
+      });
+      const workflow = new FindingWorkflow(
+        "native-sqlite-validation",
+        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
+        runWorkbench,
+        python,
+      );
+      await workflow.bind({ repositoryPath: repository });
+      const request = { ...fixture.options, workflowId: workflow.id };
+      const first = await client.validate(request);
+      expect(first.disposition).toBe("reportable");
+      expect(modelCalls).toBe(1);
+      await writeNativeState();
+      const second = await client.validate(request);
+      if (coversRepository) {
+        expect(second.disposition).toBe("reportable");
+        expect(modelCalls).toBe(2);
+        expect(snapshots).toEqual([]);
+      } else {
+        expect(second).toEqual(first);
+        expect(modelCalls).toBe(1);
+        expect(
+          snapshots.map((snapshot) => snapshot["privateStatePaths"]),
+        ).toEqual(Array(4).fill([sqliteHome]));
+        changeSource = true;
+        await expect(
+          client.validate({ ...request, finding: "Another candidate" }),
+        ).rejects.toThrow("Repository changed during validation.");
+        expect(modelCalls).toBe(2);
+      }
+    },
+  );
 
   test("resumes workflow validation from persisted assessments across clients", async () => {
     const python = await resolvePluginPython();

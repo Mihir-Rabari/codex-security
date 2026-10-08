@@ -1232,6 +1232,7 @@ interface CliDependencies {
     signal?: AbortSignal,
     pythonPath?: string,
     protectedRoot?: string,
+    gitProtectedRoots?: readonly string[],
   ): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
@@ -1316,7 +1317,14 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     return options?.trim === false ? stdout : stdout.trim();
   },
   exportFindings: runArtifactExport,
-  runWorkbench: async (args, input, signal, pythonPath, protectedRoot) => {
+  runWorkbench: async (
+    args,
+    input,
+    signal,
+    pythonPath,
+    protectedRoot,
+    gitProtectedRoots = [],
+  ) => {
     let environment: NodeJS.ProcessEnv =
       protectedRoot === undefined
         ? {
@@ -1336,11 +1344,10 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
       protectedRoot,
     });
     if (protectedRoot !== undefined) {
-      const git = await inspectTrustedExecutable(
-        "git",
-        environment,
+      const git = await inspectTrustedExecutable("git", environment, [
         protectedRoot,
-      );
+        ...gitProtectedRoots,
+      ]);
       environment = environmentWithGit(git.environment, git);
     }
     return await runWorkbench(
@@ -8796,6 +8803,7 @@ async function executeScan(
               preparationAbortController.signal,
               config.pythonPath,
               repository,
+              options.knowledgeBaseSnapshot?.protectedRoots,
             );
             const scan = context["scan"];
             if (
