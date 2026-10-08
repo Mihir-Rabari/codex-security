@@ -261,13 +261,14 @@ describe("TypeScript package skeleton", () => {
     expect(nativeCoverageStep.if).toBe("runner.os != 'Linux'");
     expect(nativeCoverageStep.run).toContain(".//testcase/skipped");
     expect(nativeCoverageStep).not.toHaveProperty("continue-on-error");
-    for (const name of [
-      "Install plugin dependencies",
-      "Build SDK and type-check eval tooling",
-    ]) {
-      expect(job.steps!.find((step) => step.name === name)?.if).toBe(
+    for (const [name, condition] of [
+      ["Install plugin dependencies", "matrix.os == 'ubuntu-latest'"],
+      [
+        "Build SDK and type-check eval tooling",
         "matrix.os == 'ubuntu-latest' && matrix.python == '3.12'",
-      );
+      ],
+    ]) {
+      expect(job.steps!.find((step) => step.name === name)?.if).toBe(condition);
     }
     expect(jobs["required-test"]?.needs).toContain("plugin-source");
     expect(jobs["windows"]?.needs).toContain("plugin-source");
