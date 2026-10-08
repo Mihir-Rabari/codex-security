@@ -288,9 +288,34 @@ export async function recordCodexSecurityWorkerScanDraft(
     );
   }
 
-  // Receipt ownership is resolved by the host when archived evidence is retained.
+  // Record host-resolved shared ownership in the first immutable checkpoint.
+  const activePrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/output/`;
+  const scanRoot = dirname(dirname(dirname(dirname(dirname(context.root)))));
   for (const surface of parsed.coverage.surfaces as JsonObject[]) {
     if (isObject(surface.provenance)) delete surface.provenance.scanReceiptRefs;
+    const shared: string[] = [];
+    for (const value of (surface.receiptRefs as string[] | undefined) ?? []) {
+      const ref = posix.normalize(value);
+      if (ref.startsWith(activePrefix)) continue;
+      try {
+        await requireRegularFile(join(context.root, ref), context.root, true);
+        continue;
+      } catch {
+        // Shared receipts are resolved only when no worker-local receipt exists.
+      }
+      try {
+        await requireRegularFile(join(scanRoot, ref), scanRoot, true);
+        shared.push(ref);
+      } catch {
+        // Unavailable references retain the existing draft validation behavior.
+      }
+    }
+    if (shared.length > 0) {
+      surface.provenance = {
+        ...(isObject(surface.provenance) ? surface.provenance : {}),
+        scanReceiptRefs: exactUnion(shared),
+      };
+    }
   }
   const scope = context.scope;
   let scoped =

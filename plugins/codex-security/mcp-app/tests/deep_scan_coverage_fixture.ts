@@ -24,6 +24,7 @@ interface CoverageFixtureOptions {
   stopAfterDraft?: boolean;
   stopBeforeDraft?: boolean;
   receiptRetry?: boolean;
+  firstCheckpointReceipt?: "shared" | "worker";
   extraReceiptRetry?: boolean;
   rewriteReturnedCoverage?: boolean;
   sameNamedNewSurface?: boolean;
@@ -108,6 +109,7 @@ export async function publishCoverageFixture(
     stopAfterDraft = false,
     stopBeforeDraft = false,
     receiptRetry = false,
+    firstCheckpointReceipt,
     extraReceiptRetry = false,
     rewriteReturnedCoverage = false,
     sameNamedNewSurface = false,
@@ -409,6 +411,89 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     complete = true,
   ) => {
     const status = statuses[index];
+    if (firstCheckpointReceipt) {
+      await mkdir(artifactDir, { recursive: true });
+      const firstRef =
+        firstCheckpointReceipt === "shared"
+          ? "artifacts/01_context/false_positive_feedback.json"
+          : "artifacts/first.txt";
+      const firstRoot =
+        firstCheckpointReceipt === "shared" ? run.scanDir : artifactDir;
+      await mkdir(path.dirname(path.join(firstRoot, firstRef)), {
+        recursive: true,
+      });
+      await writeFile(
+        path.join(firstRoot, firstRef),
+        "Synthetic first checkpoint.\n",
+      );
+      if (firstCheckpointReceipt === "worker") {
+        await mkdir(path.dirname(path.join(run.scanDir, firstRef)), {
+          recursive: true,
+        });
+        await writeFile(
+          path.join(run.scanDir, firstRef),
+          "Synthetic unrelated parent checkpoint.\n",
+        );
+      }
+      const workerContext = {
+        root: artifactDir,
+        layout: "worker" as const,
+        repoRoot: targetPath,
+        scanId: run.scanId,
+      };
+      await recordCodexSecurityWorkerScanDraft(workerContext, {
+        scanId: run.scanId,
+        complete: false,
+        findings: [],
+        coverage: {
+          completeness: "partial",
+          surfaces: [
+            {
+              id: "first",
+              label: "First checkpoint",
+              disposition: "no_issue_found",
+              receiptRefs: [firstRef],
+              provenance: { scanReceiptRefs: [firstRef] },
+            },
+          ],
+          explicitExclusions: [],
+          deferred: [],
+        },
+      });
+      for (const name of await readdir(path.join(artifactDir, "checkpoints"))) {
+        const checkpoint = path.join(artifactDir, "checkpoints", name);
+        rawSources.set(checkpoint, await readFile(checkpoint, "utf8"));
+      }
+      const nextRef = receiptCollision ? firstRef : "artifacts/later.txt";
+      await mkdir(path.dirname(path.join(artifactDir, nextRef)), {
+        recursive: true,
+      });
+      await writeFile(
+        path.join(artifactDir, nextRef),
+        "Synthetic later checkpoint.\n",
+      );
+      await recordCodexSecurityWorkerScanDraft(workerContext, {
+        scanId: run.scanId,
+        complete,
+        findings: [],
+        coverage: {
+          completeness: status,
+          surfaces: [
+            {
+              id: "later",
+              label: "Later checkpoint",
+              disposition: "no_issue_found",
+              receiptRefs: [nextRef],
+            },
+          ],
+          explicitExclusions: [],
+          deferred: [],
+        },
+      });
+      const resultPath = path.join(artifactDir, "result.json");
+      rawSources.set(resultPath, await readFile(resultPath, "utf8"));
+      return;
+    }
     const pending = completeness === "partial" && status !== "complete";
     const coverage: JsonObject = {
       completeness: status,
@@ -938,6 +1023,35 @@ runpy.run_path(sys.argv[0], run_name="__main__")
   }
   for (const [file, bytes] of rawSources)
     assert.equal(await readFile(file, "utf8"), bytes);
+  if (firstCheckpointReceipt) {
+    const coverage = await readFixtureCoverage(run.scanDir);
+    assert.equal(
+      coverage.completeness,
+      stopAfterDraft || stopBeforeDraft ? "partial" : "complete",
+    );
+    assert.deepEqual(
+      coverage.deferred.map((row) => row.id),
+      stopAfterDraft || stopBeforeDraft ? ["scan-stopped"] : [],
+    );
+    for (const [label, expected] of [
+      ["First checkpoint", "Synthetic first checkpoint.\n"],
+      ["Later checkpoint", "Synthetic later checkpoint.\n"],
+    ]) {
+      const surface = coverage.surfaces.find((row) => row.label === label);
+      assert.ok(surface);
+      assert.equal(surface.receiptRefs.length, 1);
+      assert.equal(
+        await readFile(path.join(run.scanDir, surface.receiptRefs[0]), "utf8"),
+        expected,
+        "Each checkpoint keeps its observed receipt owner before any attempt archive exists.",
+      );
+      assert.equal(
+        Object.hasOwn(surface.provenance ?? {}, "scanReceiptRefs"),
+        false,
+      );
+    }
+    return { scanDir: run.scanDir, threadId, terminal };
+  }
   if (receiptOwnershipRetry) {
     const coverage = await readFixtureCoverage(run.scanDir);
     const current = coverage.surfaces.find(

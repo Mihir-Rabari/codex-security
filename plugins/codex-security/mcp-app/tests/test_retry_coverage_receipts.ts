@@ -347,3 +347,30 @@ for (const resume of [false, true]) {
     }
   }
 }
+
+for (const resume of [false, true]) {
+  for (const outcome of ["completion", "recovery", "no parent"]) {
+    for (const [name, firstCheckpointReceipt, receiptCollision] of [
+      ["shared same-name collision", "shared", true],
+      ["shared distinct-name control", "shared", false],
+      ["worker-local priority control", "worker", false],
+    ] as const) {
+      test(`first checkpoint receipt ownership survives ${resume ? "reconstruction" : "live execution"} and ${outcome}: ${name}`, async () => {
+        const root = await mkdtemp(
+          path.join(tmpdir(), "first-checkpoint-owner-"),
+        );
+        try {
+          await publishCoverageFixture(root, "complete", {
+            firstCheckpointReceipt,
+            receiptCollision,
+            resume,
+            stopAfterDraft: outcome === "recovery",
+            stopBeforeDraft: outcome === "no parent",
+          });
+        } finally {
+          await rm(root, { recursive: true, force: true });
+        }
+      });
+    }
+  }
+}
