@@ -121,11 +121,6 @@ export async function readDeepReductionSources(
               Array.isArray(inheritedScanRefs) &&
               inheritedScanRefs.includes(normalized)
             ) {
-              await requireRegularFile(
-                join(bound.artifacts.scanDir, normalized),
-                bound.artifacts.scanDir,
-                true,
-              );
               surfaceScanRefs.add(normalized);
               continue;
             }

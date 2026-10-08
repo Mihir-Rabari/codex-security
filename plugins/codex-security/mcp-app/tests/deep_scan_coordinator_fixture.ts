@@ -30,11 +30,13 @@ export const {
   AsyncLock,
   classifyCodexWorkerError,
   startOrJoinDeepScanCoordinator,
+  recordCodexSecurityWorkerScanDraft,
 } = await importModule({
   stdin: {
     contents: `
       export * from "./registry.ts";
       export { classifyCodexWorkerError } from "./errors.ts";
+      export { recordCodexSecurityWorkerScanDraft } from "../artifact-scan-draft.ts";
     `,
     resolveDir: new URL("../src/deep-scan/", import.meta.url).pathname,
   },
