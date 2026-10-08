@@ -1457,9 +1457,13 @@ def test_parent_extensions_do_not_resolve_unreviewed_child_candidate(
     assert all(path.read_bytes() == value for path, value in originals.items())
 
 
-@pytest.mark.parametrize("receipt_state", ["copied", "changed", "missing-archive"])
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize(
+    "receipt_state",
+    ["copied", "changed", "missing-archive", "shared-archive", "shared-archive-missing"],
+)
 def test_reconstructed_retry_surface_compares_receipt_bytes(
-    workbench_api, workbench_db, publication_scan, receipt_state
+    workbench_api, workbench_db, publication_scan, monkeypatch, receipt_state, retry
 ):
     scan = publication_scan()
     result = add_worker(workbench_db, scan)
@@ -1501,37 +1505,47 @@ def test_reconstructed_retry_surface_compares_receipt_bytes(
         receipt.write_text("Original synthetic evidence.\n")
     if receipt_state == "changed":
         (output / "artifacts/review.txt").write_text("Changed synthetic evidence.\n")
-    if receipt_state == "missing-archive":
+    if receipt_state in {"missing-archive", "shared-archive-missing"}:
         (archived.parent / "artifacts/review.txt").unlink()
-    (scan.scan_dir / "coverage.json").write_text(
-        json.dumps(
-            {
-                **scan.coverage,
-                "reviews": [
-                    {"workerId": worker_id, "attempt": attempt, "completeness": "partial"}
-                    for attempt in (1, 2)
-                ],
-            }
-        )
+    if receipt_state.startswith("shared-archive"):
+        draft["coverage"]["surfaces"][0]["receiptRefs"] = [
+            (archived.parent / "artifacts/review.txt").relative_to(scan.scan_dir).as_posix()
+        ]
+        result.write_text(json.dumps(draft))
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "reviews": [
+                {"workerId": worker_id, "attempt": attempt, "completeness": "partial"}
+                for attempt in (1, 2)
+            ],
+        },
     )
     originals = {path: path.read_bytes() for path in (result, archived)}
-    saved = workbench_api["saved_results"]
-    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
-    saved.fail_scan(
-        context,
-        workbench_db,
-        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
+    expected_attempt = (
+        1 if receipt_state == "copied" or receipt_state.startswith("shared-archive") else 2
     )
-    saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-    expected_attempt = 1 if receipt_state == "copied" else 2
     assert len(coverage["surfaces"]) == 1
     retained = coverage["surfaces"][0]
     assert retained["provenance"]["attempt"] == expected_attempt
     assert retained["id"] == f"{worker_id}-attempt-{expected_attempt}-surface-1"
-    assert retained["receiptRefs"] == [
-        (output / "artifacts/review.txt").relative_to(scan.scan_dir).as_posix()
-    ]
+    if receipt_state == "shared-archive-missing":
+        assert retained["receiptRefs"] == []
+        assert retained["disposition"] == "needs_follow_up"
+        assert coverage["completeness"] == "partial"
+    else:
+        assert retained["receiptRefs"] == [
+            (
+                (archived.parent if receipt_state.startswith("shared-archive") else output)
+                / "artifacts/review.txt"
+            )
+            .relative_to(scan.scan_dir)
+            .as_posix()
+        ]
     gap = next(row for row in coverage["deferred"] if row.get("reason") == "Validate this source.")
     assert gap["surfaceIds"] == [retained["id"]]
     assert all(path.read_bytes() == data for path, data in originals.items())

@@ -1373,7 +1373,9 @@ def merge_saved_results(
                         record, worker["id"], path, path
                     )
                 if prior == value:
-                    if field == "surfaces":
+                    if field == "surfaces" and coverage_receipts(
+                        item, worker, relative
+                    ) != coverage_receipts(record, worker, path):
                         receipts = surface_receipt_digests(item, worker, relative)
                         if receipts is None or receipts != surface_receipt_digests(
                             record, worker, path
