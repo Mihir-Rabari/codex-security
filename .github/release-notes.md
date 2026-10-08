@@ -109,6 +109,7 @@
 - read compressed Codex session logs ([#1428](https://github.com/openai/codex-security/pull/1428))
 - deduplicate saved scans with local SQLite ([#1338](https://github.com/openai/codex-security/pull/1338))
 - preserve manual line breaks ([#186](https://github.com/openai/codex-security/pull/186))
+- preserve saved diff snapshot provenance ([#1286](https://github.com/openai/codex-security/pull/1286))
 
 <!-- release-section: highlights:end -->
 
