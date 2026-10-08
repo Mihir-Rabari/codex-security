@@ -8,9 +8,11 @@ import pytest
 
 
 @pytest.mark.parametrize(
-    "omitted_version", [None, 47, 43], ids=["fresh", "upgrade", "existing-checkpoint"]
+    "omitted_versions",
+    [(), (47,), (43,), (44, 45, 46)],
+    ids=["fresh", "upgrade", "existing-checkpoint", "existing-checkpoint-local-dedupe"],
 )
-def test_frozen_checkpoint_head_migration_preserves_scan_state(workbench_api, omitted_version):
+def test_frozen_checkpoint_head_migration_preserves_scan_state(workbench_api, omitted_versions):
     migrations = workbench_api["MIGRATIONS"]
     timestamp = "2026-07-01T00:00:00Z"
 
@@ -24,7 +26,7 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(workbench_api, om
         connection.execute("PRAGMA foreign_keys = ON")
         migrate(
             connection,
-            tuple(item for item in migrations if item[0] != omitted_version),
+            tuple(item for item in migrations if item[0] not in omitted_versions),
         )
         connection.execute(
             "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
@@ -51,7 +53,7 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(workbench_api, om
                 ),
             )
         heads = json.dumps({"workers/review": "workers/review/checkpoints/" + "a" * 64 + ".json"})
-        if omitted_version == 43:
+        if omitted_versions and 47 not in omitted_versions:
             connection.execute(
                 "UPDATE scans SET retained_checkpoint_heads_json = ? WHERE id = 'failed'", (heads,)
             )
@@ -96,11 +98,12 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(workbench_api, om
             )
         assert connection.execute(
             "SELECT COUNT(*), MAX(version) FROM schema_migrations"
-        ).fetchone()[:] == (44, 47)
-        assert (
-            connection.execute(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version = 43"
-            ).fetchone()[0]
-            == 1
-        )
+        ).fetchone()[:] == (len(migrations), 47)
+        for version in (43, 44, 45, 46):
+            assert (
+                connection.execute(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version = ?", (version,)
+                ).fetchone()[0]
+                == 1
+            )
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []

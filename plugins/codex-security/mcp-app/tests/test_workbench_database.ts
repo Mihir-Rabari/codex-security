@@ -151,8 +151,8 @@ test("every released schema upgrades to the same current schema and remains idem
   }
 });
 
-for (const missingVersion of [47, 43]) {
-  test(`database-info retains stopped-scan checkpoints when adding migration ${missingVersion}`, async () => {
+for (const missingVersions of [[47], [43], [44, 45, 46]]) {
+  test(`database-info retains stopped-scan checkpoints when adding migration ${missingVersions.join(",")}`, async () => {
     const directory = await temporary.create("workbench-checkpoint-upgrade-");
     const databasePath = join(directory, "workbench.sqlite3");
     const sources = JSON.stringify({ "results.json": "retained-digest" });
@@ -162,7 +162,7 @@ for (const missingVersion of [47, 43]) {
     try {
       applyMigrations(
         old,
-        migrations.filter((item) => item.version !== missingVersion),
+        migrations.filter((item) => !missingVersions.includes(item.version)),
       );
       insertScan(old);
       old
@@ -170,7 +170,7 @@ for (const missingVersion of [47, 43]) {
           "UPDATE scans SET status = 'failed', retained_source_digests_json = ?",
         )
         .run(sources);
-      if (missingVersion === 43) {
+      if (!missingVersions.includes(47)) {
         old
           .prepare("UPDATE scans SET retained_checkpoint_heads_json = ?")
           .run(heads);
@@ -188,7 +188,7 @@ for (const missingVersion of [47, 43]) {
         upgraded
           .prepare("SELECT retained_checkpoint_heads_json FROM scans")
           .get()?.retained_checkpoint_heads_json,
-        missingVersion === 43 ? heads : null,
+        !missingVersions.includes(47) ? heads : null,
       );
       upgraded
         .prepare("UPDATE scans SET retained_checkpoint_heads_json = ?")
@@ -215,7 +215,7 @@ for (const missingVersion of [47, 43]) {
         reopened
           .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
           .get()?.count,
-        44,
+        migrations.length,
       );
       assert.equal(
         reopened
@@ -223,14 +223,16 @@ for (const missingVersion of [47, 43]) {
           .get()?.version,
         47,
       );
-      assert.equal(
-        reopened
-          .prepare(
-            "SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 43",
-          )
-          .get()?.count,
-        1,
-      );
+      for (const version of [43, 44, 45, 46]) {
+        assert.equal(
+          reopened
+            .prepare(
+              "SELECT COUNT(*) AS count FROM schema_migrations WHERE version = ?",
+            )
+            .get(version)?.count,
+          1,
+        );
+      }
       assert.deepEqual(reopened.prepare("PRAGMA foreign_key_check").all(), []);
       assert.equal(
         reopened
