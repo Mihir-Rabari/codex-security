@@ -26,6 +26,7 @@ export interface WindowsBinding {
     executable: Buffer,
     arguments_: Buffer[],
     cwd?: Buffer,
+    environment?: { name: Buffer; value: Buffer }[],
   ): { error: number; message?: string | null; status: number };
   windowsEnvironment(name: Buffer): Buffer | null;
   windowsAbsolutePath(path: Buffer): WindowsResult<Buffer>;

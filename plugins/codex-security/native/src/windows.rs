@@ -109,6 +109,12 @@ pub struct DirectoryEntriesResult {
 }
 
 #[napi(object)]
+pub struct WindowsEnvironmentValue {
+    pub name: Buffer,
+    pub value: Buffer,
+}
+
+#[napi(object)]
 pub struct WindowsProcessResult {
     pub error: u32,
     pub message: Option<String>,
@@ -121,6 +127,7 @@ pub fn run_windows_process(
     executable: Buffer,
     arguments: Vec<Buffer>,
     cwd: Option<Buffer>,
+    environment: Option<Vec<WindowsEnvironmentValue>>,
 ) -> napi::Result<WindowsProcessResult> {
     use std::process::{Command, Stdio};
 
@@ -130,6 +137,9 @@ pub fn run_windows_process(
     }
     if let Some(directory) = cwd {
         command.current_dir(os_string(directory)?);
+    }
+    for entry in environment.unwrap_or_default() {
+        command.env(os_string(entry.name)?, os_string(entry.value)?);
     }
     fn run(mut command: Command) -> io::Result<i32> {
         use windows_sys::Win32::System::JobObjects::{

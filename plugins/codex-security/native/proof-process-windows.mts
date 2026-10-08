@@ -21,7 +21,7 @@ export async function processProof(
     "",
     "東京 😀",
   ];
-  const script = `const fs=require('node:fs'), native=require(${JSON.stringify(binaryPath)}); const args=native.windowsArguments().slice(3).map(value=>value.toString('utf16le')); const cwd=native.windowsAbsolutePath(Buffer.from('.', 'utf16le')).value.toString('utf16le'); process.stderr.write(JSON.stringify({args,cwd,setting:process.env.INVENTORY_PROCESS_FIXTURE})); process.stdout.write(fs.readFileSync(0)); process.exitCode=23;`;
+  const script = `const fs=require('node:fs'), native=require(${JSON.stringify(binaryPath)}); const args=native.windowsArguments().slice(3).map(value=>value.toString('utf16le')); const cwd=native.windowsAbsolutePath(Buffer.from('.', 'utf16le')).value.toString('utf16le'); process.stderr.write(JSON.stringify({args,cwd,setting:process.env.INVENTORY_PROCESS_FIXTURE,rawSetting:native.windowsEnvironment(Buffer.from("INVENTORY_PROCESS_RAW", "utf16le")).toString("utf16le")})); process.stdout.write(fs.readFileSync(0)); process.exitCode=23;`;
   const child = spawnWindowsProcess(
     binaryPath,
     process.execPath,
@@ -31,6 +31,7 @@ export async function processProof(
       env: { ...process.env, INVENTORY_PROCESS_FIXTURE: "inherited" },
       stdio: ["pipe", "pipe", "pipe"],
     },
+    { INVENTORY_PROCESS_RAW: "raw-\udfff" },
   );
   const stdout: Buffer[] = [],
     stderr: Buffer[] = [];
@@ -48,6 +49,7 @@ export async function processProof(
   assert.deepEqual(result.args, arguments_);
   assert.equal(result.cwd.toLowerCase(), cwd.toLowerCase());
   assert.equal(result.setting, "inherited");
+  assert.equal(result.rawSetting, "raw-\udfff");
 
   for (let attempt = 0; attempt < 3; attempt++) {
     const quick = spawnWindowsProcess(

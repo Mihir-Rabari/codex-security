@@ -2,11 +2,11 @@ import { spawn, type SpawnOptions } from "node:child_process";
 
 // The wrapper is private: target values travel as UTF-16 bytes, never as script text.
 const shim = `
-process.once('message', ({ binary, executable, args, cwd }) => {
+process.once('message', ({ binary, executable, args, cwd, environment }) => {
 const wide = value => Buffer.from(value, 'base64');
 const disconnect = () => { if (process.connected) process.disconnect(); };
 try {
-  const result = require(binary).runWindowsProcess(wide(executable), args.map(wide), cwd === undefined ? undefined : wide(cwd));
+  const result = require(binary).runWindowsProcess(wide(executable), args.map(wide), cwd === undefined ? undefined : wide(cwd), environment.map(({name,value}) => ({name:wide(name),value:wide(value)})));
   process.exitCode = result.status;
   if (result.error) process.send({ spawnError: { errno: result.error, message: result.message } }, disconnect);
   else disconnect();
@@ -23,6 +23,7 @@ export function spawnWindowsProcess(
   executable: string,
   args: string[],
   options: SpawnOptions & { stdio: ["ignore" | "pipe", "pipe", "pipe"] },
+  environment: Record<string, string> = {},
 ) {
   const wide = (value: string) =>
     Buffer.from(value, "utf16le").toString("base64");
@@ -30,6 +31,10 @@ export function spawnWindowsProcess(
     binary,
     executable: wide(executable),
     args: args.map(wide),
+    environment: Object.entries(environment).map(([name, value]) => ({
+      name: wide(name),
+      value: wide(value),
+    })),
     ...(typeof options.cwd === "string" ? { cwd: wide(options.cwd) } : {}),
   };
   const child = spawn(process.execPath, ["-e", shim], {
