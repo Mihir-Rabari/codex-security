@@ -1,10 +1,11 @@
-import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runCommand } from "./support/shell.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { windowsHelperFixture } from "./windows-helper-command.js";
 
 const node = Bun.which("node")!;
 const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
@@ -802,6 +803,51 @@ test("JSON output preserves Unicode paths while escaping terminal controls", asy
   expect(result.stdout).not.toMatch(/[^\x00-\x7f]/u);
   expect(result.stdout).toContain("\\u202e");
 });
+
+test.skipIf(process.platform !== "win32")(
+  "documented PowerShell launcher preserves literal plugin and config paths",
+  async () => {
+    const root = await temporaryDirectory();
+    const directory = join(root, "config %USERNAME% !EXPAND! 雪's");
+    const expanded = directory.replace("%USERNAME%", "expanded-user");
+    await mkdir(directory);
+    await mkdir(expanded);
+    const config = join(directory, "config.toml");
+    await writeFile(config, "[agents]\nmax_threads=19\n");
+    await writeFile(join(expanded, "config.toml"), "[agents]\nmax_threads=3\n");
+    const launcher = windowsHelperFixture(root, {
+      CODEX_SECURITY_CONFIG_PATH: config,
+    });
+    await cp(
+      join(PLUGIN_ROOT, "preflight"),
+      join(launcher.plugin, "preflight"),
+      {
+        recursive: true,
+      },
+    );
+    for (const powershell of launcher.powershells) {
+      const result = await launcher.run(
+        powershell,
+        "references/config-preflight.md",
+        {
+          "<plugin_dir>": launcher.plugin,
+          "<scan-working-directory>": root,
+          "<capability-profile>": "security_scan",
+          "<active-config-argument>": '--config "%CODEX_SECURITY_CONFIG_PATH%"',
+          "<true|false>": "true",
+          "<verified-multi-agent-runtime-arguments>": v1.join(" "),
+        },
+      );
+      expect(result.status, result.diagnostics).toBe(0);
+      expect(result.stdout, result.diagnostics).not.toContain(
+        "expanded-plugin-used",
+      );
+      const payload = JSON.parse(result.stdout) as Payload;
+      expect(payload.config_paths, result.diagnostics).toEqual([config]);
+      expect(capacity(payload).actual, result.diagnostics).toBe(19);
+    }
+  },
+);
 
 test.each([[], ["ROOT.marker"]])(
   "discovers configured project-root markers: %j",

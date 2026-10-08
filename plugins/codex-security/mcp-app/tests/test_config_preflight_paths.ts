@@ -6,6 +6,10 @@ const { projectAncestors } = (await importSource(
   "src/helpers/config-preflight.ts",
   { define: { "process.platform": '"win32"' } },
 )) as typeof import("../src/helpers/config-preflight.ts");
+const { windowsJoin } = (await importSource(
+  "src/helpers/resolve-security-md.ts",
+  { define: { "process.platform": '"win32"' } },
+)) as typeof import("../src/helpers/resolve-security-md.ts");
 
 test("Windows project discovery stops at ordinary and extended share roots", () => {
   for (const prefix of ["\\\\", "\\\\?\\UNC\\"]) {
@@ -27,4 +31,20 @@ test("Windows project discovery retains drive roots and raw path units", () => {
       [`${root}folder-\udfff\\child`, `${root}folder-\udfff`, root],
     );
   }
+});
+
+test("root-relative project markers retain the candidate drive or share", () => {
+  for (const root of [
+    "D:\\",
+    "\\\\server\\share\\",
+    "\\\\?\\UNC\\server\\share\\",
+  ]) {
+    const marker = windowsJoin(`${root}repo\\child`, "\\marker");
+    assert.equal(marker, root.replace("\\\\?\\UNC\\", "\\\\") + "marker");
+  }
+  assert.equal(
+    windowsJoin("D:\\repo\\child", "D:marker"),
+    "D:\\repo\\child\\marker",
+  );
+  assert.equal(windowsJoin("D:\\repo\\child", "C:\\marker"), "C:\\marker");
 });

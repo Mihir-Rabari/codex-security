@@ -11,7 +11,7 @@ import {
 } from "./helper-files";
 import { object, stringifyJson } from "./json";
 import { encodePosixPath } from "./posix-path";
-import { expandHome, windowsFiles } from "./resolve-security-md";
+import { expandHome, windowsFiles, windowsJoin } from "./resolve-security-md";
 import { decodeUtf8 } from "./utf8";
 
 type Table = Record<string, unknown>;
@@ -407,7 +407,13 @@ function evaluate(values: Options): Table {
       for (const candidate of projectAncestors(cwd)) {
         if (
           markers.some((marker) =>
-            metadata(isAbsolute(marker) ? marker : join(candidate, marker)),
+            metadata(
+              windows
+                ? windowsJoin(candidate, marker)
+                : isAbsolute(marker)
+                  ? marker
+                  : join(candidate, marker),
+            ),
           )
         ) {
           root = candidate;
