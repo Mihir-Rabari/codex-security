@@ -732,7 +732,7 @@ const legacyScanCases: Array<
     {
       capability: true,
       inherited: "synthetic.system",
-      reads: true,
+      reads: false,
     },
   ],
 ];
