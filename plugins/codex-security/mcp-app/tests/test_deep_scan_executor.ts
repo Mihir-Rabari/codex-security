@@ -1611,6 +1611,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             ...process.env,
             CODEX_SECURITY_CONFIG_PATH: entry.path,
             CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: entry.deepPath,
+            CODEX_SECURITY_KNOWLEDGE_BASE: entry.knowledgePath,
             XDG_CACHE_HOME: path.join(fixture.root, `cache-${index} `),
           };
           const restored =
