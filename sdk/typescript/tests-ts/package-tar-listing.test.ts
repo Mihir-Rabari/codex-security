@@ -616,16 +616,18 @@ describe("npm package tar listings", () => {
           }),
         ),
       );
-      const extracted = spawnSync("tar", ["-xOzf", archivePath, path], {
-        encoding: "buffer",
-        timeout: 30_000,
-        windowsHide: true,
-      });
+      const nativeRoot = join(root, "native");
+      mkdirSync(nativeRoot);
+      const extracted = spawnSync(
+        "tar",
+        ["-xzf", archivePath, "-C", nativeRoot],
+        { encoding: "buffer", timeout: 30_000, windowsHide: true },
+      );
       expect({
         status: extracted.status,
         stderr: extracted.stderr.toString(),
       }).toEqual({ status: 0, stderr: "" });
-      expect(extracted.stdout.equals(logo)).toBe(true);
+      expect(readFileSync(join(nativeRoot, path)).equals(logo)).toBe(true);
       const contractPath = join(root, "contract.json");
       writeFileSync(
         contractPath,
