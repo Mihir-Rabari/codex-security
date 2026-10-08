@@ -793,6 +793,14 @@ test.each(
   expect(result.stdout).toBe("");
 });
 
+test("argument diagnostics escape terminal controls without dropping argument text", async () => {
+  const result = await run(["--unknown-\u001b[2J\nsynthetic-line"]);
+  expect(result.status).toBe(2);
+  expect(result.stdout).toBe("");
+  expect(result.stderr).toContain("--unknown-\\u001b[2J\\u000asynthetic-line");
+  expect(result.stderr.trimEnd()).not.toMatch(/[\p{Cc}\p{Cf}]/u);
+});
+
 test("help and real helper execution need no Python runtime", async () => {
   const root = await temporaryDirectory();
   const env = {

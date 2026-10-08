@@ -10,7 +10,7 @@ import {
   environmentValue,
   isMissingPathError,
 } from "./helper-files";
-import { object, stringifyJson } from "./json";
+import { escapeControls, object, stringifyJson } from "./json";
 import { encodePosixPath } from "./posix-path";
 import { expandHome, windowsFiles, windowsJoin } from "./resolve-security-md";
 import { decodeUtf8 } from "./utf8";
@@ -809,7 +809,9 @@ export function configPreflightCommand(args: string[]): number {
     )
       throw new Error("--multi-agent-session-cap must be a positive integer");
   } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
+    console.error(
+      escapeControls(error instanceof Error ? error.message : String(error)),
+    );
     return 2;
   }
   try {

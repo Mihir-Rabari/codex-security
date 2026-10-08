@@ -91,10 +91,16 @@ def test_deep_config_falls_back_to_tomli_without_stdlib_tomllib(monkeypatch):
         import tomllib
     except ModuleNotFoundError:
         import tomli as tomllib
+    runpy.run_path(str(SCRIPTS / "deep_scan_config.py"))
+    monkeypatch.delitem(sys.modules, "workbench.runtime_toml")
+    monkeypatch.delattr(sys.modules["workbench"], "runtime_toml")
     real_import = builtins.__import__
     monkeypatch.setitem(sys.modules, "tomli", tomllib)
+    attempted = []
 
     def import_without_tomllib(name, globals=None, locals=None, fromlist=(), level=0):
+        if name in {"tomllib", "tomli"}:
+            attempted.append(name)
         if name == "tomllib":
             raise ModuleNotFoundError("No module named 'tomllib'", name="tomllib")
         return real_import(name, globals, locals, fromlist, level)
@@ -102,3 +108,4 @@ def test_deep_config_falls_back_to_tomli_without_stdlib_tomllib(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", import_without_tomllib)
     namespace = runpy.run_path(str(SCRIPTS / "deep_scan_config.py"))
     assert namespace["tomllib"] is tomllib
+    assert attempted == ["tomllib", "tomli"]
