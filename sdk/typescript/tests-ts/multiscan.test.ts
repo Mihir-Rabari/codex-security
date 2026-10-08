@@ -5981,93 +5981,114 @@ for (const nested of [false, true]) {
   });
 }
 
-(process.platform === "win32" ? test : test.skip)(
-  "retained spelling recovery restores an extensionless Windows interpreter link",
-  async () => {
-    const paths = await fixture();
-    const source = await repository(paths.root, "extensionless-python-source");
-    await symlink(await realpath(PYTHON), join(source.path, "python.exe"));
-    git(source.path, "add", ".");
-    git(
-      source.path,
-      "-c",
-      "user.name=Fixture",
-      "-c",
-      "user.email=fixture@example.test",
-      "commit",
-      "-qm",
-      "Tracked interpreter link",
-    );
-    const revision = git(source.path, "rev-parse", "HEAD");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nrepo,${source.path},${revision}\n`,
-    );
-    await runMultiscan(
-      options(paths, client(rejecting("Interrupted")), { maxAttempts: 1 }),
-    );
-    const checkout = join(
-      paths.output,
-      "recovery-checkouts",
-      "repo",
-      "attempt-2",
-    );
-    git(
-      paths.root,
-      "clone",
-      "--quiet",
-      "-c",
-      "core.symlinks=true",
-      source.path,
-      checkout,
-    );
-    const alias = join(checkout, "python");
-    const runs = mock(
-      async (
-        root: string,
-        settings: Parameters<SecurityClient["run"]>[1] = {},
-      ) => {
-        const selected = await runtime.resolvePluginPythonCommand({
-          configuredPath: alias,
-          protectedRoot: root,
-          environment: runtime.pluginHelperEnvironment(process.env),
-        });
-        expect(await realpath(selected.executable)).toBe(
-          await realpath(PYTHON),
-        );
-        return completedScan(settings.outputDir!, "complete", root);
+test("retained spelling recovery restores a tracked interpreter selection", async () => {
+  const count = Number(process.env["GIT_CONFIG_COUNT"] ?? "0");
+  if (
+    runTestInSubprocess(
+      fileURLToPath(import.meta.url),
+      "retained spelling recovery restores a tracked interpreter selection",
+      {
+        ...process.env,
+        GIT_CONFIG_COUNT: String(count + 1),
+        [`GIT_CONFIG_KEY_${count}`]: "core.symlinks",
+        [`GIT_CONFIG_VALUE_${count}`]: "true",
       },
-    );
-    const campaign = options(paths, client(runs), {
-      config: { pythonPath: alias },
-      recoverScan: async () => undefined,
-    });
-    const initial = await runMultiscan(campaign);
-    expect(await results(initial.resultsPath)).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ status: "completed" }),
-      ]),
-    );
-    expect(initial).toMatchObject({ completed: 1, skipped: 0 });
-    const receipt = (await results(initial.resultsPath)).find(
-      (row) => row["status"] === "completed",
-    )!;
-    await appendFile(
-      join(receipt["outputDir"] as string, "report.md"),
-      "Refresh this synthetic report.\n",
-    );
+    )
+  )
+    return;
+  const paths = await fixture();
+  const source = await repository(paths.root, "extensionless-python-source");
+  await symlink(await realpath(PYTHON), join(source.path, "python.exe"));
+  git(source.path, "add", ".");
+  git(
+    source.path,
+    "-c",
+    "user.name=Fixture",
+    "-c",
+    "user.email=fixture@example.test",
+    "commit",
+    "-qm",
+    "Tracked interpreter link",
+  );
+  const revision = git(source.path, "rev-parse", "HEAD");
+  await writeFile(
+    paths.input,
+    `id,repository,revision\nrepo,${source.path},${revision}\n`,
+  );
+  await runMultiscan(
+    options(paths, client(rejecting("Interrupted")), { maxAttempts: 1 }),
+  );
+  const checkout = join(
+    paths.output,
+    "recovery-checkouts",
+    "repo",
+    "attempt-2",
+  );
+  const alias = join(
+    checkout,
+    process.platform === "win32" ? "python" : "python.exe",
+  );
+  const runs = mock(
+    async (
+      root: string,
+      settings: Parameters<SecurityClient["run"]>[1] = {},
+    ) => {
+      expect(root).toBe(checkout);
+      const selected = await runtime.resolvePluginPythonCommand({
+        configuredPath: alias,
+        protectedRoot: root,
+        environment: runtime.pluginHelperEnvironment(process.env),
+      });
+      expect(await realpath(selected.executable)).toBe(await realpath(PYTHON));
+      return completedScan(settings.outputDir!, "complete", root);
+    },
+  );
+  const campaign = options(paths, client(runs), {
+    config: { pythonPath: alias },
+    recoverScan: async () => undefined,
+  });
+  const initial = await runMultiscan(campaign);
+  expect(await results(initial.resultsPath)).toEqual(
+    expect.arrayContaining([expect.objectContaining({ status: "completed" })]),
+  );
+  expect(initial).toMatchObject({ completed: 1, skipped: 0 });
+  const receipt = (await results(initial.resultsPath)).find(
+    (row) => row["status"] === "completed",
+  )!;
+  expect(receipt["attempt"]).toBe(2);
+  git(
+    paths.root,
+    "clone",
+    "--quiet",
+    "-c",
+    "core.symlinks=true",
+    source.path,
+    checkout,
+  );
+  const marker = join(checkout, "retained.txt");
+  await writeFile(marker, "Keep this retained checkout.\n");
+  const originalMarker = await lstat(marker);
+  await appendFile(
+    join(receipt["outputDir"] as string, "report.md"),
+    "Refresh this synthetic report.\n",
+  );
 
-    await rm(join(checkout, "python.exe"));
-    expect(await runMultiscan(campaign)).toMatchObject({
-      completed: 1,
-      skipped: 1,
-    });
-    expect(await realpath(join(checkout, "python.exe"))).toBe(
-      await realpath(PYTHON),
-    );
-    expect(runs).toHaveBeenCalledTimes(1);
-  },
-);
+  await rm(join(checkout, "python.exe"));
+  expect(await runMultiscan(campaign)).toMatchObject({
+    completed: 1,
+    skipped: 1,
+  });
+  expect(await realpath(join(checkout, "python.exe"))).toBe(
+    await realpath(PYTHON),
+  );
+  expect(runs).toHaveBeenCalledTimes(1);
+  expect(await readFile(marker, "utf8")).toBe("Keep this retained checkout.\n");
+  const retainedMarker = await lstat(marker);
+  expect([retainedMarker.dev, retainedMarker.ino]).toEqual([
+    originalMarker.dev,
+    originalMarker.ino,
+  ]);
+});
 
 for (const tracked of [false, true]) {
   for (const allMetadata of [false, true]) {
