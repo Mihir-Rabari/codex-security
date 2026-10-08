@@ -1363,6 +1363,47 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 : "elevated";
           const webSearch =
             index === 0 ? undefined : ["disabled", "cached", "live"][index % 3];
+          // Cover missing settings, native config inheritance, and snapshot overrides.
+          const mergeProfileTelemetry = index === 0 && configuration !== "";
+          const telemetry =
+            index === 0 && configuration === ""
+              ? {}
+              : {
+                  analytics: { enabled: index % 2 === 0 },
+                  responses_api_metadata: {
+                    codex_security_surface: index % 2 === 0 ? "cli" : "sdk",
+                    codex_security_command: "scan",
+                    codex_security_package_version: `0.2.${index}`,
+                    codex_security_plugin_version: `0.1.${index}`,
+                    custom_tag: `synthetic-scan-${index}`,
+                    ...(mergeProfileTelemetry
+                      ? {
+                          root_only: "native-root",
+                          profile_only: "selected-profile",
+                        }
+                      : {}),
+                  },
+                };
+          const overrideTelemetry = index === 1 || index === 2;
+          const inheritedTelemetry =
+            overrideTelemetry || index === 4
+              ? {
+                  analytics: { enabled: index % 2 !== 0 },
+                  responses_api_metadata: { custom_tag: "preflight-default" },
+                }
+              : mergeProfileTelemetry
+                ? {
+                    analytics: { enabled: true },
+                    responses_api_metadata: {
+                      codex_security_surface: "cli",
+                      codex_security_command: "scan",
+                      codex_security_package_version: "0.2.0",
+                      codex_security_plugin_version: "0.1.0",
+                      custom_tag: "preflight-default",
+                      root_only: "native-root",
+                    },
+                  }
+                : telemetry;
           const features =
             index === 0
               ? undefined
@@ -1417,6 +1458,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           return {
             path: entryPath,
             deepPath,
+            workerConfigPath: index === 0 ? undefined : deepPath,
             nativeProfile,
             profilePath,
             parentSandbox,
@@ -1446,12 +1488,18 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             windowsSandbox,
             webSearch,
             features,
+            telemetry,
+            workerTelemetry: overrideTelemetry ? telemetry : {},
             configuration: {
               ...parsedConfiguration,
+              ...inheritedTelemetry,
               ...(index === 0
                 ? {}
                 : { service_tier: index === 2 ? "flex" : serviceTier }),
-              ...(index === 2 || index === 3
+              ...(index === 2 ||
+              index === 3 ||
+              index === 4 ||
+              mergeProfileTelemetry
                 ? {
                     profile: "selected",
                     profiles: {
@@ -1459,6 +1507,16 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                       selected: {
                         ...profiles.selected,
                         ...(index === 2 ? { service_tier: serviceTier } : {}),
+                        ...(index === 4 ? telemetry : {}),
+                        ...(mergeProfileTelemetry
+                          ? {
+                              analytics: {},
+                              responses_api_metadata: {
+                                custom_tag: "synthetic-scan-0",
+                                profile_only: "selected-profile",
+                              },
+                            }
+                          : {}),
                       },
                       unselected: { service_tier: "fast" },
                     },
@@ -1476,8 +1534,9 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             writeFile(
               entry.deepPath,
               stringifyToml({
-                worker_runtime:
-                  entry.provider === undefined
+                worker_runtime: {
+                  ...entry.workerTelemetry,
+                  ...(entry.provider === undefined
                     ? {}
                     : {
                         model_instructions_file: entry.instructionsFile,
@@ -1491,7 +1550,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                         environment: entry.environment,
                         windows: { sandbox: entry.windowsSandbox },
                         features: entry.features,
-                      },
+                      }),
+                },
               }),
             ),
             ...(entry.profilePath === undefined
@@ -1580,8 +1640,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 fixture.root,
                 `cache-${index} `,
               );
-              process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH =
-                workerConfigurations[index].deepPath;
+              restoreEnv(
+                "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+                workerConfigurations[index].workerConfigPath,
+              );
               return executor.run(
                 workerRequest(promptPath, fixture.root, {
                   kind,
@@ -1640,7 +1702,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
             assert.equal(
               workerLaunch.environment!.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
-              workerConfigurations[index].deepPath,
+              workerConfigurations[index].workerConfigPath,
             );
             assert.deepEqual(
               JSON.parse(
@@ -1674,6 +1736,22 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               web_search: workerConfigurations[index].webSearch,
               "windows.sandbox": workerConfigurations[index].windowsSandbox,
             });
+            assert.deepEqual(
+              JSON.parse(
+                JSON.stringify(
+                  parseToml(
+                    nativeConfigOverrides(invocation.argv)
+                      .filter((override) =>
+                        /^(analytics|responses_api_metadata)[.=]/.test(
+                          override,
+                        ),
+                      )
+                      .join("\n"),
+                  ),
+                ),
+              ),
+              workerConfigurations[index].telemetry,
+            );
             assert.equal(
               invocation.cacheDirectory,
               path.join(fixture.root, `cache-${index} `),
@@ -1769,7 +1847,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.equal(process.env.PYTHON, python);
             assert.equal(
               invocation.deepConfigPath,
-              workerConfigurations[index].deepPath,
+              workerConfigurations[index].workerConfigPath,
             );
             const workerFeatures = parseToml(
               invocation.argv
@@ -1888,11 +1966,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               Promise.all([
                 writeFile(
                   entry.path,
-                  'model_reasoning_summary = "detailed"\nservice_tier = "changed"\nmodel_provider = "changed"\n',
+                  'model_reasoning_summary = "detailed"\nservice_tier = "changed"\nmodel_provider = "changed"\n[analytics]\nenabled = false\n[responses_api_metadata]\ncustom_tag = "changed"\n',
                 ),
                 writeFile(
                   entry.deepPath,
-                  '[worker_runtime.features]\nshell_tool = true\nunified_exec = true\nview_image = true\n[worker_runtime]\nweb_search = "live"\nmodel_provider = "changed"\nnative_profile = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\nmodel_context_window = 999000\nmodel_auto_compact_token_limit = 888000\n[worker_runtime.windows]\nsandbox = "changed"\n[worker_runtime.environment]\nSYNTHETIC_GATEWAY_KEY = "changed"\nSYNTHETIC_HEADER_VALUE = "changed"\n',
+                  '[worker_runtime.features]\nshell_tool = true\nunified_exec = true\nview_image = true\n[worker_runtime]\nweb_search = "live"\nmodel_provider = "changed"\nnative_profile = "changed"\nmodel_instructions_file = "changed-instructions.md"\nmodel_verbosity = "changed"\nmodel_context_window = 999000\nmodel_auto_compact_token_limit = 888000\n[worker_runtime.windows]\nsandbox = "changed"\n[worker_runtime.environment]\nSYNTHETIC_GATEWAY_KEY = "changed"\nSYNTHETIC_HEADER_VALUE = "changed"\n[worker_runtime.analytics]\nenabled = false\n[worker_runtime.responses_api_metadata]\ncustom_tag = "changed"\n',
                 ),
               ]),
             ),

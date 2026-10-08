@@ -124,6 +124,7 @@ test.each([false, true])(
         signal: expect.any(AbortSignal),
       });
       expect(dependencies?.runWorkbench).toBe(deps.runWorkbench);
+      expect(dependencies?.surface).toBe("cli");
       return result;
     };
     expect(

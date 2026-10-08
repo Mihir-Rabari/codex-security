@@ -194,6 +194,7 @@ import {
   prepareCodexSecurityCredentialHome,
   resolveCodexCommand,
   resolvePluginPython,
+  pluginMetadata,
   runWorkbench,
   sameFile,
   setCodexSecurityCredentialLogout,
@@ -210,6 +211,7 @@ import {
   type ScanMatchingBatch,
 } from "./scan-comparison.js";
 import { scanActivitiesFromEvent } from "./scan-activity.js";
+import { codexSecurityRequestMetadata } from "./request-metadata.js";
 import {
   CODEX_SECURITY_THREAD_SOURCES,
   type CodexSecurityThreadSource,
@@ -4031,6 +4033,7 @@ export async function main(
               environment: dependencies.environment,
               currentDirectory: dependencies.currentDirectory,
               runWorkbench: dependencies.runWorkbench,
+              surface: "cli",
             },
           );
           for (const refusal of result.refusals ?? []) {
@@ -4236,6 +4239,7 @@ export async function main(
             }
           }
           const result = await runComponentScans({
+            surface: "cli",
             repository,
             outputDir: settings.outputDir,
             ...(options.auto ? { auto: true } : { components }),
@@ -7481,6 +7485,10 @@ async function runSkill(
     contents.push(contentsOrLiteral);
   }
   const plugin = await bundledPluginRoot();
+  const pluginVersion = await pluginMetadata(plugin).then(
+    (metadata) => metadata.version,
+    () => undefined,
+  );
   const verify = skill === "verify-fix";
   const assess = skill === "assess-patch-risk";
   const inputLabel = skill === "validation" || verify ? "Findings" : "Issues";
@@ -7582,8 +7590,22 @@ async function runSkill(
       ...(verify || assess
         ? ["--config", 'approvals_reviewer="auto_review"']
         : []),
-      "--config",
-      'responses_api_metadata.codex_security_surface="cli"',
+      ...Object.entries(
+        codexSecurityRequestMetadata(
+          "cli",
+          assess
+            ? "assess-patch-risk"
+            : verify
+              ? "verify-fix"
+              : patch
+                ? "patch"
+                : "validate",
+          pluginVersion,
+        ),
+      ).flatMap(([key, value]) => [
+        "--config",
+        `responses_api_metadata.${key}=${JSON.stringify(value)}`,
+      ]),
       ...(options.safetyIdentifier === undefined
         ? []
         : [

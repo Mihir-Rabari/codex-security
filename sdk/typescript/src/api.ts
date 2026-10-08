@@ -177,6 +177,7 @@ import {
   type ScanWorkerStatus,
 } from "./worker-progress.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
+import { codexSecurityRequestMetadata } from "./request-metadata.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
 import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import {
@@ -714,6 +715,7 @@ export class CodexSecurity {
       };
       const { codex } = await this.#createSessionCodex(
         session,
+        "validate",
         {
           CODEX_SECURITY_REPOSITORY: inputs.repository,
           CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
@@ -1013,6 +1015,7 @@ export class CodexSecurity {
       ].filter((path, index, roots) => roots.indexOf(path) === index);
       const { codex } = await this.#createSessionCodex(
         session,
+        "policy",
         {
           CODEX_SECURITY_REPOSITORY: target.repository,
           CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
@@ -1397,6 +1400,16 @@ export class CodexSecurity {
         );
       const workerSnapshot: JsonObject = {
         ...workerRuntimeConfig,
+        responses_api_metadata: {
+          ...(isRecord(workerRuntimeConfig["responses_api_metadata"])
+            ? workerRuntimeConfig["responses_api_metadata"]
+            : {}),
+          ...codexSecurityRequestMetadata(
+            this.#surface,
+            "scan",
+            runtime.plugin.version,
+          ),
+        },
         ...(workerEnvironment === undefined
           ? {}
           : { environment: workerEnvironment }),
@@ -1910,6 +1923,7 @@ export class CodexSecurity {
       };
       const { codex, environment } = await this.#createSessionCodex(
         session,
+        "scan",
         runtimePaths,
         options.auth,
         git,
@@ -2670,6 +2684,7 @@ export class CodexSecurity {
 
   async #createSessionCodex(
     session: PreparedSession,
+    command: string,
     runtimePaths: Record<string, string>,
     auth: ScanAuthMode = "auto",
     git?: InspectedExecutable,
@@ -2773,7 +2788,11 @@ export class CodexSecurity {
         ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
         responses_api_metadata: {
           ...configuredResponsesMetadata,
-          codex_security_surface: this.#surface,
+          ...codexSecurityRequestMetadata(
+            this.#surface,
+            command,
+            runtime.plugin.version,
+          ),
         },
       },
     });
@@ -4894,6 +4913,8 @@ function selectedWorkerRuntimeConfig(
   return {
     ...Object.fromEntries(
       [
+        "analytics",
+        "responses_api_metadata",
         "features",
         "model_auto_compact_token_limit",
         "model_context_window",

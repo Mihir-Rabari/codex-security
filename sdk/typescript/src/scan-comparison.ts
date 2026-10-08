@@ -35,6 +35,7 @@ import {
   type JsonObject,
 } from "./config.js";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
+import { codexSecurityRequestMetadata } from "./request-metadata.js";
 import {
   createProfileCodex,
   createProviderProfile,
@@ -316,6 +317,7 @@ export async function matchScanFindingsInternal(
   }
   const { thread, cleanup } = await startReadOnlyCodexThread(options, {
     ...runtimeOptions,
+    command: "compare",
     threadSource: CODEX_SECURITY_THREAD_SOURCES.scanComparison,
   });
   const remainingPages = new Set(pages.keys());
@@ -622,7 +624,13 @@ async function startReadOnlyCodexThread(
       allow_login_shell: false,
       project_doc_max_bytes: 0,
       responses_api_metadata: {
-        codex_security_surface: runtimeOptions.surface,
+        ...(homeExecutionConfig["responses_api_metadata"] as
+          JsonObject | undefined),
+        ...(sdkConfig["responses_api_metadata"] as JsonObject | undefined),
+        ...codexSecurityRequestMetadata(
+          runtimeOptions.surface,
+          runtimeOptions.command,
+        ),
       },
       features: {
         api_key_cyber_access_programs:
@@ -701,6 +709,7 @@ export async function runReadOnlyCodex(
   options: ReadOnlyCodexOptions,
   runtimeOptions: {
     surface: CodexSecuritySurface;
+    command: string;
     threadSource: ReadOnlyCodexThreadSource;
   },
 ): Promise<string> {

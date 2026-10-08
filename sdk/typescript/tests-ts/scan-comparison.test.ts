@@ -48,6 +48,8 @@ import {
   removeTemporaryDirectory,
 } from "./support/temporary-directories.js";
 import { fail } from "./support/errors.js";
+import { planComponents } from "../src/component-plan.js";
+import { VERSION } from "../src/version.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -124,6 +126,84 @@ function captureProfileClient() {
 }
 
 describe("semantic scan comparison", () => {
+  test.each([
+    ["sdk", "matching"],
+    ["cli", "matching"],
+    ["sdk", "planning"],
+    ["cli", "planning"],
+  ] as const)(
+    "preserves request metadata and attributes %s %s at the model boundary",
+    async (surface, helper) => {
+      const root = await temporaryDirectory();
+      const home = join(root, "home");
+      const repository = join(root, "repository");
+      await mkdir(home);
+      await mkdir(repository);
+      await writeFile(join(repository, "source.ts"), "export {};\n");
+      await writeFile(
+        join(home, "config.toml"),
+        stringify({
+          responses_api_metadata: {
+            synthetic_home: "preserved",
+            codex_security_surface: "previous",
+          },
+        }),
+      );
+      const options = {
+        config: {
+          codexOverrides: {
+            responses_api_metadata: {
+              synthetic_caller: "preserved",
+              codex_security_command: "previous",
+            },
+          },
+        },
+        environment: {
+          PATH: process.env["PATH"],
+          SystemRoot: process.env["SystemRoot"],
+          CODEX_HOME: home,
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          OPENAI_API_KEY: "synthetic-key",
+        },
+      };
+      let captured: CodexOptions | undefined;
+      const { codex } = fakeCodex(
+        helper === "matching"
+          ? { matches: [], uncertain: [] }
+          : { components: [{ name: "Source", paths: ["source.ts"] }] },
+      );
+      const startThread = observeCodexOptions(codex, (options) => {
+        captured = options;
+      });
+      try {
+        if (helper === "planning") {
+          await planComponents(repository, {
+            ...options,
+            ...(surface === "cli" ? { surface } : {}),
+          });
+        } else {
+          const input = {
+            before: [finding("before")],
+            after: [finding("after")],
+          };
+          if (surface === "sdk") await matchScanFindings(input, options);
+          else await matchScanFindingsInternal(input, options, { surface });
+        }
+        expect(startThread).toHaveBeenCalledTimes(1);
+        expect(captured?.config?.["responses_api_metadata"]).toEqual({
+          synthetic_home: "preserved",
+          synthetic_caller: "preserved",
+          codex_security_surface: surface,
+          codex_security_command:
+            helper === "matching" ? "compare" : "scan-components",
+          codex_security_package_version: VERSION,
+        });
+      } finally {
+        startThread.mockRestore();
+      }
+    },
+  );
+
   test("uses comparison attribution for CLI comparison turns", async () => {
     const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
     await matchScanFindingsInternal(
@@ -852,6 +932,7 @@ describe("semantic scan comparison", () => {
           } else {
             await runReadOnlyCodex("Plan components.", {}, options, {
               surface: "cli",
+              command: "scan-components",
               threadSource: "security_scan",
             });
           }
