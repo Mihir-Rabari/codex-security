@@ -962,3 +962,140 @@ for (const publication of ["writer", "file-authored"]) {
     });
   }
 }
+
+for (const mode of ["standard", "diff"] as const) {
+  for (const submission of [
+    "terminal",
+    "implicit-terminal",
+    "incomplete",
+    "matching-gap",
+    "matching-owner-gap",
+    "other-owner-gap",
+    "history-only",
+  ]) {
+    test(`parent reconfirmation preserves current intent: ${mode}, ${submission}`, async () => {
+      const f = await fixture(mode === "diff");
+      const owner = submission.includes("owner") ? "worker-a" : undefined;
+      const initial = {
+        ...finding(),
+        provenance: {
+          ...finding().provenance,
+          ...(owner === undefined ? {} : { sourceWorkerId: owner }),
+        },
+      };
+      const pending = {
+        id: "reopened-proof-gap",
+        candidateId: initial.provenance.candidateId,
+        reason: "Synthetic reachability needs another check.",
+        ...(owner === undefined ? {} : { sourceWorkerId: owner }),
+      };
+      await f.publish(f.draft({ completeness: "complete" }, [initial]));
+      await f.publish(f.draft({ deferred: [pending] }));
+      const reopened = (await f.json(join(f.parent.root, "findings.json")))
+        .findings[0];
+      expect(reopened.provenance.candidateReopened).toBe(true);
+      await f.remember(f.parent.root);
+      const confirmed = structuredClone(reopened);
+      confirmed.summary = "New synthetic evidence confirms reachability.";
+      const matchingGap =
+        submission === "matching-gap" || submission === "matching-owner-gap";
+      const currentGap =
+        submission === "other-owner-gap"
+          ? { ...pending, id: "other-owner-gap", sourceWorkerId: "worker-b" }
+          : pending;
+      const explicitPending = matchingGap || submission === "other-owner-gap";
+      const update: Row = f.draft(
+        {
+          completeness: explicitPending ? "partial" : "complete",
+          deferred: explicitPending ? [currentGap] : [],
+        },
+        submission === "history-only" ? [] : [confirmed],
+        submission !== "incomplete",
+      );
+      if (submission === "implicit-terminal") delete update["complete"];
+      const stillReopened =
+        matchingGap ||
+        submission === "incomplete" ||
+        submission === "history-only";
+      const expectedPending = stillReopened || submission === "other-owner-gap";
+      for (let repeat = 0; repeat < 2; repeat++) {
+        await f.publish(update);
+        const coverage = await f.json(join(f.parent.root, "coverage.json"));
+        const current = (await f.json(join(f.parent.root, "findings.json")))
+          .findings;
+        expect(current).toHaveLength(1);
+        if (submission === "incomplete") {
+          const checkpoints = await Promise.all(
+            (await readdir(join(f.parent.root, "checkpoints"))).map((name) =>
+              f.json(join(f.parent.root, "checkpoints", name)),
+            ),
+          );
+          expect(checkpoints).toContainEqual(
+            expect.objectContaining({
+              complete: false,
+              findings: [confirmed],
+            }),
+          );
+          expect(current[0].summary).toBe(reopened.summary);
+        } else if (submission !== "history-only") {
+          expect(current[0].summary).toBe(confirmed.summary);
+        }
+        expect(current[0].provenance.candidateReopened === true).toBe(
+          stillReopened,
+        );
+        expect(coverage.deferred).toEqual(expectedPending ? [currentGap] : []);
+        expect(coverage.completeness).toBe(
+          expectedPending ? "partial" : "complete",
+        );
+        expect(confirmed.provenance.candidateReopened).toBe(true);
+        await f.unchanged();
+      }
+      let result: ScanResult;
+      if (submission === "incomplete") {
+        await expect(f.complete()).rejects.toThrow(/incomplete/);
+        await f.workbench([
+          "fail-scan",
+          "--scan-id",
+          f.scanId,
+          "--message",
+          "Synthetic interruption of an incomplete review.",
+          ...(f.parent.handoffClaimToken
+            ? ["--claim-token", f.parent.handoffClaimToken]
+            : []),
+        ]);
+        const contract = await loadContract(f.parent.root, {
+          pluginRoot: PLUGIN_ROOT,
+          expectedScanId: f.scanId,
+        });
+        result = new ScanResult({
+          ...contract,
+          scanDir: f.parent.root,
+          threadId: "synthetic-reconfirmation",
+          turnResult: {},
+        });
+      } else {
+        result = await f.complete();
+      }
+      const scan = (await f.workbench(["get-scan", "--scan-id", f.scanId]))
+        .scan;
+      expect(result.unresolvedCandidateCount).toBe(Number(expectedPending));
+      expect(scan.progress.candidates.unresolved).toBe(Number(expectedPending));
+      expect(result.coverage.completeness).toBe(
+        expectedPending ? "partial" : "complete",
+      );
+      if (submission === "incomplete") {
+        expect(result.unresolvedCandidates[0]).toMatchObject({
+          candidateId: pending.candidateId,
+          reason: pending.reason,
+        });
+      } else {
+        expect(
+          result.findings.findings[0]!.provenance["candidateReopened"] === true,
+        ).toBe(stillReopened);
+        if (submission !== "history-only")
+          expect(result.findings.findings[0]!.summary).toBe(confirmed.summary);
+      }
+      await f.unchanged();
+    });
+  }
+}

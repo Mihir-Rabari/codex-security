@@ -115,6 +115,8 @@ export async function recordCodexSecurityScanDraft(
   if (context.mode === "diff")
     parsed.coverage = normalizeCheckpointCoverage(parsed.coverage);
   requireBoundScan(context, parsed, true);
+  if (context.mode === "standard" || context.mode === "diff")
+    parsed.findings = confirmTerminalFindings(parsed);
   const finalDeepDraft = context.mode === "deep" && parsed.complete !== false;
   if (finalDeepDraft && resolvedDeferred(parsed.coverage).length > 0) {
     throw new Error(
@@ -349,6 +351,30 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
   );
 }
 
+function confirmTerminalFindings(
+  input: ScanDraftInput,
+  owner?: string,
+): JsonObject[] {
+  if (input.complete === false) return input.findings;
+  const pending = new Set(
+    (input.coverage.deferred as JsonObject[]).map((row) =>
+      coverageCandidateKey(row, owner),
+    ),
+  );
+  return input.findings.map((finding) => {
+    const key = findingCandidateKey(finding, owner);
+    const provenance = finding.provenance as JsonObject | undefined;
+    if (
+      key === undefined ||
+      pending.has(key) ||
+      provenance?.candidateReopened !== true
+    )
+      return finding;
+    const { candidateReopened: _reopened, ...confirmed } = provenance;
+    return { ...finding, provenance: confirmed };
+  });
+}
+
 /** Save a Standard worker draft in its assigned output directory. */
 export async function recordCodexSecurityWorkerScanDraft(
   context: ArtifactContext,
@@ -379,25 +405,7 @@ export async function recordCodexSecurityWorkerScanDraft(
           ),
         }
       : parsed;
-  if (scoped.complete !== false) {
-    const pending = new Set(
-      (scoped.coverage.deferred as JsonObject[]).map((row) =>
-        coverageCandidateKey(row, context.root),
-      ),
-    );
-    scoped.findings = scoped.findings.map((finding) => {
-      const key = findingCandidateKey(finding, context.root);
-      const provenance = finding.provenance as JsonObject | undefined;
-      if (
-        key === undefined ||
-        pending.has(key) ||
-        provenance?.candidateReopened !== true
-      )
-        return finding;
-      const { candidateReopened: _reopened, ...confirmed } = provenance;
-      return { ...finding, provenance: confirmed };
-    });
-  }
+  scoped.findings = confirmTerminalFindings(scoped, context.root);
   scoped = (await preserveScanDraft(context, scoped)).input;
   const destination = await artifactDestination(
     context,
