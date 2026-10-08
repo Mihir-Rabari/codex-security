@@ -1253,6 +1253,7 @@ with ExitStack() as stack:
                 repository=paths["requested"], scan_dir=str(scan_dir), parent_scan_id=name + "-scan",
                 recipe_json=json.dumps({"repository": paths["requested"], "mode": "standard", "config": {}, "target": {"kind": "repository", "paths": []}}),
                 registration_json_stdin=False, recipe_json_stdin=False,
+                archive_existing=False, archived_scan_dir=None,
             )
             try:
                 workbench.register_cli_scan(connection, args)
