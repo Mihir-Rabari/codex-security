@@ -1986,7 +1986,7 @@ function coverageEntryIdentities(entry: JsonObject): string[] {
     const value = entry[field];
     if (typeof value === "string" && value.trim())
       stable.push(
-        `stable:${candidateKey(value, genericDeferred(entry) ? undefined : entry.sourceWorkerId)}`,
+        `${field}:${candidateKey(value, genericDeferred(entry) ? undefined : entry.sourceWorkerId)}`,
       );
   }
   return stable;
