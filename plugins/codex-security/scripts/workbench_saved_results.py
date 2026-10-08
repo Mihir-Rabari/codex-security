@@ -1193,14 +1193,14 @@ def merge_saved_results(
         record_key = (worker["id"], relative, field, index if index is not None else id(item))
         if record_key in retained_records:
             return retained_records[record_key]
-        if index is not None and isinstance(rows, list):
-            for offset, row in enumerate(rows[: index - 1], 1):
-                retained_coverage_record(field, row, worker, relative, offset)
         item = original_coverage_rows.get(id(item), item)
         if field == "openQuestions" and isinstance(item, str):
             item = {"question": item.strip()}
         if not isinstance(item, dict):
             return None
+        if index is not None and isinstance(rows, list):
+            for offset, row in enumerate(rows[: index - 1], 1):
+                retained_coverage_record(field, row, worker, relative, offset)
         source = dict(item)
         if field == "surfaces":
             source["receiptRefs"] = coverage_receipts(item, worker, relative)
