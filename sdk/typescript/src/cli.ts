@@ -685,11 +685,7 @@ class PublicationProgressPresenter {
     try {
       dashboard.start();
       this.#dashboard = dashboard;
-    } catch {
-      try {
-        dashboard.stop();
-      } catch {}
-    }
+    } catch {}
   }
 
   public stop(): void {
@@ -853,11 +849,7 @@ class FindingProgressPresenter {
         dashboard.start();
         this.#dashboard = dashboard;
         return;
-      } catch {
-        try {
-          dashboard.stop();
-        } catch {}
-      }
+      } catch {}
     }
 
     this.#write(
@@ -1044,8 +1036,6 @@ function scanOutputSchema(...codes: [string, ...string[]]) {
     .optional();
 }
 
-type ExportArguments = ArtifactExportArguments;
-
 type MatchingPlan = JsonObject & {
   repository: string;
   scanCount: number;
@@ -1195,7 +1185,7 @@ interface CliDependencies {
   terminatePublishers?(): void;
   forceExit(signal: SignalName): void;
   exportFindings(
-    arguments_: ExportArguments,
+    arguments_: ArtifactExportArguments,
     output?: Writable,
   ): Promise<Uint8Array | undefined>;
   runCodex(
@@ -4306,11 +4296,7 @@ export async function main(
             try {
               candidate.start();
               dashboard = candidate;
-            } catch {
-              try {
-                candidate.stop();
-              } catch {}
-            }
+            } catch {}
           }
           const result = await runComponentScans({
             repository,
@@ -4806,28 +4792,46 @@ export async function main(
                 ),
             );
           }
-          exitCode = await runExport(
-            {
-              scanDir: resolveCliPath(currentDirectory, scanDir),
-              artifact: options.artifact,
-              format,
-              output:
-                options.output === "-"
-                  ? "-"
-                  : resolveCliPath(
-                      currentDirectory,
-                      options.output ?? EXPORT_DEFAULT_OUTPUTS[format],
-                    ),
-              sourceRoot:
-                options.sourceRoot === undefined
-                  ? undefined
-                  : resolveCliPath(currentDirectory, options.sourceRoot),
-              pythonPath: options.python,
-            },
-            output,
-            errorOutput,
-            dependencies,
-          );
+          const arguments_: ArtifactExportArguments = {
+            scanDir: resolveCliPath(currentDirectory, scanDir),
+            artifact: options.artifact,
+            format,
+            output:
+              options.output === "-"
+                ? "-"
+                : resolveCliPath(
+                    currentDirectory,
+                    options.output ?? EXPORT_DEFAULT_OUTPUTS[format],
+                  ),
+            sourceRoot:
+              options.sourceRoot === undefined
+                ? undefined
+                : resolveCliPath(currentDirectory, options.sourceRoot),
+            pythonPath: options.python,
+          };
+          try {
+            const prepared = await resolveArtifactExportOutput(
+              arguments_,
+              dependencies.currentDirectory(),
+            );
+            const contents = await dependencies.exportFindings(
+              prepared,
+              output,
+            );
+            if (arguments_.output === "-") {
+              if (contents !== undefined) {
+                await writeCliOutput(output, Buffer.from(contents));
+              }
+            } else {
+              errorOutput.write(
+                `${arguments_.format.toUpperCase()}: ${arguments_.output}\n`,
+              );
+            }
+            exitCode = 0;
+          } catch (error) {
+            errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+            exitCode = 2;
+          }
         } catch (error) {
           if (exitCode !== 2) {
             errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
@@ -8025,34 +8029,6 @@ function incurErrorMessage(output: string): string {
   if (message === undefined) return output.trim();
   const parsed = parseJson(() => message);
   return typeof parsed === "string" ? parsed : message;
-}
-
-async function runExport(
-  arguments_: ExportArguments,
-  output: Writable,
-  errorOutput: Writable,
-  dependencies: CliDependencies,
-): Promise<number> {
-  try {
-    const prepared = await resolveArtifactExportOutput(
-      arguments_,
-      dependencies.currentDirectory(),
-    );
-    const contents = await dependencies.exportFindings(prepared, output);
-    if (arguments_.output === "-") {
-      if (contents !== undefined) {
-        await writeCliOutput(output, Buffer.from(contents));
-      }
-    } else {
-      errorOutput.write(
-        `${arguments_.format.toUpperCase()}: ${arguments_.output}\n`,
-      );
-    }
-    return 0;
-  } catch (error) {
-    errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
-    return 2;
-  }
 }
 
 type VerboseDiagnosticValue = string | number | boolean | null | undefined;
