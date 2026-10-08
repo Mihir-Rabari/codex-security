@@ -100,6 +100,8 @@
 - show active reviews and result consolidation during Deep Scan ([#1253](https://github.com/openai/codex-security/pull/1253))
 - keep bulk-scan knowledge and settings stable on resume ([#1059](https://github.com/openai/codex-security/pull/1059))
 - reject plaintext remote login URLs ([#1331](https://github.com/openai/codex-security/pull/1331))
+- keep unusable DOCX numeric references as literal text ([#123](https://github.com/openai/codex-security/pull/123))
+- finish cancellation when preflight ignores termination ([#1049](https://github.com/openai/codex-security/pull/1049))
 
 <!-- release-section: highlights:end -->
 
