@@ -122,6 +122,7 @@ export class DeepScanCoordinator {
   };
   private started = false;
   private terminal = false;
+  private parentPublicationPending = false;
   private canceled = false;
   private externallyFailed = false;
   private setupComplete = false;
@@ -255,7 +256,10 @@ export class DeepScanCoordinator {
     reason: string,
     persistCancellation: () => Promise<void>,
   ): Promise<DeepScanRunState> {
-    if (this.terminal || this.state.status !== "running")
+    if (
+      this.terminal ||
+      (this.state.status !== "running" && !this.parentPublicationPending)
+    )
       return await this.settled();
     if (!this.cancellationPersistence) {
       let resolve!: () => void;
@@ -513,10 +517,15 @@ export class DeepScanCoordinator {
       finish: (input) => this.options.store.finish(input),
     });
     if (this.canceled || this.externallyFailed) return;
-    await this.options.onFinalized?.(
-      cloneState(this.state),
-      this.publicationAbortController.signal,
-    );
+    this.parentPublicationPending = true;
+    try {
+      await this.options.onFinalized?.(
+        cloneState(this.state),
+        this.publicationAbortController.signal,
+      );
+    } finally {
+      this.parentPublicationPending = false;
+    }
     if (this.canceled || this.externallyFailed) return;
   }
   private stopLocally(): boolean {

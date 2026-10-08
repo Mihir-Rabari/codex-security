@@ -187,7 +187,11 @@ function startTestServer({
   cwd: string;
   env?: NodeJS.ProcessEnv;
 }) {
-  const childEnvironment = { ...process.env, ...env };
+  const childEnvironment: NodeJS.ProcessEnv = {
+    ...process.env,
+    CODEX_HOME: path.join(scanRoot, "codex-home"),
+    ...env,
+  };
   for (const [name, value] of Object.entries(env)) {
     if (value === undefined) {
       delete childEnvironment[name];
