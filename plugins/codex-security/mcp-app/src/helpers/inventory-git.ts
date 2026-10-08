@@ -36,6 +36,13 @@ import {
 } from "./inventory-paths";
 import { createSourceSampler } from "./source-preview";
 
+interface ToolResult {
+  status: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: Buffer;
+  stderr: string;
+}
+
 const repositoryEnvironment = [
   "GIT_ALTERNATE_OBJECT_DIRECTORIES",
   "GIT_CEILING_DIRECTORIES",
@@ -214,7 +221,7 @@ export async function runTool(
   command: string,
   args: string[],
   cwd: string,
-): Promise<{ status: number; stdout: Buffer; stderr: string }> {
+): Promise<ToolResult> {
   const child = spawnTool(
     command,
     args,
@@ -227,19 +234,18 @@ export async function runTool(
   return collect(child);
 }
 
-async function collect(
-  child: ReturnType<typeof spawn>,
-): Promise<{ status: number; stdout: Buffer; stderr: string }> {
+async function collect(child: ReturnType<typeof spawn>): Promise<ToolResult> {
   const stdout: Buffer[] = [],
     stderr: Buffer[] = [];
   child.stdout!.on("data", (chunk: Buffer) => stdout.push(chunk));
   child.stderr!.on("data", (chunk: Buffer) => stderr.push(chunk));
-  const status = await new Promise<number>((resolve, reject) => {
+  await new Promise<void>((resolve, reject) => {
     child.once("error", reject);
-    child.once("close", (code) => resolve(code ?? 1));
+    child.once("close", () => resolve());
   });
   return {
-    status,
+    status: child.exitCode,
+    signal: child.signalCode,
     stdout: Buffer.concat(stdout),
     stderr: Buffer.concat(stderr).toString("utf8"),
   };
@@ -255,7 +261,7 @@ export async function git(repo: string, args: string[]) {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  return { status: 127, stdout: Buffer.alloc(0), stderr: "" };
+  return { status: 127, signal: null, stdout: Buffer.alloc(0), stderr: "" };
 }
 
 function gitLine(data: Buffer): string {
@@ -265,14 +271,13 @@ function gitLine(data: Buffer): string {
 function paths(data: Buffer): string[] {
   return decodePosixBytes(data).split("\0").filter(Boolean);
 }
-function requireSuccess(result: {
-  status: number;
-  stdout: Buffer;
-  stderr: string;
-}): Buffer {
-  if (result.status)
+function requireSuccess(result: ToolResult): Buffer {
+  if (result.status !== 0)
     throw new Error(
-      result.stderr.trim() || `Git exited with status ${result.status}`,
+      result.stderr.trim() ||
+        (result.signal
+          ? `Git terminated by ${result.signal}`
+          : `Git exited with status ${result.status}`),
     );
   return result.stdout;
 }
@@ -281,7 +286,7 @@ export async function directoryPaths(
   target: string,
 ): Promise<string[] | undefined> {
   const root = await git(target, ["rev-parse", "--show-toplevel"]);
-  if (root.status || !root.stdout.length) return undefined;
+  if (root.status !== 0 || !root.stdout.length) return undefined;
   const repository = canonical(gitLine(root.stdout));
   const prefix = decodePosixBytes(
     requireSuccess(await git(target, ["rev-parse", "--show-prefix"])),

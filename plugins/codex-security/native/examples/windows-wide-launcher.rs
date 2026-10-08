@@ -272,7 +272,6 @@ fn main() -> std::io::Result<()> {
                 )));
             }
         }
-        fs::remove_file(&output)?;
         fs::remove_dir_all(inventory_repo)?;
         let identity_root = root.join("İroot");
         let sibling = root.join("i\u{307}root");

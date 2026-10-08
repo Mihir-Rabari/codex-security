@@ -1016,3 +1016,38 @@ test("file and Git previews retain empty files and incomplete final UTF-16 units
     expect(rows.find((row) => row.path === "utf16.py")?.preview).toBe("");
   }
 });
+
+for (const signal of ["TERM", "KILL"])
+  for (const command of [
+    "generate-in-scope-files",
+    "make-repo-rank-input",
+    "make-repo-scope-input",
+  ])
+    test.skipIf(process.platform === "win32")(
+      `${command} preserves output when ripgrep is terminated by SIG${signal}`,
+      () => {
+        const f = fixture();
+        f.write("partial.py");
+        f.write("omitted.py");
+        const bin = join(f.root, "bin");
+        mkdirSync(bin);
+        writeFileSync(
+          join(bin, "rg"),
+          `#!/bin/sh\nprintf './partial.py\\0'\nkill -${signal} $$\n`,
+          { mode: 0o700 },
+        );
+        const scopes = join(f.root, "scopes.json");
+        writeFileSync(scopes, JSON.stringify(["."]));
+        writeFileSync(f.out, "previous\n");
+        const result = f.run(
+          command,
+          command === "make-repo-scope-input"
+            ? ["--scopes-file", scopes]
+            : ["--scope", "."],
+          { ...process.env, CODEX_SECURITY_GIT: "", PATH: bin },
+        );
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain(`SIG${signal}`);
+        expect(readFileSync(f.out, "utf8")).toBe("previous\n");
+      },
+    );

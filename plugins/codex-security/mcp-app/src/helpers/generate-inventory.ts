@@ -171,9 +171,9 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
       );
     return files;
   }
-  if (![0, 1].includes(result.status))
+  if (result.status !== 0 && result.status !== 1)
     throw new Error(
-      `Could not enumerate scoped repository files: ${result.stderr.trim()}`,
+      `Could not enumerate scoped repository files${result.signal ? ` (${result.signal})` : ""}: ${result.stderr.trim()}`,
     );
   return decodePosixBytes(result.stdout)
     .split("\0")
@@ -304,9 +304,9 @@ export async function generateInventory(
         `could not run ripgrep: ${error instanceof Error ? error.message : String(error)}`,
       );
     });
-    if (![0, 1].includes(result.status))
+    if (result.status !== 0 && result.status !== 1)
       throw new Error(
-        `ripgrep exited with status ${result.status}${result.stderr.trim() ? `: ${result.stderr.trim()}` : ""}`,
+        `ripgrep ${result.signal ? `terminated by ${result.signal}` : `exited with status ${result.status}`}${result.stderr.trim() ? `: ${result.stderr.trim()}` : ""}`,
       );
     let bytes = result.stdout;
     if (exists(append(repo, ".git"))) {
@@ -323,7 +323,7 @@ export async function generateInventory(
           return { status: 127, stdout: Buffer.alloc(0) };
         throw error;
       });
-      if (!tracked.status) {
+      if (tracked.status === 0) {
         const prefix =
           requested === "." || requested.startsWith("./") ? "./" : "";
         const paths = decodePosixBytes(tracked.stdout)
