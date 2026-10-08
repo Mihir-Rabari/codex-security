@@ -331,10 +331,10 @@ export function projectDiscoveryCoverage(
   const history = [...archived].sort(
     (left, right) => left.attempt - right.attempt,
   );
-  // Each historical occurrence accounts for one current surface in that attempt.
-  const matchedHistoricalSurfaces = new Map<
-    (typeof history)[number],
-    Set<number>
+  // Each historical occurrence accounts for one current row in its collection.
+  const matchedHistoricalRows = new Map<
+    string,
+    Map<(typeof history)[number], Set<number>>
   >();
   const surfaces = coverage.surfaces as Record<string, unknown>[];
   const prefix = (item: Record<string, unknown>) =>
@@ -349,23 +349,17 @@ export function projectDiscoveryCoverage(
         receiptDigests,
       );
     let original: (typeof history)[number] | undefined;
+    const matchedHistory = matchedHistoricalRows.get(field) ?? new Map();
+    matchedHistoricalRows.set(field, matchedHistory);
     for (const historical of history) {
       const rows = (historical.coverage[field] as unknown[] | undefined) ?? [];
-      if (field !== "surfaces") {
-        if (rows.some(matches)) {
-          original = historical;
-          break;
-        }
-        continue;
-      }
-      const matched =
-        matchedHistoricalSurfaces.get(historical) ?? new Set<number>();
+      const matched = matchedHistory.get(historical) ?? new Set<number>();
       const index = rows.findIndex(
         (saved, index) => !matched.has(index) && matches(saved),
       );
       if (index < 0) continue;
       matched.add(index);
-      matchedHistoricalSurfaces.set(historical, matched);
+      matchedHistory.set(historical, matched);
       original ??= historical;
     }
     const currentSources = (

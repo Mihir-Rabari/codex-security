@@ -1347,3 +1347,80 @@ for (const mode of ["explicit", "normalized"]) {
     });
   }
 }
+
+for (const field of [
+  "deferred",
+  "explicitExclusions",
+  "openQuestions",
+] as const) {
+  for (const sameText of [false, true]) {
+    test(`accepted ${field} occurrences retain one source attempt each, same text=${sameText}`, async () => {
+      const f = await fixture();
+      try {
+        const worker = {
+          root: f.output,
+          repoRoot: f.root,
+          scanId,
+          layout: "worker",
+        };
+        const archives: Array<[string, Buffer]> = [];
+        for (const attempt of [1, 2, 3]) {
+          const rows = Array.from({ length: attempt }, (_, index) => {
+            const text = sameText
+              ? "Synthetic proof"
+              : `Synthetic proof ${index + 1}`;
+            return field === "openQuestions"
+              ? { question: text }
+              : field === "explicitExclusions"
+                ? { pattern: "synthetic/excluded/**", reason: text }
+                : { reason: text };
+          });
+          await recordCodexSecurityWorkerScanDraft(
+            worker,
+            workerDraft([], {
+              complete: true,
+              coverage: {
+                completeness: "partial",
+                surfaces: [],
+                explicitExclusions: [],
+                deferred: [],
+                [field]: rows,
+              },
+            }),
+          );
+          if (attempt < 3) {
+            const archive = path.join(
+              f.workerRoot,
+              "attempts",
+              `attempt-0${attempt}`,
+            );
+            await archiveDirectory(f.output, archive);
+            const result = path.join(archive, "result.json");
+            archives.push([result, await readFile(result)]);
+          }
+        }
+        const accepted = await readFile(f.resultPath);
+        const source = (await readDeepReductionSources(f.context))
+          .discoveries[0].coverage;
+        assert.equal(source[field].length, 3);
+        assert.deepEqual(
+          source[field].map(
+            (row: { provenance: { attempt: number } }) =>
+              row.provenance.attempt,
+          ),
+          [1, 2, 3],
+        );
+        if (field === "deferred")
+          assert.equal(
+            new Set(source.deferred.map((row: { id: string }) => row.id)).size,
+            3,
+          );
+        assert.deepEqual(await readFile(f.resultPath), accepted);
+        for (const [result, bytes] of archives)
+          assert.deepEqual(await readFile(result), bytes);
+      } finally {
+        await rm(f.root, { recursive: true, force: true });
+      }
+    });
+  }
+}
