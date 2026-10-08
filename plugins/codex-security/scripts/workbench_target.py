@@ -376,11 +376,21 @@ def remediation_checkout_snapshot(
 
 
 def require_scan_target_unchanged(scan: sqlite3.Row) -> None:
+    head_changed_message = "Repository HEAD changed. Run a new scan before validating its findings."
+    if (
+        scan["diff_target_kind"] not in {"working_tree", "commit", "range"}
+        and scan["target_snapshot_digest"] is None
+        and scan["mode"] != "diff"
+        and scan["target_revision"] != "unversioned"
+    ):
+        # Legacy Git records bind only the revision, not working-tree contents.
+        target = require_scan_target_identity(scan)
+        if git_revision(target) != scan["target_revision"]:
+            raise SystemExit(head_changed_message)
+        require_clean_submodule_worktrees(target)
+        return
     _, current_digest = remediation_checkout_snapshot(
-        scan,
-        head_changed_message=(
-            "Repository HEAD changed. Run a new scan before validating its findings."
-        ),
+        scan, head_changed_message=head_changed_message
     )
     if scan["diff_target_kind"] == "working_tree":
         expected_digest = scan["diff_content_digest"]
@@ -388,13 +398,6 @@ def require_scan_target_unchanged(scan: sqlite3.Row) -> None:
         expected_digest = clean_worktree_content_digest()
     else:
         expected_digest = scan["target_snapshot_digest"]
-        if (
-            expected_digest is None
-            and scan["mode"] != "diff"
-            and scan["target_revision"] != "unversioned"
-        ):
-            # Legacy Git records bind only the revision; retain the checks above.
-            return
     if current_digest != expected_digest:
         raise SystemExit(
             "Scan target contents changed since the scan. "

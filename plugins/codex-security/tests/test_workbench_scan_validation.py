@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import subprocess
 from contextlib import closing
@@ -116,6 +117,14 @@ def test_check_scan_target_rejects_replaced_checkout(tmp_path: Path) -> None:
 def test_check_scan_target_accepts_legacy_revision_only_git_scan(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     initialize_git_repository(repository)
+    submodule = repository / "submodule"
+    revision = initialize_git_repository(submodule)
+    subprocess.run(
+        ["git", "update-index", "--add", "--cacheinfo", f"160000,{revision},submodule"],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(["git", "commit", "-qm", "Add submodule"], cwd=repository, check=True)
     state_dir = tmp_path / "state"
     (tmp_path / "results").mkdir(mode=0o700)
     scan = create_cli_scan(state_dir, tmp_path / "results", repository, complete=False)
@@ -134,6 +143,14 @@ def test_check_scan_target_accepts_legacy_revision_only_git_scan(tmp_path: Path)
     assert run_workbench(state_dir, *command)["scan"]["scanId"] == scan["scanId"]
     source.write_bytes(original)
 
+    submodule_source = submodule / "README.md"
+    submodule_original = submodule_source.read_bytes()
+    submodule_source.write_text("Changed submodule content.\n")
+    dirty_submodule = run_workbench(state_dir, *command, check=False)
+    assert dirty_submodule["returncode"] != 0
+    assert "Dirty Git submodules" in dirty_submodule["stderr"]
+    submodule_source.write_bytes(submodule_original)
+
     subprocess.run(
         ["git", "commit", "--allow-empty", "-qm", "New revision"], cwd=repository, check=True
     )
@@ -147,3 +164,43 @@ def test_check_scan_target_accepts_legacy_revision_only_git_scan(tmp_path: Path)
     replaced = run_workbench(state_dir, *command, check=False)
     assert replaced["returncode"] != 0
     assert "checkout path was replaced" in replaced["stderr"]
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or getattr(os, "geteuid", lambda: 0)() == 0,
+    reason="Mode permissions require a non-root Unix user",
+)
+def test_check_legacy_scan_target_does_not_read_unrecorded_contents(
+    tmp_path: Path, workbench_api
+) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_repository(repository)
+    state_dir = tmp_path / "state"
+    (tmp_path / "results").mkdir(mode=0o700)
+    scan = create_cli_scan(state_dir, tmp_path / "results", repository, complete=False)
+    command = ("get-scan", "--scan-id", scan["scanId"])
+    entry = repository / "unreadable.txt"
+    entry.write_text("Synthetic untracked contents.\n")
+    mode = entry.stat().st_mode
+    entry.chmod(0)
+    try:
+        assert run_workbench(state_dir, *command)["scan"]["scanId"] == scan["scanId"]
+        recorded = run_workbench(state_dir, *command, "--check-target", check=False)
+        assert recorded["returncode"] != 0
+        assert "Could not read untracked file" in recorded["stderr"]
+        with closing(sqlite3.connect(state_dir / "workbench.sqlite3")) as connection:
+            connection.execute(
+                "UPDATE scans SET target_snapshot_digest = NULL WHERE id = ?", (scan["scanId"],)
+            )
+            connection.commit()
+            connection.row_factory = sqlite3.Row
+            stored_scan = connection.execute(
+                "SELECT * FROM scans WHERE id = ?", (scan["scanId"],)
+            ).fetchone()
+        with pytest.raises(SystemExit, match="Could not read untracked file"):
+            workbench_api["remediation_checkout_snapshot"](stored_scan)
+        assert (
+            run_workbench(state_dir, *command, "--check-target")["scan"]["scanId"] == scan["scanId"]
+        )
+    finally:
+        entry.chmod(mode)
