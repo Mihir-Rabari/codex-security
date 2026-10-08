@@ -3309,12 +3309,8 @@ async function testIsolatedReconstructedWorkers() {
       if (phase.startsWith("reconstructed") || phase === "incomplete") {
         for (const scan of scans) {
           scan.run = await scan.readRun();
-          // The caller restores recorded selections. Its old config file need
-          // not exist; current credentials still come from the selected home/env.
           if (phase === "reconstructed-fresh") await rm(scan.configPath);
           if (phase.startsWith("reconstructed")) {
-            // The managed parent can edit its output files. Neither a substituted
-            // executable/home nor other settings in that file are launch authority.
             const rewritten = JSON.parse(scan.snapshot);
             rewritten.settings.codexPath = process.execPath;
             rewritten.settings.codexHome = scans.find(
@@ -3326,8 +3322,6 @@ async function testIsolatedReconstructedWorkers() {
             const saved = JSON.parse(scan.snapshot);
             for (const key of ["model", "reasoningEffort", "reasoningSummary"])
               delete saved.settings[key];
-            // Native history restores the first provider. The second snapshot
-            // retains the provider binding for its saved AWS selectors.
             if (scan.name === "first") delete saved.settings.modelProvider;
             if (scan.name === "first") delete saved.settings.serviceTier;
             await writeFile(scan.snapshotPath, JSON.stringify(saved));
