@@ -494,10 +494,13 @@ export function projectDiscoveryCoverage(
       : {
           resolvedDeferred: (
             coverage.resolvedDeferred as Record<string, unknown>[]
-          ).map((item) => ({
-            ...item,
-            id: `${worker.id}-attempt-${worker.attempt ?? "unknown"}-resolved-${item.id}`,
-          })),
+          ).map((item) => {
+            const projected = project("resolvedDeferred", item);
+            return {
+              ...projected,
+              id: `${prefix(projected)}-resolved-${item.id}`,
+            };
+          }),
         }),
     ...(coverage.openQuestions === undefined
       ? {}
