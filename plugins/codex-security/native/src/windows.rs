@@ -108,6 +108,82 @@ pub struct DirectoryEntriesResult {
     pub value: Vec<DirectoryEntry>,
 }
 
+#[napi(object)]
+pub struct WindowsProcessResult {
+    pub error: u32,
+    pub message: Option<String>,
+    pub status: i32,
+}
+
+/// Run only inside the Node subprocess shim: blocking here keeps pipe ownership in that process.
+#[napi]
+pub fn run_windows_process(
+    executable: Buffer,
+    arguments: Vec<Buffer>,
+    cwd: Option<Buffer>,
+) -> napi::Result<WindowsProcessResult> {
+    use std::process::{Command, Stdio};
+
+    let mut command = Command::new(os_string(executable)?);
+    for argument in arguments {
+        command.arg(os_string(argument)?);
+    }
+    if let Some(directory) = cwd {
+        command.current_dir(os_string(directory)?);
+    }
+    fn run(mut command: Command) -> io::Result<i32> {
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        let raw_job = unsafe { CreateJobObjectW(null(), null()) };
+        if raw_job.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let job = unsafe { OwnedHandle::from_raw_handle(raw_job) };
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if unsafe {
+            SetInformationJobObject(
+                job.as_raw_handle(),
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const _,
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { AssignProcessToJobObject(job.as_raw_handle(), GetCurrentProcess()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // This function runs once in the private shim. Keep its job handle until
+        // process exit, so descendants inherit membership before they can run.
+        // Closing the handle on return would terminate the shim before reporting status.
+        std::mem::forget(job);
+        Ok(command
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()?
+            .code()
+            .unwrap_or(1))
+    }
+    match run(command) {
+        Ok(status) => Ok(WindowsProcessResult {
+            error: 0,
+            message: None,
+            status,
+        }),
+        Err(error) => Ok(WindowsProcessResult {
+            error: error.raw_os_error().unwrap_or(1) as u32,
+            message: Some(error.to_string()),
+            status: 127,
+        }),
+    }
+}
+
 #[napi]
 pub fn windows_arguments() -> Vec<Buffer> {
     std::env::args_os()
