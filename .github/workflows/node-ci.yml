@@ -489,6 +489,16 @@ jobs:
         id: windows-temp
         shell: pwsh
         run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
+      - name: Diagnose session-log retry
+        if: matrix.shard == 6
+        working-directory: sdk/typescript
+        env:
+          TEMP: ${{ steps.windows-temp.outputs.path }}
+          TMP: ${{ steps.windows-temp.outputs.path }}
+          TMPDIR: ${{ steps.windows-temp.outputs.path }}
+          CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
+          CODEX_SECURITY_TEST_TIMEOUT_MS: "120000"
+        run: bun test --timeout 120000 ./tests-ts/api.test.ts --test-name-pattern "retries session logs and limits repeated EACCES diagnostics appropriately$"
       - name: Test shard ${{ matrix.shard }}
         env:
           TEMP: ${{ steps.windows-temp.outputs.path }}
