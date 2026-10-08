@@ -19,7 +19,7 @@ from typing import Any, BinaryIO
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import stored_filesystem_identity_matches
-from rank_preview import DEFAULT_PREVIEW_READ_BYTES, is_binary_sample
+from source_binary import DEFAULT_PREVIEW_READ_BYTES, is_binary_sample
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
 

@@ -106,10 +106,6 @@ def test_git_blob_samples_match_full_file_classification_with_bounded_reads(
     ]
     assert max(reads) == 64 * 1024
 
-    from rank_preview import is_binary_file
-
-    assert [is_binary_file(target / name) for name in contents] == [False, True, True, False, False]
-
 
 @pytest.mark.parametrize(
     "output",

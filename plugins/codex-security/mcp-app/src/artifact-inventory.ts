@@ -1,6 +1,3 @@
-import { execFile as nodeExecFile } from "node:child_process";
-import { join } from "node:path";
-import { promisify } from "node:util";
 import * as z from "zod/v4";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
 import reviewItemsSchema from "../../schemas/tools/review-items.schema.json";
@@ -16,11 +13,10 @@ import {
   type SchemaDocument,
 } from "./artifact-schema-loader.js";
 import {
-  missingPythonHelperMessage,
-  resolvePythonCommand,
-} from "./python_command.js";
+  generateInventory,
+  type InventoryOptions,
+} from "./helpers/generate-inventory";
 
-const execFile = promisify(nodeExecFile);
 const documents = [commonSchema, reviewItemsSchema] as SchemaDocument[];
 const inventoryComponents = ["artifacts", "02_discovery", "in_scope_files.txt"];
 const label = "review_items";
@@ -74,21 +70,11 @@ export async function prepareCodexSecurityReviewItems(
     inventoryComponents,
     label,
   );
-  const pythonCommand = context.pythonCommand ?? (await resolvePythonCommand());
-  const helper = join(
-    context.pluginRoot,
-    "scripts",
-    "generate_in_scope_files.py",
-  );
-  const arguments_ = [
-    helper,
-    "--repo",
-    context.repoRoot,
-    "--scope",
-    context.scope ?? ".",
-    "--out",
-    destination,
-  ];
+  const options: InventoryOptions = {
+    repo: context.repoRoot,
+    scope: context.scope ?? ".",
+    out: destination,
+  };
 
   if (context.mode === "diff") {
     const target = context.targetContract?.diffTarget;
@@ -110,28 +96,15 @@ export async function prepareCodexSecurityReviewItems(
         `${label}: the diff scan has an invalid authoritative change set.`,
       );
     }
-    arguments_.push(
-      "--diff-base",
-      baseRevision,
-      "--diff-head",
-      headRevision,
-      "--diff-mode",
-      kind === "working_tree" ? "local-patch" : "revisions",
-    );
+    options.base = baseRevision;
+    options.head = headRevision;
+    options.mode = kind === "working_tree" ? "local-patch" : "revisions";
   }
 
   try {
-    await execFile(pythonCommand, arguments_, {
-      cwd: context.pluginRoot,
-      encoding: "utf8",
-      shell: false,
-    });
+    await generateInventory("generate-in-scope-files", options);
   } catch (error) {
-    const missingPython = missingPythonHelperMessage(error, pythonCommand);
-    if (missingPython) {
-      throw new Error(`${label}: ${missingPython}`, { cause: error });
-    }
-    const details = helperError(error);
+    const details = error instanceof Error ? error.message : String(error);
     throw new Error(
       `${label}: the scan inventory helper failed${details ? `: ${details}` : "."}`,
       { cause: error },
@@ -178,14 +151,4 @@ async function readReviewItems(
   }
 
   return rows;
-}
-
-function helperError(error: unknown): string | undefined {
-  if (!error || typeof error !== "object" || !("stderr" in error))
-    return undefined;
-  const stderr = error.stderr;
-  if (typeof stderr === "string") return stderr.trim() || undefined;
-  if (Buffer.isBuffer(stderr))
-    return stderr.toString("utf8").trim() || undefined;
-  return undefined;
 }

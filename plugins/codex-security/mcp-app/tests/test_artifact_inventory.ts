@@ -11,6 +11,16 @@ const temporaryDirectories = createTemporaryDirectories(true);
 
 const inventory = await importSource(
   new URL("../src/artifact-inventory.ts", import.meta.url).pathname,
+  {
+    define: {
+      "import.meta.url": JSON.stringify(
+        new URL(
+          "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
+          import.meta.url,
+        ).href,
+      ),
+    },
+  },
 );
 
 try {

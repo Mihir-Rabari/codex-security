@@ -1,5 +1,6 @@
-import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { pythonExecutable } from "./support/python.js";
+import { nodeCommand } from "./support/shell.js";
+import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { git } from "./git-fixture.js";
 import { spawnSync } from "node:child_process";
 import {
@@ -63,14 +64,11 @@ test("diff previews stay inside the selected repository", () => {
   rmSync(nested, { recursive: true });
   symlinkSync(externalFixture, nested, "junction");
 
-  const python = pythonExecutable();
-  expect(python).not.toBeNull();
   const output = join(root, "rank-input.jsonl");
   const result = spawnSync(
-    python!,
+    nodeCommand().command,
     [
-      "-B",
-      join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+      join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
       "make-diff-rank-input",
       "--repo",
       repository,
@@ -133,15 +131,11 @@ test("preserves Unicode Git paths and legacy-encoded commit metadata", () => {
   );
   const legacyHead = git(repository, "rev-parse", "HEAD");
 
-  const python = pythonExecutable();
-  expect(python).not.toBeNull();
   const output = join(root, "rank-input.jsonl");
   const rank = spawnSync(
-    python!,
+    nodeCommand().command,
     [
-      "-I",
-      "-B",
-      join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+      join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
       "make-diff-rank-input",
       "--repo",
       repository,
@@ -165,6 +159,8 @@ test("preserves Unicode Git paths and legacy-encoded commit metadata", () => {
     "diff = db.require_diff_target(repo, 'commit', None, sys.argv[3], None)",
     "print(json.dumps({'root': str(root), 'pathspec': pathspec, 'subject': metadata['commitSubject'], 'diff': diff}))",
   ].join("\n");
+  const python = pythonExecutable();
+  expect(python).not.toBeNull();
   const probe = spawnSync(
     python!,
     [
@@ -230,9 +226,7 @@ testPosix(
     writeFileSync(ripgrep, "#!/bin/sh\nexit 0\n");
     chmodSync(ripgrep, 0o700);
 
-    const python = pythonExecutable();
     const hostGit = Bun.which("git");
-    expect(python).not.toBeNull();
     expect(hostGit).not.toBeNull();
     const trustedGit = join(
       realpathSync(dirname(hostGit!)),
@@ -241,11 +235,10 @@ testPosix(
     const output = join(root, "output");
     const run = (script: string, args: string[], binding = trustedGit) =>
       spawnSync(
-        python!,
+        nodeCommand().command,
         [
-          "-I",
-          "-B",
-          join(PLUGIN_ROOT, "scripts", script),
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          ...(script === "generate-in-scope-files" ? [script] : []),
           ...args,
           "--repo",
           repository,
@@ -269,16 +262,16 @@ testPosix(
       "--head",
       head,
     ];
-    const unavailable = run("generate_rank_input.py", rankArguments, "");
+    const unavailable = run("rank-input", rankArguments, "");
     expect(unavailable.status).not.toBe(0);
-    const rejected = run("generate_rank_input.py", rankArguments, shim);
+    const rejected = run("rank-input", rankArguments, shim);
     expect(rejected.status).not.toBe(0);
     expect(rejected.stderr).toContain("outside the protected repository");
-    const rank = run("generate_rank_input.py", rankArguments);
+    const rank = run("rank-input", rankArguments);
     expect(rank.status, rank.stderr).toBe(0);
 
     for (const diff of [true, false]) {
-      const inventory = run("generate_in_scope_files.py", [
+      const inventory = run("generate-in-scope-files", [
         "--scope",
         ".",
         ...(diff ? ["--diff-base", base, "--diff-head", head] : []),

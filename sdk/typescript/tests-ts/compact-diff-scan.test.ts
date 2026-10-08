@@ -1,3 +1,4 @@
+import { nodeCommand } from "./support/shell.js";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { git } from "./git-fixture.js";
 import { initializeMcpClient } from "./support/mcp-client.js";
@@ -24,13 +25,25 @@ function createRepository(): { root: string; repository: string } {
   return { root, repository };
 }
 
-function python(script: string, ...args: string[]) {
+function pythonHelper(script: string, ...args: string[]) {
   const command =
     Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
   expect(command).not.toBeNull();
   return spawnSync(
     command!,
     ["-B", join(PLUGIN_ROOT, "scripts", script), ...args],
+    { encoding: "utf8" },
+  );
+}
+
+function inventoryHelper(script: string, ...args: string[]) {
+  return spawnSync(
+    nodeCommand().command,
+    [
+      join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+      ...(script === "generate-in-scope-files" ? [script] : []),
+      ...args,
+    ],
     { encoding: "utf8" },
   );
 }
@@ -98,8 +111,8 @@ describe("compact diff scan", () => {
     git(repository, "checkout", "--detach", base);
 
     const output = join(root, "rank-input.jsonl");
-    const result = python(
-      "generate_rank_input.py",
+    const result = inventoryHelper(
+      "rank-input",
       "make-diff-rank-input",
       "--repo",
       repository,
@@ -143,8 +156,8 @@ describe("compact diff scan", () => {
     writeSource(repository, "src/handler.py", Buffer.from([0, 255, 1]));
     const output = join(root, "in-scope.txt");
 
-    const result = python(
-      "generate_in_scope_files.py",
+    const result = inventoryHelper(
+      "generate-in-scope-files",
       "--repo",
       repository,
       "--scope",
@@ -197,15 +210,11 @@ describe("compact diff scan", () => {
     const head = git(repository, "rev-parse", "HEAD");
     const output = join(root, "in-scope.txt");
 
-    const executable = Bun.which("python3") ?? Bun.which("python");
-    expect(executable).not.toBeNull();
     const result = spawnSync(
-      executable!,
+      nodeCommand().command,
       [
-        "-B",
-        "-c",
-        "import locale, runpy, sys; locale.setlocale(locale.LC_CTYPE, 'C'); runpy.run_path(sys.argv.pop(1), run_name='__main__')",
-        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+        join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+        "generate-in-scope-files",
         "--repo",
         repository,
         "--scope",
@@ -239,8 +248,8 @@ describe("compact diff scan", () => {
     writeSource(repository, "src/binary.py", Buffer.from([0, 255, 1]));
     const output = join(root, "in-scope.txt");
 
-    const result = python(
-      "generate_in_scope_files.py",
+    const result = inventoryHelper(
+      "generate-in-scope-files",
       "--repo",
       repository,
       "--scope",
@@ -261,8 +270,8 @@ describe("compact diff scan", () => {
     ]);
 
     const reviewOutput = join(root, "rank-input.jsonl");
-    const review = python(
-      "generate_rank_input.py",
+    const review = inventoryHelper(
+      "rank-input",
       "make-diff-rank-input",
       "--repo",
       repository,
@@ -847,7 +856,7 @@ describe("compact diff scan", () => {
       ] as const) {
         writeFileSync(join(terminalDir, name), JSON.stringify(document));
       }
-      const finalized = python(
+      const finalized = pythonHelper(
         "finalize_scan_contract.py",
         "--scan-dir",
         terminalDir,
@@ -855,7 +864,7 @@ describe("compact diff scan", () => {
         repository,
       );
       expect(finalized.status, finalized.stderr).toBe(0);
-      const validated = python(
+      const validated = pythonHelper(
         "validate_scan_contract.py",
         "--scan-dir",
         terminalDir,

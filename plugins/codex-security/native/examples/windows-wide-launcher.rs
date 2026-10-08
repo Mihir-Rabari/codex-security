@@ -230,6 +230,40 @@ fn main() -> std::io::Result<()> {
                 ));
             }
         }
+        let inventory_scopes = repo.join("inventory-scopes.json");
+        fs::write(&inventory_scopes, r#"["scope-\udfff"]"#)?;
+        let scoped_expected = "{\"path\":\"scope-\\udfff/SECURITY.md\"}\r\n";
+        let ranked_expected = concat!(
+            "{\"path\":\"scope-\\udfff/SECURITY.md\",",
+            "\"area\":\"scope-\\udfff\",\"preview\":\"scope raw\"}\r\n",
+        );
+        for (command, expected) in [
+            ("make-repo-scope-input", scoped_expected),
+            ("make-repo-rank-input", ranked_expected),
+        ] {
+            let generated = invoke(
+                command,
+                &[
+                    "--repo".into(),
+                    repo.clone(),
+                    "--scopes-file".into(),
+                    inventory_scopes.clone(),
+                    "--out".into(),
+                    output.clone(),
+                ],
+            )?;
+            if !generated.status.success()
+                || !generated.stderr.is_empty()
+                || fs::read(&output)? != expected.as_bytes()
+            {
+                return Err(io::Error::other(format!(
+                    "Wide inventory helper failed: {}",
+                    String::from_utf8_lossy(&generated.stderr),
+                )));
+            }
+        }
+        fs::remove_file(&output)?;
+        fs::remove_file(inventory_scopes)?;
         let identity_root = root.join("İroot");
         let sibling = root.join("i\u{307}root");
         fs::create_dir(&identity_root)?;
@@ -675,7 +709,7 @@ fn main() -> std::io::Result<()> {
             }
         }
         println!(
-            "{{\"policyHelperRawPaths\":true,\"candidateHelperRawPaths\":true,\"assessmentHelperRawPaths\":true,\"deepReviewHelperRawPaths\":true,\"rankShardHelperRawPaths\":true,\"rankPoolHelperRawPaths\":true,\"bindScopesHelperRawPaths\":true,\"directoryIdentity\":true,\"policySymlinkBoundary\":{symlinks}}}"
+            "{{\"policyHelperRawPaths\":true,\"candidateHelperRawPaths\":true,\"assessmentHelperRawPaths\":true,\"deepReviewHelperRawPaths\":true,\"rankShardHelperRawPaths\":true,\"rankPoolHelperRawPaths\":true,\"bindScopesHelperRawPaths\":true,\"inventoryHelperRawPaths\":true,\"directoryIdentity\":true,\"policySymlinkBoundary\":{symlinks}}}"
         );
         Ok(())
     }

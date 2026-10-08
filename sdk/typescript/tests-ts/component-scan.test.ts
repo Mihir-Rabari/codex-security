@@ -1,3 +1,4 @@
+import { nodeCommand } from "./support/shell.js";
 import { codexWithRun } from "./support/codex.js";
 import { createCliTest } from "./support/cli-run.js";
 import { gitText } from "./support/shell.js";
@@ -215,6 +216,16 @@ async function scopedInventory(paths: Fixture, scope: string) {
   const scopesFile = join(paths.root, "scopes.json");
   const output = join(paths.root, "scoped-source-input.jsonl");
   await writeFile(scopesFile, JSON.stringify([scope]));
+  execFileSync(nodeCommand().command, [
+    join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+    "make-repo-scope-input",
+    "--repo",
+    paths.repository,
+    "--scopes-file",
+    scopesFile,
+    "--out",
+    output,
+  ]);
   const stdout = execFileSync(
     python!,
     [
@@ -227,7 +238,6 @@ async function scopedInventory(paths: Fixture, scope: string) {
         "from pathlib import Path",
         "sys.path.insert(0, sys.argv[1])",
         "import workbench_target as target",
-        "from generate_rank_input import make_repo_scope_input",
         "queries = []",
         "git_bytes = target.git_bytes",
         "def record_query(repository, *args, **kwargs):",
@@ -237,7 +247,6 @@ async function scopedInventory(paths: Fixture, scope: string) {
         "    return data",
         "target.git_bytes = record_query",
         "repo, scope, scopes, output = sys.argv[2:]",
-        "make_repo_scope_input(Namespace(repo=repo, scopes_file=scopes, out=output))",
         "rows = [json.loads(line)['path'] for line in Path(output).read_text().splitlines()]",
         "count = target.directory_snapshot_regular_file_count((Path(repo) / scope).resolve())",
         "print(json.dumps({'paths': rows, 'count': count, 'queries': queries}))",
@@ -1149,10 +1158,7 @@ test("keeps scoped inventories and plans aligned after a case-only Git rename", 
   expect(await scopedInventory(paths, source)).toEqual({
     paths: ordinaryPaths,
     count: 3,
-    queries: [
-      { pathspec: ":(icase,literal)" + source, count: 3 },
-      { pathspec: ":(icase,literal)" + source, count: 3 },
-    ],
+    queries: [{ pathspec: ":(icase,literal)" + source, count: 3 }],
   });
   git("switch", "-c", "case-rename");
   git("mv", source, "renaming");
@@ -1173,10 +1179,7 @@ test("keeps scoped inventories and plans aligned after a case-only Git rename", 
   const inventory = async (scope: string) => {
     const { queries, ...selected } = await scopedInventory(paths, scope);
     const pathspec = scope === "." ? "." : ":(icase,literal)" + scope;
-    expect(queries.map((query) => query.pathspec)).toEqual([
-      pathspec,
-      pathspec,
-    ]);
+    expect(queries.map((query) => query.pathspec)).toEqual([pathspec]);
     if (scope === ".") {
       selected.paths = (
         await Promise.all(
@@ -1215,10 +1218,7 @@ test("keeps scoped inventories and plans aligned after a case-only Git rename", 
   };
   expect(await scopedInventory(paths, scope)).toEqual({
     ...mixedInventory,
-    queries: [
-      { pathspec: ":(icase,literal)" + scope, count: 4 },
-      { pathspec: ":(icase,literal)" + scope, count: 4 },
-    ],
+    queries: [{ pathspec: ":(icase,literal)" + scope, count: 4 }],
   });
   const repositoryInventory = {
     paths: [
@@ -1288,7 +1288,6 @@ test("retains tracked Unicode aliases when scoped Git matching is incomplete", a
   execFileSync("git", ["-C", paths.repository, "add", "--force", "."]);
   expect((await scopedInventory(paths, nonCased)).queries).toEqual([
     { pathspec: ":(icase,literal)" + nonCased, count: 1 },
-    { pathspec: ":(icase,literal)" + nonCased, count: 1 },
   ]);
   await rename(
     join(paths.repository, source),
@@ -1325,7 +1324,7 @@ test("retains tracked Unicode aliases when scoped Git matching is incomplete", a
     ).sort();
   expect(await identities(inventory.paths)).toEqual(await identities(selected));
   expect(inventory.count).toBe(selected.length);
-  expect(inventory.queries.map((query) => query.pathspec)).toEqual([".", "."]);
+  expect(inventory.queries.map((query) => query.pathspec)).toEqual(["."]);
 });
 
 test("plans plain directories and rejects unsafe or overlapping model scopes", async () => {
