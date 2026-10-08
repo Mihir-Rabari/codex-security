@@ -1424,3 +1424,128 @@ for (const field of [
     });
   }
 }
+
+for (const legacy of [false, true]) {
+  for (const copied of [false, true]) {
+    for (const interrupted of [false, true]) {
+      test(`checkpoint-only receipt origin legacy=${legacy} copied=${copied} interrupted=${interrupted}`, async (t) => {
+        const f = await fixture();
+        const worker = {
+          root: f.output,
+          repoRoot: f.root,
+          scanId,
+          layout: "worker",
+        };
+        const row = {
+          ...(legacy ? {} : { id: "retained-review" }),
+          label: "Synthetic copied evidence",
+          disposition: "needs_follow_up",
+          receiptRefs: ["artifacts/review.txt"],
+        };
+        const draft = (surfaces: unknown[]) =>
+          workerDraft([], {
+            complete: true,
+            coverage: {
+              completeness: "partial",
+              surfaces,
+              explicitExclusions: [],
+              deferred: [],
+            },
+          });
+        try {
+          await mkdir(path.join(f.output, "artifacts"), { recursive: true });
+          await writeFile(
+            path.join(f.output, "artifacts/review.txt"),
+            "Synthetic original evidence.\n",
+          );
+          if (legacy) {
+            // Older accepted worker results retain surfaces without generated IDs.
+            await writeFile(f.resultPath, JSON.stringify(draft([row])));
+          } else await recordCodexSecurityWorkerScanDraft(worker, draft([row]));
+          const archive = path.join(f.workerRoot, "attempts", "attempt-01");
+          await archiveDirectory(f.output, archive);
+          const archived = await readFile(path.join(archive, "result.json"));
+          await recordCodexSecurityWorkerScanDraft(worker, draft([]));
+          const inherited = JSON.parse(await readFile(f.resultPath, "utf8"));
+          assert.equal(inherited.coverage.surfaces.length, 1);
+          const changed = {
+            ...inherited.coverage.surfaces[0],
+            label: "Synthetic accepted updated observation",
+            receiptRefs: ["artifacts/accepted.txt"],
+          };
+          await mkdir(path.join(f.output, "artifacts"), { recursive: true });
+          await writeFile(
+            path.join(f.output, "artifacts/accepted.txt"),
+            "Synthetic separate accepted evidence.\n",
+          );
+          await recordCodexSecurityWorkerScanDraft(worker, draft([changed]));
+          const before = await readFile(f.resultPath);
+          const checkpointOnly = { ...row, id: "checkpoint-only-review" };
+          await writeFile(
+            path.join(f.output, "artifacts/review.txt"),
+            copied
+              ? "Synthetic original evidence.\n"
+              : "Synthetic changed evidence.\n",
+          );
+          if (interrupted) {
+            const rename = fs.rename;
+            t.mock.method(
+              fs,
+              "rename",
+              async (...args: Parameters<typeof rename>) => {
+                if (args[1] === f.resultPath)
+                  throw Object.assign(
+                    new Error("Synthetic result-only rename interruption."),
+                    { code: "EIO" },
+                  );
+                return rename(...args);
+              },
+            );
+            await assert.rejects(
+              recordCodexSecurityWorkerScanDraft(
+                worker,
+                draft([changed, checkpointOnly]),
+              ),
+              /Synthetic result-only rename interruption/,
+            );
+            t.mock.restoreAll();
+          } else
+            await recordCodexSecurityWorkerScanDraft(
+              worker,
+              draft([changed, checkpointOnly]),
+            );
+          const head = JSON.parse(
+            await readFile(path.join(f.output, "checkpoint-head.json"), "utf8"),
+          );
+          const checkpoint = path.join(
+            f.output,
+            "checkpoints",
+            head.checkpoint,
+          );
+          const accepted = await readFile(checkpoint);
+          const coverage = (await readDeepReductionSources(f.context))
+            .discoveries[0].coverage;
+          const current = coverage.surfaces.filter(
+            (surface: { label: string; receiptRefs: string[] }) =>
+              surface.label === row.label &&
+              surface.receiptRefs.includes(
+                "artifacts/deep_discovery/workers/discovery-0001/output/artifacts/review.txt",
+              ),
+          );
+          assert.equal(current.length, 1);
+          assert.equal(current[0].provenance.attempt, legacy && copied ? 1 : 3);
+          assert.deepEqual(
+            await readFile(path.join(archive, "result.json")),
+            archived,
+          );
+          assert.deepEqual(await readFile(checkpoint), accepted);
+          if (interrupted)
+            assert.deepEqual(await readFile(f.resultPath), before);
+        } finally {
+          t.mock.restoreAll();
+          await rm(f.root, { recursive: true, force: true });
+        }
+      });
+    }
+  }
+}
