@@ -1604,10 +1604,21 @@ def test_dense_retained_projection_keeps_every_linked_record(
 
 @pytest.mark.parametrize("archived", [False, True], ids=["one-attempt", "two-attempts"])
 @pytest.mark.parametrize("mode", ["idless", "explicit"])
-@pytest.mark.parametrize("missing", [False, True], ids=["full-projection", "partial-projection"])
+@pytest.mark.parametrize(
+    ("projection", "with_receipt_refs"),
+    [("full", True), ("partial", True), ("none", True), ("none", False)],
+)
 @pytest.mark.parametrize("retry", [False, True], ids=["direct", "failed-retry"])
 def test_legacy_occurrences_survive_supported_parent_projection(
-    workbench_api, workbench_db, publication_scan, monkeypatch, mode, missing, retry, archived
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    mode,
+    projection,
+    with_receipt_refs,
+    retry,
+    archived,
 ):
     scan = publication_scan()
     with workbench_db:
@@ -1629,8 +1640,9 @@ def test_legacy_occurrences_survive_supported_parent_projection(
     surface = {
         "label": "Synthetic repeated legacy observation",
         "disposition": "needs_follow_up",
-        "receiptRefs": [],
     }
+    if with_receipt_refs:
+        surface["receiptRefs"] = []
     surfaces = [
         {**surface, **({"id": "legacy-first"} if mode == "explicit" else {})},
         {**surface, **({"id": "legacy-second"} if mode == "explicit" else {})},
@@ -1658,7 +1670,7 @@ def test_legacy_occurrences_survive_supported_parent_projection(
     surfaces = json.loads(original)["coverage"]["surfaces"]
     assert len(surfaces) == 2
     projected = []
-    for index, surface in enumerate(surfaces[:1] if missing else surfaces, 1):
+    for index, surface in enumerate(surfaces, 1):
         attempt = index if archived else 1
         provenance = {"workerId": worker_id, "attempt": attempt}
         if "id" in surface:
@@ -1666,6 +1678,7 @@ def test_legacy_occurrences_survive_supported_parent_projection(
         projected.append(
             {
                 **copy.deepcopy(surface),
+                "receiptRefs": surface.get("receiptRefs", []),
                 "id": f"{worker_id}-attempt-{attempt}-surface-{index}",
                 "provenance": provenance,
             }
@@ -1677,7 +1690,13 @@ def test_legacy_occurrences_survive_supported_parent_projection(
         {
             **scan.coverage,
             "completeness": "partial",
-            "surfaces": projected,
+            "surfaces": (
+                projected
+                if projection == "full"
+                else projected[:1]
+                if projection == "partial"
+                else []
+            ),
             "reviews": [
                 {"workerId": worker_id, "attempt": attempt, "completeness": "partial"}
                 for attempt in ((1, 2) if archived else (1,))

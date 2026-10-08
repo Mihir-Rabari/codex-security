@@ -1335,7 +1335,7 @@ def merge_saved_results(
         attempt = coverage_source_attempt(relative, worker)
         rows = drafts_by_path[relative]["coverage"].get(field, [])
         occurrence = (
-            sum(row == item for row in rows[:index])
+            sum(row == rows[index - 1] for row in rows[:index])
             if field == "surfaces" and isinstance(rows, list)
             else 1
         )
