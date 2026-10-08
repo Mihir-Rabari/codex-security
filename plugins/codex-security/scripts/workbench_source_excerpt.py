@@ -69,12 +69,12 @@ def scanned_source_text(scan: sqlite3.Row, target: Path, path: str) -> str | Non
     if revision == "unversioned":
         return None
     snapshot_digest = scan["target_snapshot_digest"]
+    if snapshot_digest is not None and snapshot_digest != clean_worktree_content_digest():
+        return None
     if (
         scan["diff_target_kind"] == "working_tree"
         and scan["diff_content_digest"] != clean_worktree_content_digest()
     ):
-        return None
-    if snapshot_digest is not None and snapshot_digest != clean_worktree_content_digest():
         return None
     object_name = f"{revision}:./{path}"
     content = git_bytes(target, "cat-file", "blob", object_name)
