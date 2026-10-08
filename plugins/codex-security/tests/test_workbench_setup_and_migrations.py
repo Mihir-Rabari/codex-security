@@ -87,6 +87,25 @@ EXPECTED_MIGRATIONS = [
 ]
 
 
+def initialize_git_repository_with_submodule(target: Path, dependency: Path) -> None:
+    initialize_git_repository(target)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            str(dependency),
+            "vendor/dependency",
+        ],
+        cwd=target,
+        check=True,
+    )
+    subprocess.run(["git", "commit", "-qam", "Add dependency"], cwd=target, check=True)
+
+
 def create_historical_database(
     before_version: int,
     extra_migrations: tuple[tuple[int, str, str], ...] = (),
@@ -453,22 +472,7 @@ def test_scan_start_rejects_dirty_initialized_submodule(tmp_path: Path) -> None:
     dependency = tmp_path / "dependency"
     initialize_git_repository(dependency)
     target = tmp_path / "target"
-    initialize_git_repository(target)
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            "-q",
-            str(dependency),
-            "vendor/dependency",
-        ],
-        cwd=target,
-        check=True,
-    )
-    subprocess.run(["git", "commit", "-qam", "Add dependency"], cwd=target, check=True)
+    initialize_git_repository_with_submodule(target, dependency)
     saved = create_saved_git_workspace(state_dir, target)
     (target / "vendor/dependency/README.md").write_text("dirty dependency\n")
 
@@ -483,22 +487,7 @@ def test_scan_start_allows_uninitialized_submodule(tmp_path: Path) -> None:
     dependency = tmp_path / "dependency"
     initialize_git_repository(dependency)
     target = tmp_path / "target"
-    initialize_git_repository(target)
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            "-q",
-            str(dependency),
-            "vendor/dependency",
-        ],
-        cwd=target,
-        check=True,
-    )
-    subprocess.run(["git", "commit", "-qam", "Add dependency"], cwd=target, check=True)
+    initialize_git_repository_with_submodule(target, dependency)
     subprocess.run(
         ["git", "submodule", "deinit", "-f", "-q", "--", "vendor/dependency"],
         cwd=target,
@@ -519,22 +508,7 @@ def test_scan_start_rejects_submodule_at_unrecorded_revision(tmp_path: Path) -> 
     (dependency / "README.md").write_text("second revision\n")
     subprocess.run(["git", "commit", "-qam", "Second revision"], cwd=dependency, check=True)
     target = tmp_path / "target"
-    initialize_git_repository(target)
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            "-q",
-            str(dependency),
-            "vendor/dependency",
-        ],
-        cwd=target,
-        check=True,
-    )
-    subprocess.run(["git", "commit", "-qam", "Add dependency"], cwd=target, check=True)
+    initialize_git_repository_with_submodule(target, dependency)
     submodule = target / "vendor/dependency"
     subprocess.run(["git", "checkout", "-q", revision_a], cwd=submodule, check=True)
     subprocess.run(
