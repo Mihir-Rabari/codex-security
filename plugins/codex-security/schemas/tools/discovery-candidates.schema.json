@@ -2,19 +2,6 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "codex-security://schemas/tools/discovery-candidates.schema.json",
   "$defs": {
-    "recordDiscoveryCandidatesInput": {
-      "type": "object",
-      "properties": {
-        "candidates": {
-          "type": "array",
-          "items": {
-            "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/rawDiscoveryCandidate"
-          }
-        }
-      },
-      "required": ["candidates"],
-      "additionalProperties": false
-    },
     "workbenchRecordDiscoveryCandidatesInput": {
       "type": "object",
       "properties": {
@@ -27,17 +14,6 @@
         }
       },
       "required": ["scanId", "candidates"],
-      "additionalProperties": false
-    },
-    "listCandidatesInput": {
-      "type": "object",
-      "properties": {
-        "cursor": {
-          "type": "string",
-          "pattern": "^(?:0|[1-9][0-9]*)$"
-        },
-        "limit": { "type": "integer", "minimum": 1, "maximum": 1000 }
-      },
       "additionalProperties": false
     },
     "workbenchListCandidatesInput": {

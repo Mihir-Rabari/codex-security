@@ -8,6 +8,7 @@ import discoveryCandidatesToolSchema from "../../schemas/tools/discovery-candida
 import type { ArtifactContext } from "./artifact-context.js";
 import {
   artifactDestination,
+  type ArtifactPage,
   paginateArtifactRows,
   readArtifactJsonl,
   readArtifactText,
@@ -55,11 +56,6 @@ export interface DiscoveryCandidatesInput {
   candidates: RawDiscoveryCandidate[];
 }
 
-export interface ListCodexSecurityCandidatesInput {
-  cursor?: string;
-  limit?: number;
-}
-
 export type CompactDiscoveryCandidate = z.infer<typeof candidateSchemaV1> &
   Record<string, unknown>;
 
@@ -70,40 +66,29 @@ export const compactDiscoveryCandidateSchema = loadArtifactZodSchema(
   "discoveryCandidate",
 ) as z.ZodType<CompactDiscoveryCandidate>;
 
-export const discoveryCandidatesInputSchema = loadArtifactZodSchema(
-  discoverySchemaDocuments,
-  discoveryCandidatesToolSchema.$id,
-  "recordDiscoveryCandidatesInput",
-) as z.ZodType<DiscoveryCandidatesInput>;
-
 export const workbenchDiscoveryCandidatesInputSchema = loadArtifactZodSchema(
   discoverySchemaDocuments,
   discoveryCandidatesToolSchema.$id,
   "workbenchRecordDiscoveryCandidatesInput",
 ) as z.ZodType<DiscoveryCandidatesInput & { scanId: string }>;
 
-export const listCodexSecurityCandidatesInputSchema = loadArtifactZodSchema(
-  discoverySchemaDocuments,
-  discoveryCandidatesToolSchema.$id,
-  "listCandidatesInput",
-) as z.ZodType<ListCodexSecurityCandidatesInput>;
-
 export const workbenchListCodexSecurityCandidatesInputSchema =
   loadArtifactZodSchema(
     discoverySchemaDocuments,
     discoveryCandidatesToolSchema.$id,
     "workbenchListCandidatesInput",
-  ) as z.ZodType<ListCodexSecurityCandidatesInput & { scanId: string }>;
+  ) as z.ZodType<ArtifactPage & { scanId: string }>;
 
 /**
  * Invoke the shared discovery normalizer. Only its canonical output persists;
  * raw candidate input is kept in a private temporary directory and always removed.
+ * The MCP registry validates the request before invoking this writer.
  */
 export async function recordCodexSecurityDiscoveryCandidates(
   input: DiscoveryCandidatesInput,
   context: ArtifactContext,
 ) {
-  const { candidates } = discoveryCandidatesInputSchema.parse(input);
+  const { candidates } = input;
   const pluginRoot = context.pluginRoot?.trim();
   if (!pluginRoot) {
     throw new Error(
@@ -202,17 +187,17 @@ export async function recordCodexSecurityDiscoveryCandidates(
 
 /** Read the actual compact ledger, including records added by later shared phases. */
 export async function listCodexSecurityCandidates(
-  input: ListCodexSecurityCandidatesInput,
+  input: ArtifactPage,
   context: ArtifactContext,
 ) {
-  const page = listCodexSecurityCandidatesInputSchema.parse(input);
+  // The MCP registry validates paging before invoking this reader.
   const rows = await readArtifactJsonl(
     context,
     [...discoveryComponents, "candidate_ledger.jsonl"],
     discoveryLabel,
     compactDiscoveryCandidateSchema,
   );
-  return paginateArtifactRows(rows, page, discoveryLabel);
+  return paginateArtifactRows(rows, input, discoveryLabel);
 }
 
 function discoveryNormalizationError(
