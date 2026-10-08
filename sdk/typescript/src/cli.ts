@@ -7176,81 +7176,100 @@ async function checkDeinitializedPatchSubmodules(
       { trim: false },
     )
   ).replace(/\n$/u, "");
-  for (const [path, entry] of after) {
+  submodules: for (const [path, entry] of after) {
     if (
       !entry.startsWith("160000 ") ||
       before.get(path) === entry ||
       existsSync(join(root, path, ".git"))
     )
       continue;
-    const keys = await run(
-      [
-        "config",
-        "--blob",
-        `${ref}:.gitmodules`,
-        "--null",
-        "--name-only",
-        "--fixed-value",
-        "--get-regexp",
-        "^submodule\\..*\\.path$",
-        path,
-      ],
-      { trim: false },
-    ).catch((error: unknown) => {
-      if (isJsonObject(error) && error["code"] === 1) return "";
-      throw error;
-    });
-    for (const key of keys.split("\0").filter(Boolean)) {
-      // --get-regexp can match an earlier repeated value; native --get selects its final value.
-      const selectedPath = await run(
-        ["config", "--blob", `${ref}:.gitmodules`, "--null", "--get", key],
+    // Deinitialization retains the original registration's object database.
+    const registrations =
+      parent &&
+      before.has(".gitmodules") &&
+      before.get(path)?.startsWith("160000 ")
+        ? [parent, ref]
+        : [ref];
+    for (const registration of registrations) {
+      const keys = await run(
+        [
+          "config",
+          "--blob",
+          `${registration}:.gitmodules`,
+          "--null",
+          "--name-only",
+          "--fixed-value",
+          "--get-regexp",
+          "^submodule\\..*\\.path$",
+          path,
+        ],
         { trim: false },
-      );
-      if (selectedPath !== `${path}\0`) continue;
-      const name = key.slice("submodule.".length, -".path".length);
-      const directory = (
-        await run(
+      ).catch((error: unknown) => {
+        if (isJsonObject(error) && error["code"] === 1) return "";
+        throw error;
+      });
+      for (const key of keys.split("\0").filter(Boolean)) {
+        // --get-regexp can match an earlier repeated value; native --get selects its final value.
+        const selectedPath = await run(
           [
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-path",
-            `modules/${name}`,
+            "config",
+            "--blob",
+            `${registration}:.gitmodules`,
+            "--null",
+            "--get",
+            key,
           ],
           { trim: false },
+        );
+        if (selectedPath !== `${path}\0`) continue;
+        const name = key.slice("submodule.".length, -".path".length);
+        const directory = (
+          await run(
+            [
+              "rev-parse",
+              "--path-format=absolute",
+              "--git-path",
+              `modules/${name}`,
+            ],
+            { trim: false },
+          )
+        ).replace(/\n$/u, "");
+        if (isOutsidePath(relative(modules, directory))) {
+          throw new CodexSecurityError(
+            "Submodule metadata resolves outside the selected repository's module directory.",
+          );
+        }
+        if (!existsSync(directory)) continue;
+        const nested = (args: string[], input?: string) =>
+          run(["--git-dir", directory, "--work-tree", root, ...args], {
+            environment: NESTED_PATCH_GIT_ENVIRONMENT,
+            input,
+          });
+        const commit = entry.split(" ")[2]!;
+        if (
+          (await nested(
+            ["cat-file", "--batch-check=%(objecttype)"],
+            `${commit}\n`,
+          )) !== "commit"
         )
-      ).replace(/\n$/u, "");
-      if (isOutsidePath(relative(modules, directory))) {
-        throw new CodexSecurityError(
-          "Submodule metadata resolves outside the selected repository's module directory.",
-        );
-      }
-      if (!existsSync(directory)) continue;
-      const nested = (args: string[], input?: string) =>
-        run(["--git-dir", directory, "--work-tree", root, ...args], {
-          environment: NESTED_PATCH_GIT_ENVIRONMENT,
-          input,
-        });
-      const commit = entry.split(" ")[2]!;
-      if (
-        (await nested(
-          ["cat-file", "--batch-check=%(objecttype)"],
-          `${commit}\n`,
-        )) !== "commit"
-      )
-        continue;
-      if (
-        !(await nested([
-          "for-each-ref",
-          "--count=1",
-          "--format=%(refname)",
-          "refs/remotes",
-        ]))
-      )
-        continue;
-      if (await nested(["rev-list", commit, "--not", "--remotes", "-n", "1"])) {
-        throw new CodexSecurityError(
-          `Submodule ${safePatchText(path)} contains a commit that is not available in its remote-tracking refs. Publish that commit before retrying this patch pull request.`,
-        );
+          continue;
+        if (
+          !(await nested([
+            "for-each-ref",
+            "--count=1",
+            "--format=%(refname)",
+            "refs/remotes",
+          ]))
+        )
+          continue submodules;
+        if (
+          await nested(["rev-list", commit, "--not", "--remotes", "-n", "1"])
+        ) {
+          throw new CodexSecurityError(
+            `Submodule ${safePatchText(path)} contains a commit that is not available in its remote-tracking refs. Publish that commit before retrying this patch pull request.`,
+          );
+        }
+        continue submodules;
       }
     }
   }

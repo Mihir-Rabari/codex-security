@@ -36,6 +36,10 @@ describe("patch change tracking", () => {
     "missing-deinit",
     "published-deinit-dangling",
     "missing-deinit-dangling",
+    "published-deinit-renamed",
+    "missing-deinit-renamed",
+    "published-deinit-renamed-other-store",
+    "missing-deinit-renamed-other-store",
     "push-no",
     "submodule-false",
   ])(
@@ -44,6 +48,8 @@ describe("patch change tracking", () => {
       const missing = mode.startsWith("missing");
       const deinitialized = mode.includes("deinit");
       const dangling = mode.endsWith("-dangling");
+      const renamed = mode.includes("-renamed");
+      const otherStore = mode.endsWith("-other-store");
       const { directory, git, remote } = await publicationRepository();
       const nested = join(directory, "nested");
       await mkdir(nested);
@@ -128,6 +134,27 @@ describe("patch change tracking", () => {
                 nestedIndex = await readFile(nestedIndexPath);
               }
               git("submodule", "deinit", "--force", "--", "nested");
+              if (renamed) {
+                git(
+                  "config",
+                  "--file",
+                  ".gitmodules",
+                  "--rename-section",
+                  "submodule.nested",
+                  "submodule.renamed",
+                );
+                if (otherStore) {
+                  const other = join(directory, ".git", "modules", "renamed");
+                  git("clone", "--bare", nestedGitDirectory, other);
+                  git(
+                    "--git-dir",
+                    other,
+                    "update-ref",
+                    "refs/remotes/other/main",
+                    after,
+                  );
+                }
+              }
             }
             output?.stdout.write("Fixed and checked.");
             return 0;
