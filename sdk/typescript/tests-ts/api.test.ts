@@ -3806,6 +3806,8 @@ describe("CodexSecurity orchestration", () => {
         }),
       });
       trace("fixture.ready");
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setTimeout(() => {}, 10_000);
       const operation = client.run(repository, {
         onActivity: () => {},
         onWarning: (warning) => warnings.push(warning),
@@ -3826,6 +3828,7 @@ describe("CodexSecurity orchestration", () => {
           else expect(messages).toHaveLength(1);
         }
       } finally {
+        clearTimeout(keepAlive);
         trace("cleanup.begin");
         denied.clear();
         firstRepeated();
