@@ -1,5 +1,5 @@
 import { statSync } from "node:fs";
-import { dirname, join, relative, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, sep, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual, parseArgs } from "node:util";
 import { parse as parseToml } from "smol-toml";
@@ -203,7 +203,11 @@ function booleanValue(value: string): boolean {
 }
 
 function compare(actual: unknown, op: string, expected: unknown): boolean {
-  if (op === "==") return isDeepStrictEqual(actual, expected);
+  if (op === "==")
+    return isDeepStrictEqual(
+      structuredClone(actual),
+      structuredClone(expected),
+    );
   if (op === ">=")
     return typeof actual === "bigint" && actual >= (expected as bigint);
   throw new Error(`unsupported comparison operator: ${diagnostic(op)}`);
@@ -301,6 +305,19 @@ function remediation(profile: Profile, context: Context): Table {
   return result;
 }
 
+export function* projectAncestors(directory: string): Iterable<string> {
+  for (let current = directory; ;) {
+    yield current;
+    // node:path recognizes ordinary UNC share roots, but not extended UNC roots.
+    const extendedUnc =
+      windows && current.slice(0, 8).toUpperCase() === "\\\\?\\UNC\\";
+    const ordinary = extendedUnc ? `\\\\${current.slice(8)}` : current;
+    const parent = windows ? win32.dirname(ordinary) : dirname(ordinary);
+    if (parent === ordinary) return;
+    current = extendedUnc ? win32.toNamespacedPath(parent) : parent;
+  }
+}
+
 function evaluate(values: Options): Table {
   const home = environmentValue("HOME");
   const path = (value: string) => normalizePath(expandHome(value, home));
@@ -387,12 +404,15 @@ function evaluate(values: Options): Table {
       throw new Error("project_root_markers must be an array of strings");
     let root = cwd;
     if (markers.length) {
-      for (let candidate = cwd; ; candidate = dirname(candidate)) {
-        if (markers.some((marker) => metadata(join(candidate, marker)))) {
+      for (const candidate of projectAncestors(cwd)) {
+        if (
+          markers.some((marker) =>
+            metadata(isAbsolute(marker) ? marker : join(candidate, marker)),
+          )
+        ) {
           root = candidate;
           break;
         }
-        if (dirname(candidate) === candidate) break;
       }
     }
     let trust: string | null = null;
@@ -400,10 +420,16 @@ function evaluate(values: Options): Table {
       if (!isTable(layer.config.projects)) continue;
       let project = layer.config.projects[root];
       if (!isTable(project) && windows)
-        project = Object.entries(layer.config.projects).find(
-          ([name]) =>
-            resolvedPathText(name, false).toLowerCase() === root.toLowerCase(),
-        )?.[1];
+        project = Object.entries(layer.config.projects).find(([name]) => {
+          try {
+            return (
+              resolvedPathText(name, false).toLowerCase() === root.toLowerCase()
+            );
+          } catch {
+            // Unavailable saved projects do not affect trust for this directory.
+            return false;
+          }
+        })?.[1];
       if (isTable(project) && typeof project.trust_level === "string") {
         trust = project.trust_level;
         break;

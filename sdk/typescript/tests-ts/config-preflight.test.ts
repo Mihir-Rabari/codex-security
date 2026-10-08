@@ -1,4 +1,4 @@
-import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
@@ -556,6 +556,46 @@ test("discovery canonicalizes aliases before checking project trust", async () =
   expect(capacity(result.payload!).actual).toBe(9);
 });
 
+test.skipIf(process.platform !== "win32")(
+  "unresolved saved project aliases do not block a trusted local project",
+  async () => {
+    const root = await temporaryDirectory(),
+      home = join(root, "home"),
+      repo = join(root, "repo"),
+      removed = join(root, "removed"),
+      stale = join(root, "stale");
+    await mkdir(home);
+    await mkdir(join(repo, ".git"), { recursive: true });
+    await mkdir(join(repo, ".codex"));
+    await mkdir(removed);
+    await symlink(removed, stale, "junction");
+    await rm(removed, { recursive: true });
+    await writeFile(
+      join(home, "config.toml"),
+      stringifyToml({
+        projects: {
+          [stale]: { trust_level: "trusted" },
+          [repo.toUpperCase()]: { trust_level: "trusted" },
+        },
+      }),
+    );
+    await writeFile(
+      join(repo, ".codex/config.toml"),
+      "[agents]\nmax_threads=9\n",
+    );
+    const args = ["--profile", "security_scan", ...v1];
+    const invalid = await run([...args, "--cwd", stale], { CODEX_HOME: home });
+    expect(invalid.status).toBe(2);
+    expect(invalid.payload!.status).toBe("error");
+    const result = await run([...args, "--cwd", repo], { CODEX_HOME: home });
+    expect(result.status).toBe(0);
+    expect(result.payload!.config_discovery?.["project_trust_level"]).toBe(
+      "trusted",
+    );
+    expect(capacity(result.payload!).actual).toBe(9);
+  },
+);
+
 test("relative CODEX_HOME keeps its literal spelling and resolves from the helper cwd", async () => {
   const root = await temporaryDirectory();
   const home =
@@ -787,6 +827,35 @@ test.each([[], ["ROOT.marker"]])(
   },
 );
 
+test("absolute project-root markers retain trusted cwd configuration", async () => {
+  const root = await temporaryDirectory(),
+    home = join(root, "home"),
+    cwd = join(root, "repo", "child"),
+    marker = join(root, "ROOT.marker");
+  await mkdir(home);
+  await mkdir(join(cwd, ".codex"), { recursive: true });
+  await writeFile(marker, "");
+  await writeFile(
+    join(home, "config.toml"),
+    stringifyToml({
+      project_root_markers: [marker],
+      agents: { max_threads: 3 },
+      projects: { [cwd]: { trust_level: "trusted" } },
+    }),
+  );
+  await writeFile(
+    join(cwd, ".codex/config.toml"),
+    "[agents]\nmax_threads=19\n",
+  );
+  const result = await run(
+    ["--profile", "security_scan", "--cwd", cwd, ...v1],
+    { CODEX_HOME: home },
+  );
+  expect(result.status).toBe(0);
+  expect(result.payload!.config_discovery?.["project_root"]).toBe(cwd);
+  expect(capacity(result.payload!).actual).toBe(19);
+});
+
 test("malformed TOML reports a structured error without changing the file", async () => {
   const result = await configured("[features\ngoals=true\n");
   expect(result.status).toBe(2);
@@ -916,5 +985,69 @@ test("custom registries preserve blocking, incomplete, and ready exit statuses",
     ]);
     expect(result.status).toBe(code);
     expect(result.payload!.status).toBe(status);
+  }
+});
+
+test("effective JSON tables and arrays compare by value with TOML requirements", async () => {
+  const root = await temporaryDirectory(),
+    registry = join(root, "registry.toml"),
+    config = join(root, "config.toml");
+  await writeFile(config, "");
+  const table = { enabled: true, nested: { capacity: 9007199254740993n } };
+  for (const [expected, matching, different] of [
+    [
+      table,
+      '{"enabled":true,"nested":{"capacity":9007199254740993}}',
+      '{"enabled":true,"nested":{"capacity":9007199254740992}}',
+    ],
+    [
+      [table],
+      '[{"enabled":true,"nested":{"capacity":9007199254740993}}]',
+      '[{"enabled":false,"nested":{"capacity":9007199254740993}}]',
+    ],
+  ] as const) {
+    await writeFile(
+      registry,
+      stringifyToml({
+        version: 1,
+        capabilities: {
+          check: {
+            kind: "config",
+            path: "synthetic",
+            op: "==",
+            value: expected,
+          },
+        },
+        profiles: {
+          custom: {
+            description: "Synthetic structured configuration",
+            requirements: [
+              {
+                capability: "check",
+                severity: "block",
+                reason: "Synthetic requirement",
+              },
+            ],
+          },
+        },
+      }),
+    );
+    for (const [value, code] of [
+      [matching, 0],
+      [different, 1],
+    ] as const) {
+      const result = await run([
+        "--profile",
+        "custom",
+        "--registry",
+        registry,
+        "--config",
+        config,
+        "--effective-config",
+        `synthetic=${value}`,
+      ]);
+      expect(result.status).toBe(code);
+      expect(result.payload!.results[0]!.status).toBe(code ? "fail" : "pass");
+    }
   }
 });
