@@ -10,7 +10,11 @@ import {
   type TurnOptions,
 } from "@openai/codex-sdk";
 import { z } from "incur";
-import type { CodexSecuritySurface, ScanAuthMode } from "./api.js";
+import {
+  scanCodexHome,
+  type CodexSecuritySurface,
+  type ScanAuthMode,
+} from "./api.js";
 import {
   accountStatus,
   configuredCodexHome,
@@ -535,7 +539,10 @@ async function startReadOnlyCodexThread(
   thread: ReturnType<ReadOnlyCodex["startThread"]>;
   cleanup?: () => Promise<void>;
 }> {
-  const source = options.environment ?? process.env;
+  const source = {
+    ...(options.environment ?? process.env),
+    CODEX_HOME: scanCodexHome(options.environment ?? process.env),
+  };
   const config =
     options.config === undefined
       ? undefined
@@ -604,7 +611,7 @@ async function startReadOnlyCodexThread(
     scanCyberAccessConfig(providerConfig, options.cyberAccessProgram),
   )["features"] as JsonObject | undefined;
   const environment = await comparisonEnvironment(
-    options.environment,
+    source,
     accountStatus,
     options.signal,
     undefined,

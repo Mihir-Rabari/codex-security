@@ -140,12 +140,13 @@ describe("semantic scan comparison", () => {
     "amazon-bedrock",
     "command",
     "file-command-shadow",
+    "file-command-shadow-lowercase",
   ])(
     "automatic matching retains the per-scan %s provider",
     async (selection) => {
       const home = await temporaryDirectory();
       const commandProfile =
-        selection === "command" || selection === "file-command-shadow";
+        selection === "command" || selection.startsWith("file-command-shadow");
       const providerName = commandProfile ? "synthetic.command" : selection;
       const provider = {
         ...(selection === "amazon-bedrock"
@@ -169,26 +170,25 @@ describe("semantic scan comparison", () => {
             ? {}
             : { env_key: "SYNTHETIC_PROVIDER_KEY" }),
       };
-      const homeConfig =
-        selection === "file-command-shadow"
-          ? stringify({
-              profiles: {
-                review: {
-                  model_provider: providerName,
-                  model_providers: {
-                    [providerName]: {
-                      ...provider,
-                      auth: {
-                        command: "synthetic-ambient-auth",
-                      },
+      const homeConfig = selection.startsWith("file-command-shadow")
+        ? stringify({
+            profiles: {
+              review: {
+                model_provider: providerName,
+                model_providers: {
+                  [providerName]: {
+                    ...provider,
+                    auth: {
+                      command: "synthetic-ambient-auth",
                     },
                   },
                 },
               },
-            })
-          : "";
+            },
+          })
+        : "";
       await writeFile(join(home, "config.toml"), homeConfig);
-      if (selection === "file-command-shadow") {
+      if (selection.startsWith("file-command-shadow")) {
         await writeFile(
           join(home, "review.config.toml"),
           stringify({
@@ -235,14 +235,15 @@ describe("semantic scan comparison", () => {
           environment: {
             PATH: process.env["PATH"],
             SystemRoot: process.env["SystemRoot"],
-            CODEX_HOME: home,
+            [selection.endsWith("lowercase") ? "codex_home" : "CODEX_HOME"]:
+              home,
             CODEX_SECURITY_SCAN_ID: "current",
             OPENAI_API_KEY: "synthetic-ambient-key",
             SYNTHETIC_PROVIDER_KEY: "synthetic-provider-key",
           },
           config: {
             codexOverrides: {
-              ...(selection === "file-command-shadow"
+              ...(selection.startsWith("file-command-shadow")
                 ? { profile: "review" }
                 : {
                     profile: "selected",
