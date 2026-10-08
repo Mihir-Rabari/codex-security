@@ -1971,6 +1971,12 @@ def test_target_continuation_reuses_terminal_coordinator_across_threads(
     assert continued["startDisposition"] == "joined"
     assert continued["deepScan"]["scanId"] == scan_id
     assert continued["deepScan"]["manifestPath"] == str(manifest)
+    assert get_scan(state_dir, scan_id)["scan"]["progress"]["independentReviews"] == {
+        "active": 0,
+        "completed": 0,
+        "maximum": 40,
+        "consolidating": True,
+    }
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM workspaces").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone() == (1,)
@@ -2980,6 +2986,12 @@ def test_failure_capped_completion_preserves_partial_results_and_exact_omissions
     assert finished["terminalReason"] == "capped"
     assert finished["config"]["maxDiscoveryRuns"] == 10
     assert finished["dispatchedCount"] == 4
+    assert get_scan(state_dir, scan_id)["scan"]["progress"]["independentReviews"] == {
+        "active": 0,
+        "completed": 3,
+        "maximum": 10,
+        "consolidating": True,
+    }
     assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == "partial"
     assert len(json.loads((scan_dir / "findings.json").read_text())["findings"]) == 1
     assert (

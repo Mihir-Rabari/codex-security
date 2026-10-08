@@ -666,7 +666,11 @@ Concurrency defaults to four repositories. `--max-attempts` defaults to one
 attempt per pending repository per invocation. Repeating the command continues
 the campaign, skips completed results, and starts pending attempts. Occupied
 attempt directories stop that repository and suggest `--recover`.
-Changed project configuration requires a new output directory.
+Changes to project configuration, extracted knowledge-base text, staged document
+filenames, direct Codex overrides, or explicit `--plugin-path`/`--python` selections
+require a new output directory. Version 1 manifests also require a new directory
+because their original knowledge inputs and direct overrides cannot be verified.
+Worker and retry counts can change when resuming.
 
 ### Recovering failed or interrupted bulk scans
 
