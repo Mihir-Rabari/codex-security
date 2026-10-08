@@ -586,7 +586,7 @@ export async function discoverScaInputs(
     try {
       const metadata = await lstat(path).catch(
         (error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOENT") return null;
+          if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
           throw error;
         },
       );

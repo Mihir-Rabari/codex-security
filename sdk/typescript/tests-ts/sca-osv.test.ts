@@ -216,6 +216,12 @@ describe("SCA input selection", () => {
     expect(result.coverage.status).toBe("partial");
     expect(result.coverage.inputs).toEqual(discovered.inputs);
     expect(result.components).toHaveLength(1);
+    // A non-directory ancestor does not make a sparse input an ordinary deletion.
+    await writeFile(join(repository, "omitted"), "replacement file\n");
+    expect((await discoverScaInputs(repository)).inputs).toEqual(
+      discovered.inputs,
+    );
+    await rm(join(repository, "omitted"));
     await rm(join(repository, "included", "package-lock.json"));
     expect((await discoverScaInputs(repository)).inputs).toEqual([
       discovered.inputs[1]!,
@@ -420,40 +426,57 @@ describe("SCA input selection", () => {
       ["nested/package-lock.json", "excluded"],
     ]);
   });
-  test("scans the working-tree lockfile replacement regardless of deletion staging", async () => {
-    const { repository, output } = await setup();
-    await execFile("git", ["init", repository]);
-    const oldLock = join(repository, "package-lock.json");
-    await writeFile(oldLock, npmLock());
-    await execFile("git", ["-C", repository, "add", "package-lock.json"]);
-    await rm(oldLock);
-    await writeFile(
-      join(repository, "pnpm-lock.yaml"),
-      "lockfileVersion: '9.0'\npackages: {}\n",
-    );
-    const before = await discoverScaInputs(repository);
-    expect(before.inputs.map((item) => [item.path, item.status])).toEqual([
-      ["pnpm-lock.yaml", "scanned"],
-    ]);
-    const result = await runOsvScan(
-      { repositoryPath: repository, outputDir: output },
-      {
-        executable: process.execPath,
-        runProcess: async (_executable, argv) =>
-          argv[0] === "--version"
-            ? { stdout: "osv-scanner version: 2.6.0", stderr: "", exitCode: 0 }
-            : {
-                stdout: JSON.stringify(rawOutput("pnpm-lock.yaml")),
-                stderr: "",
-                exitCode: 0,
-              },
-      },
-    );
-    expect(result.status).toBe("completed");
-    expect(result.coverage.inputs).toEqual(before.inputs);
-    await execFile("git", ["-C", repository, "add", "--update"]);
-    expect((await discoverScaInputs(repository)).inputs).toEqual(before.inputs);
-  });
+  test.each([false, true])(
+    "scans working-tree replacements before and after staging, ancestor replaced=%p",
+    async (replaceAncestor) => {
+      const { repository, output } = await setup();
+      await execFile("git", ["init", repository]);
+      const oldDirectory = replaceAncestor
+        ? join(repository, "old workspace")
+        : repository;
+      if (replaceAncestor) await mkdir(oldDirectory);
+      const oldLock = join(oldDirectory, "package-lock.json");
+      await writeFile(oldLock, npmLock());
+      await execFile("git", ["-C", repository, "add", "."]);
+      await rm(oldLock);
+      if (replaceAncestor) {
+        await rm(oldDirectory, { recursive: true });
+        await writeFile(oldDirectory, "replacement file\n");
+      }
+      await writeFile(
+        join(repository, "pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\npackages: {}\n",
+      );
+      const before = await discoverScaInputs(repository);
+      expect(before.inputs.map((item) => [item.path, item.status])).toEqual([
+        ["pnpm-lock.yaml", "scanned"],
+      ]);
+      const result = await runOsvScan(
+        { repositoryPath: repository, outputDir: output },
+        {
+          executable: process.execPath,
+          runProcess: async (_executable, argv) =>
+            argv[0] === "--version"
+              ? {
+                  stdout: "osv-scanner version: 2.6.0",
+                  stderr: "",
+                  exitCode: 0,
+                }
+              : {
+                  stdout: JSON.stringify(rawOutput("pnpm-lock.yaml")),
+                  stderr: "",
+                  exitCode: 0,
+                },
+        },
+      );
+      expect(result.status).toBe("completed");
+      expect(result.coverage.inputs).toEqual(before.inputs);
+      await execFile("git", ["-C", repository, "add", "--update"]);
+      expect((await discoverScaInputs(repository)).inputs).toEqual(
+        before.inputs,
+      );
+    },
+  );
   test("reports unsupported versions and malformed lockfiles", async () => {
     const { repository } = await setup();
     await Promise.all([
