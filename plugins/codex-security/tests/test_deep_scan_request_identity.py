@@ -160,8 +160,8 @@ def test_begin_and_resume_after_recorded_deep_scan_tables_are_repaired(
         connection.execute("DROP TABLE deep_scan_workers")
         connection.execute("DROP TABLE deep_scan_runs")
         assert connection.execute(
-            "SELECT version FROM schema_migrations WHERE version IN (11, 43) ORDER BY version"
-        ).fetchall() == [(11,), (43,)]
+            "SELECT version FROM schema_migrations WHERE version IN (11, 47) ORDER BY version"
+        ).fetchall() == [(11,), (47,)]
 
     thread_id = "thread-deep-scan" if resume_existing else "thread-new-request"
     expected_context = original_context if resume_existing else "Review SQL injection only."
@@ -222,7 +222,7 @@ def test_upgrade_keeps_unknown_discovery_context_resumable_but_not_reusable(
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN discovery_user_context_json")
         if not migration_recorded:
-            connection.execute("DELETE FROM schema_migrations WHERE version = 43")
+            connection.execute("DELETE FROM schema_migrations WHERE version = 47")
     resumed = run_workbench(
         state_dir,
         "begin-deep-scan",
