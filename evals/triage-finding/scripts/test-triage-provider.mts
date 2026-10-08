@@ -773,6 +773,12 @@ for (const suite of ["SAST", "calibration"] as const) {
         fs.mkdtempSync(path.join(os.tmpdir(), "sast-provider-replay-")),
       );
       t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+      const targetRepository = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), "sast-custom-target-")),
+      );
+      t.after(() =>
+        fs.rmSync(targetRepository, { recursive: true, force: true }),
+      );
       const capture = path.join(root, "captures.jsonl");
       const failure = path.join(root, "failure");
       const fakeCodex = path.join(root, "codex");
@@ -837,7 +843,7 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
             {
               vars:
                 suite === "SAST"
-                  ? { target_repo: root }
+                  ? { target_repo: targetRepository }
                   : {
                       calibration_repo: "calibration-0123456789abcdef",
                       calibration_repo_root: "",
@@ -993,6 +999,7 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
             ? [
                 path.join(evalRoot, "artifacts", "sastbench-targets"),
                 path.join(evalRoot, "artifacts", "sastbench-git-cache"),
+                targetRepository,
               ]
             : [
                 path.join(

@@ -16,6 +16,7 @@ providers:
       additional_directories:
         - "{{env.SASTBENCH_TARGET_ROOT}}"
         - "{{env.SASTBENCH_GIT_CACHE_ROOT}}"
+        - "{{target_repo}}"
       skip_git_repo_check: true
       approval_policy: never
       # Pin a value supported by the eval's Codex SDK instead of inheriting a
