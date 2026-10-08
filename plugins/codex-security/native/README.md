@@ -2,7 +2,7 @@
 
 These internal bindings supply OS operations that Node does not expose. The `resolve-security-md` helper uses native account lookup on Unix and native path, file, and directory operations on Windows.
 
-The Unix Node-API 8 binding is typed in `binding.mts`. `userHome` looks up raw username bytes through the operating system and returns raw home-directory bytes or a missing result, without Git.
+The Unix Node-API 8 binding is typed in `binding.mts`. `userHome` looks up raw username bytes through the operating system and returns raw home-directory bytes or a missing result, without Git. `unixEnvironment` reads one named environment value as raw bytes, preserving the distinction between empty and unset values. This keeps configured filesystem locations such as `CODEX_HOME` intact when Node would replace undecodable bytes.
 
 Install the pinned Rust toolchain and the existing TypeScript dependencies, then run from the repository root:
 
@@ -15,7 +15,7 @@ cargo +1.97.1 fmt --check --manifest-path plugins/codex-security/native/Cargo.to
 cargo +1.97.1 clippy --locked --manifest-path plugins/codex-security/native/Cargo.toml -- -D warnings
 ```
 
-The proof runs without Python. It checks current and named account lookup, missing accounts, and embedded-NUL rejection. CI invokes it with an empty `PATH`.
+The proof runs without Python. It checks current and named account lookup, missing accounts, and embedded-NUL rejection. A shell-launched child verifies raw environment bytes, empty values and missing values. CI invokes it with an empty `PATH`.
 
 Build outputs stay under ignored `target` and `dist` directories. Linux output directories include the C runtime: `linux-x64-gnu`, `linux-arm64-gnu`, `linux-x64-musl`, and `linux-arm64-musl`. The dependency-free `platform.mts` helper distinguishes glibc from musl using the Node diagnostic report header, without a subprocess. macOS and Windows retain their platform and architecture directories. Source, Cargo registry, and compiler paths are remapped before compilation; actual payload bytes are checked for private paths. Before an artifact is uploaded, run:
 
