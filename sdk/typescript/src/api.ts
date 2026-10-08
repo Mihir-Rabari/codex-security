@@ -840,9 +840,11 @@ export class CodexSecurity {
           this.#dependencies.environment,
           workbench,
           session.python,
-          workbenchOptions,
+          { workbenchOptions },
         );
-        const source = await workflow.sourceSnapshot(inputs.repository, true);
+        const source = await workflow.sourceSnapshot(inputs.repository, {
+          optional: true,
+        });
         if (source !== null) {
           const model = scanModelConfiguration(session.effectiveConfig);
           const binding = {
@@ -909,10 +911,9 @@ export class CodexSecurity {
           const saved = await workflow.getReview(reviewKey);
           if (saved !== null) {
             await checkTarget();
-            const current = await workflow.sourceSnapshot(
-              inputs.repository,
-              true,
-            );
+            const current = await workflow.sourceSnapshot(inputs.repository, {
+              optional: true,
+            });
             if (current !== null) {
               if (workflowDigest(current) !== workflowDigest(source)) {
                 throw new CodexSecurityError(
@@ -995,7 +996,9 @@ export class CodexSecurity {
       const assessment = { ...result, outputDir, threadId };
       if (checkpoint !== undefined && (await canCache())) {
         const { workflow, binding, key } = checkpoint;
-        const current = await workflow.sourceSnapshot(inputs.repository, true);
+        const current = await workflow.sourceSnapshot(inputs.repository, {
+          optional: true,
+        });
         if (current !== null) {
           if (workflowDigest(current) !== workflowDigest(binding["source"])) {
             throw new CodexSecurityError(

@@ -31,9 +31,20 @@ export interface WorkflowState extends WorkflowBinding {
       status: "pending" | "running" | "failed" | "completed";
       result?: unknown;
       error?: string;
-      pendingWrite?: { groups: string[][] };
+      pendingWrite?: DedupePendingWrite;
     }
   >;
+}
+
+export interface DedupePendingWrite {
+  groups: string[][];
+  local?: { inputDigest: string; source: JsonObject; gitDisabled?: boolean };
+}
+
+interface SourceSnapshotOptions {
+  optional?: boolean;
+  gitDisabled?: boolean;
+  privateStatePaths?: readonly string[];
 }
 
 export function workflowDigest(value: unknown): string {
@@ -64,11 +75,15 @@ export class FindingWorkflow {
     private readonly environment: NodeJS.ProcessEnv = process.env,
     private readonly workbench: typeof runWorkbench = runWorkbench,
     private readonly pythonPath?: string,
-    options?: WorkbenchCommandOptions,
+    private readonly selection: {
+      protectedRoot?: string;
+      workbenchOptions?: WorkbenchCommandOptions;
+    } = {},
   ) {
     if (!id.trim())
       throw new CodexSecurityError("workflowId must be a nonempty string.");
-    if (options !== undefined) this.options = Promise.resolve(options);
+    if (selection.workbenchOptions !== undefined)
+      this.options = Promise.resolve(selection.workbenchOptions);
   }
 
   async protectArtifacts(scanDir: string): Promise<void> {
@@ -134,20 +149,27 @@ export class FindingWorkflow {
     return context["scan"] as JsonObject;
   }
 
-  async sourceSnapshot(repository: string): Promise<JsonObject>;
   async sourceSnapshot(
     repository: string,
-    optional: true,
+    options?: SourceSnapshotOptions & { optional?: false },
+  ): Promise<JsonObject>;
+  async sourceSnapshot(
+    repository: string,
+    options: SourceSnapshotOptions & { optional: true },
   ): Promise<JsonObject | null>;
   async sourceSnapshot(
     repository: string,
-    optional?: true,
+    options: SourceSnapshotOptions = {},
   ): Promise<JsonObject | null> {
     return (
       await this.request({
         action: "source",
         repository,
-        ...(optional ? { optional: true } : {}),
+        ...(options.optional ? { optional: true } : {}),
+        ...(options.gitDisabled ? { gitDisabled: true } : {}),
+        ...(options.privateStatePaths?.length
+          ? { privateStatePaths: options.privateStatePaths }
+          : {}),
       })
     )["source"] as JsonObject | null;
   }
@@ -166,7 +188,7 @@ export class FindingWorkflow {
 
   async prepareDedupe(
     result: unknown,
-    pendingWrite: { groups: string[][] },
+    pendingWrite: DedupePendingWrite,
   ): Promise<void> {
     await this.command({
       action: "prepare-dedupe",
@@ -197,6 +219,7 @@ export class FindingWorkflow {
       python: await resolvePluginPython({
         environment: this.environment,
         configuredPath: this.pythonPath,
+        protectedRoot: this.selection.protectedRoot,
       }),
       environment: workbenchEnvironment(this.environment),
       failureMessage: "Could not save or resume the findings workflow",

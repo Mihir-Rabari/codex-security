@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 from contextlib import closing
+from pathlib import Path
 
 import pytest
 
@@ -14,6 +15,60 @@ def workflow(api, connection, action, *, workflow_id="synthetic-workflow", **pay
     return api["finding_workflow"](
         connection, {"id": workflow_id, "action": action, **payload}, TIMESTAMP
     )
+
+
+@pytest.mark.parametrize("optional", [False, True])
+def test_source_snapshot_excludes_private_storage_without_hiding_source(
+    workbench_api, workbench_db, tmp_path, monkeypatch, optional
+):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    source = repository / "source.py"
+    source.write_text("original source")
+    private = repository / "native-state"
+    private.mkdir()
+    database = private / "state.sqlite"
+    database.write_text("synthetic state")
+    original_iterdir = Path.iterdir
+
+    def inspect(path):
+        assert path != private, "private storage must not be traversed"
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", inspect)
+
+    def snapshot():
+        return workflow(
+            workbench_api,
+            workbench_db,
+            "source",
+            repository=str(repository),
+            privateStatePaths=[str(private)],
+            optional=optional,
+        )["source"]
+
+    before = snapshot()
+    database.write_text("later native state")
+    assert snapshot() == before
+    assert before["privateStatePaths"] == [str(private)]
+    source.write_text("changed source")
+    assert snapshot()["content"] != before["content"]
+    with pytest.raises(SystemExit, match="repository root"):
+        workflow(
+            workbench_api,
+            workbench_db,
+            "source",
+            repository=str(repository),
+            privateStatePaths=[str(repository)],
+        )
+    with pytest.raises(SystemExit, match="absolute paths"):
+        workflow(
+            workbench_api,
+            workbench_db,
+            "source",
+            repository=str(repository),
+            privateStatePaths=["relative-state"],
+        )
 
 
 @pytest.mark.parametrize("stage", ["scan", "publish", "dedupe"])
