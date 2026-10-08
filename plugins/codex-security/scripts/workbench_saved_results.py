@@ -1740,7 +1740,7 @@ def merge_saved_results(
 
     accepted_projected_records: dict[tuple[str, int, str], list[dict[str, Any]]] = {}
     for relative, draft, source_owner in sources:
-        if source_owner is None or relative not in current_results | selected_observations.keys():
+        if source_owner is None:
             continue
         worker = workers_by_id[source_owner]
         for field in ("surfaces", "explicitExclusions", "deferred"):

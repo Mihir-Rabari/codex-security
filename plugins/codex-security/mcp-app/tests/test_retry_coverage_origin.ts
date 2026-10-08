@@ -923,3 +923,94 @@ for (const mode of ["idless", "explicit", "mixed"]) {
     });
   }
 }
+
+for (const evidence of ["same", "changed", "none"] as const) {
+  for (const explicitId of [false, true]) {
+    test(`retry resubmitted surface keeps receipt-backed identity: evidence=${evidence}, explicit=${explicitId}`, async () => {
+      const f = await fixture();
+      try {
+        f.context.deepReducer.claimedWorkers[0].attempt = 2;
+        const surface = {
+          ...(explicitId ? { id: "authored-review" } : {}),
+          label: "Retained review",
+          disposition: "needs_follow_up",
+          receiptRefs: evidence === "none" ? [] : ["artifacts/review.txt"],
+        };
+        const inherited = workerDraft([], {
+          complete: false,
+          coverage: {
+            completeness: "partial",
+            surfaces: [surface],
+            explicitExclusions: [],
+            deferred: [
+              {
+                id: "pending-review",
+                reason: "Retained validation remains unresolved.",
+              },
+            ],
+          },
+        });
+        if (evidence !== "none") {
+          await mkdir(path.join(f.output, "artifacts"), { recursive: true });
+          await writeFile(
+            path.join(f.output, "artifacts/review.txt"),
+            "Original synthetic review.\n",
+          );
+        }
+        await writeFile(f.resultPath, JSON.stringify(inherited));
+        const archive = path.join(f.workerRoot, "attempts", "attempt-01");
+        await archiveDirectory(f.output, archive);
+        const archiveResult = path.join(archive, "result.json");
+        const before = await readFile(archiveResult);
+        await mkdir(f.output, { recursive: true });
+        if (evidence !== "none") {
+          await mkdir(path.join(f.output, "artifacts"), { recursive: true });
+          await writeFile(
+            path.join(f.output, "artifacts/review.txt"),
+            evidence === "changed"
+              ? "New independent review.\n"
+              : "Original synthetic review.\n",
+          );
+        }
+        await recordCodexSecurityWorkerScanDraft(
+          { root: f.output, repoRoot: f.root, scanId, layout: "worker" },
+          { ...inherited, complete: true },
+        );
+        const source = (await readDeepReductionSources(f.context))
+          .discoveries[0].coverage;
+        if (evidence !== "changed") {
+          assert.equal(
+            source.surfaces.length,
+            1,
+            JSON.stringify(source.surfaces),
+          );
+          assert.equal(source.surfaces[0].provenance.attempt, 1);
+        } else {
+          assert.equal(source.surfaces.length, explicitId ? 1 : 2);
+          assert.ok(
+            source.surfaces.some(
+              (row: { provenance: { attempt: number } }) =>
+                row.provenance.attempt === 2,
+            ),
+          );
+        }
+        assert.deepEqual(await readFile(archiveResult), before);
+        for (const row of source.surfaces)
+          for (const ref of row.receiptRefs)
+            assert.equal(
+              await readFile(
+                path.join(f.context.deepReducer.scanRoot, ref),
+                "utf8",
+              ),
+              ref.includes("/attempts/")
+                ? "Original synthetic review.\n"
+                : evidence === "changed"
+                  ? "New independent review.\n"
+                  : "Original synthetic review.\n",
+            );
+      } finally {
+        await rm(f.root, { recursive: true, force: true });
+      }
+    });
+  }
+}

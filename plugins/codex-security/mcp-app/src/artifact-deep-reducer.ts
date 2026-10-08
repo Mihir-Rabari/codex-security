@@ -175,7 +175,6 @@ export async function readDeepReductionSources(
             ).findIndex(
               (current, index) =>
                 !matchedCurrentSurfaces.has(index) &&
-                current.id === undefined &&
                 matchesSavedCoverageSource(
                   "surfaces",
                   current,

@@ -3,6 +3,7 @@ import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
   parsePersistedScanDraft,
+  matchesSavedCoverageSource,
   parseScanDraft,
   preserveFindingDetails,
   saveScanDraftCheckpoint,
@@ -309,43 +310,7 @@ function unknownSourceCoverage(): ScanDraftInput["coverage"] {
   };
 }
 
-export function matchesSavedCoverageSource(
-  field: string,
-  item: Record<string, unknown>,
-  saved: unknown,
-  archivePrefix: string,
-  receiptDigests?: ReadonlyMap<string, string>,
-): boolean {
-  const original =
-    typeof saved === "string" ? { question: saved } : structuredClone(saved);
-  const normalized = structuredClone(item);
-  if (isRecord(original) && original.id === undefined) delete normalized.id;
-  if (field === "surfaces" && isRecord(original)) {
-    original.receiptRefs ??= [];
-    normalized.receiptRefs ??= [];
-    if (
-      receiptDigests !== undefined &&
-      !(original.receiptRefs as string[]).every((ref, index) => {
-        const digest = receiptDigests.get(ref);
-        return (
-          digest !== undefined &&
-          digest ===
-            receiptDigests.get((normalized.receiptRefs as string[])[index]!)
-        );
-      })
-    )
-      return false;
-    for (const row of [original, normalized])
-      row.receiptRefs = (row.receiptRefs as string[]).map((ref) => {
-        if (!ref.startsWith(archivePrefix)) return ref;
-        const saved = ref.slice(archivePrefix.length);
-        return /^attempt-[0-9]+\//u.test(saved)
-          ? saved.slice(saved.indexOf("/") + 1)
-          : ref;
-      });
-  }
-  return isDeepStrictEqual(original, normalized);
-}
+export { matchesSavedCoverageSource } from "../artifact-scan-draft.js";
 
 /** Qualify worker-local IDs and receipt paths before combining accepted coverage. */
 export function projectDiscoveryCoverage(
