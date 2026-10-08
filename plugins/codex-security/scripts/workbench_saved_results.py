@@ -1180,7 +1180,7 @@ def merge_saved_results(
         ]
 
     retained_surface_ids: dict[tuple[str, str, int], dict[str, Any]] = {}
-    # Each saved occurrence gets one projection; repeated lookups reuse its assignment.
+    # Reuse each saved occurrence's projection.
     retained_records: dict[tuple[str, str, str, int], dict[str, Any] | None] = {}
     matched_records: dict[tuple[str, str, str], list[tuple[Any, int]]] = {}
 
