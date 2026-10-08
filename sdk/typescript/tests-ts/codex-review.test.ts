@@ -53,6 +53,8 @@ const failureReasons: Record<string, string> = {
     "Required review check could not be completed: Artifact upload was blocked by the content policy.",
   "required-source-error-publication-policy":
     "Required review check could not be completed: Artifact publication was refused due to the content policy.",
+  "required-source-error-publication-refusal":
+    "Required review check could not be completed: Artifact publication refusal due to the content policy.",
   "required-source-error":
     "Required review check could not be completed: Required source revision could not be read.",
   "required-source-error-after-verdict":
@@ -532,6 +534,8 @@ test.each([
   "I’m sorry, but I can’t assist with your request.",
   "Request refused by cybersecurity policy.",
   "Request refusal due to the safety policy.",
+  "Review refusal due to the content policy.",
+  "Refusal due to the content policy.",
   "This request was refused because of the safety policy.",
   "This request was refused because it violates the safety policy.",
   "The content policy requires refusal of this request.",
@@ -564,6 +568,7 @@ test.each([
   "Connection refused while fetching content-policy.ts",
   "Artifact upload was blocked by the content policy.",
   "Artifact publication was refused due to the content policy.",
+  "Artifact publication refusal due to the content policy.",
   "git fetch was refused by the remote for the cybersecurity-platform repository",
   "Cybersecurity policy: this request is invalid.",
   "Content policy: connection refused while fetching the source.",

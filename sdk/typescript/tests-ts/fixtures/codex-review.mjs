@@ -231,7 +231,9 @@ for await (const line of createInterface({ input: process.stdin })) {
                   ? "Artifact upload was blocked by the content policy."
                   : scenario === "required-source-error-publication-policy"
                     ? "Artifact publication was refused due to the content policy."
-                    : "Required source revision could not be read.",
+                    : scenario === "required-source-error-publication-refusal"
+                      ? "Artifact publication refusal due to the content policy."
+                      : "Required source revision could not be read.",
         },
         { tool: "submit_error" },
       );
