@@ -41,7 +41,8 @@ def stop_scan(api, connection, scan, cause):
             connection,
             Namespace(scan_id=scan.scan_id, thread_id=None),
         )
-    return api["fail_scan"](
+    return api["saved_results"].fail_scan(
+        api["_WORKBENCH_DB_CONTEXT"],
         connection,
         Namespace(
             scan_id=scan.scan_id,

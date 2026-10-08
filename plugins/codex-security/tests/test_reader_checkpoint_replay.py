@@ -40,7 +40,8 @@ def save_checkpoint(scan, result, *, rejected=False):
 
 
 def stop(workbench_api, connection, scan):
-    return workbench_api["fail_scan"](
+    return workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         connection,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
     )["scan"]
@@ -73,9 +74,9 @@ def test_legacy_stop_does_not_create_frozen_checkpoint_metadata(
     assert stopped["failureMessage"] == "Audit stopped."
     assert preserve(workbench_api, workbench_db, scan)["findingCount"] == 2
     assert (
-        workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))[
-            "scan"
-        ]["findingCount"]
+        workbench_api["saved_results"].recover_scan_results(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
+        )["scan"]["findingCount"]
         == 2
     )
     row = workbench_db.execute("SELECT * FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()
@@ -183,7 +184,9 @@ def test_reader_requires_writer_to_select_new_recovery_heads(
     before_db = list(workbench_db.iterdump())
     before_files = {path: path.read_bytes() for path in scan.scan_dir.rglob("*") if path.is_file()}
     with pytest.raises(SystemExit, match="newer version"):
-        workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+        workbench_api["saved_results"].recover_scan_results(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
+        )
     assert list(workbench_db.iterdump()) == before_db
     assert {path: path.read_bytes() for path in scan.scan_dir.rglob("*") if path.is_file()} == (
         before_files

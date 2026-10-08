@@ -60,7 +60,8 @@ def test_recovery_honors_rejection_committed_before_result_replacement(
         )
     saved_bytes = {path: path.read_bytes() for path in (result_path, old_checkpoint, checkpoint)}
 
-    stopped = workbench_api["fail_scan"](
+    stopped = workbench_api["saved_results"].fail_scan(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
     )["scan"]
@@ -123,7 +124,8 @@ def test_legacy_frozen_publication_keeps_result_fallback_without_saved_heads(
             "_write_prepared_scan_finalization",
             fail_before_publication,
         )
-        workbench_api["fail_scan"](
+        workbench_api["saved_results"].fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
             workbench_db,
             Namespace(
                 scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."
