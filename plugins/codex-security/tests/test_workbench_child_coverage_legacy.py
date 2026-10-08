@@ -57,7 +57,8 @@ def test_legacy_anonymous_child_questions_preserve_shared_parent_and_sibling_tex
     monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
     with closing(db.connect()) as connection, monkeypatch.context() as patch:
         patch.setattr(results, "_stopped_child_draft", legacy_project_child)
-        db.fail_scan(
+        results.fail_scan(
+            db._WORKBENCH_DB_CONTEXT,
             connection,
             SimpleNamespace(
                 scan_id=parent["scanId"],

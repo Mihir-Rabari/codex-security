@@ -278,8 +278,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - *checkout-repository
-      - &set-up-mcp-tools
-        name: Set up TypeScript tools
+      - name: Set up TypeScript tools
         uses: ./.github/actions/setup-tools
         with:
           cache-dependency-path: |

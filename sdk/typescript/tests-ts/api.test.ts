@@ -7094,7 +7094,14 @@ describe("CodexSecurity orchestration", () => {
       expect(createCodex.mock.lastCall?.[0]?.env?.["CODEX_CLI_PATH"]).toBe(
         selectedExecutable,
       );
-      expect(createCodex.mock.lastCall?.[0]?.env?.["PATH"]).toBe(searchPath);
+      expect(createCodex.mock.lastCall?.[0]?.env?.["PATH"]).toBe(
+        process.platform === "win32" && kind === "shim"
+          ? [
+              join(dirname(dirname(selectedExecutable)), "codex-path"),
+              searchPath,
+            ].join(delimiter)
+          : searchPath,
+      );
       await client.close();
     },
   );
@@ -7324,7 +7331,7 @@ process.exit(2);
     expect(createCodex.mock.lastCall?.[0]?.apiKey).toBe("ambient-key");
     expect(createCodex.mock.lastCall?.[0]?.codexPathOverride).toBe(
       process.platform === "win32"
-        ? win32.toNamespacedPath(resolveCodexCommand({}).command)
+        ? win32.toNamespacedPath(fakeCommand.command.command)
         : undefined,
     );
     expect(
@@ -8244,9 +8251,8 @@ describe("incoming native runtime integration", () => {
             USERPROFILE: root,
           },
           ...scanRuntimeDependencies(codexHome, scanDir),
+          createCodex: throwing("deep scan settings captured"),
           runWorkbench: async (_options, args, input) => {
-            if (args[0] === "list-scans")
-              throw new Error("deep scan settings captured");
             if (args[0] === "register-cli-scan")
               recipe = JSON.parse(input!).recipe;
             return mockWorkbench(args, input);

@@ -1775,7 +1775,8 @@ export class CodexSecurity {
         targetRevision,
         sealed,
       } = registered;
-      if (!sealed) activeScan = { id: scanId, options: workbenchOptions };
+      if (!sealed && typeof registered.resumeThreadId !== "string")
+        activeScan = { id: scanId, options: workbenchOptions };
       if (typeof registration["archivedScanDir"] === "string") {
         notifyObserver(
           options,
@@ -1826,6 +1827,7 @@ export class CodexSecurity {
         scanDir,
         mode,
       });
+      if (!sealed) activeScan = { id: scanId, options: workbenchOptions };
       const stopTracking = async (
         activeTracker: ScanCostTracker,
         usage?: unknown,

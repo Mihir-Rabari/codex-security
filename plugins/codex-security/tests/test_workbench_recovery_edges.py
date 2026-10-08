@@ -316,7 +316,8 @@ def test_preserve_retry_keeps_child_recovery_warning_until_child_is_recovered(
     monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
     with closing(db.connect()) as connection, monkeypatch.context() as patch:
         patch.setattr(results, "_stopped_child_draft", unreadable_child)
-        db.fail_scan(
+        results.fail_scan(
+            db._WORKBENCH_DB_CONTEXT,
             connection,
             SimpleNamespace(
                 scan_id=parent["scanId"],
@@ -1182,7 +1183,8 @@ def test_parent_recovery_honors_unsealed_child_frozen_sources(
     monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
     with closing(db.connect()) as connection, monkeypatch.context() as patch:
         patch.setattr(results, "_write_prepared_scan_finalization", fail_publication)
-        db.fail_scan(
+        results.fail_scan(
+            db._WORKBENCH_DB_CONTEXT,
             connection,
             SimpleNamespace(
                 scan_id=child["scanId"],

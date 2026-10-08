@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import sqlite3
 from pathlib import Path
@@ -293,6 +294,8 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
 def test_composition_occurrences_only_publish_through_parent_or_explicit_import(
     tmp_path: Path, workbench_db, workbench_api
 ) -> None:
+    from workbench_finding_index import upsert_finding
+
     connection = workbench_db
     timestamp = "2026-08-01T00:00:00Z"
     later = "2026-08-02T00:00:00Z"
@@ -351,27 +354,35 @@ def test_composition_occurrences_only_publish_through_parent_or_explicit_import(
         with connection:
             workbench_api["index_findings"](connection, scan_id, {"findings": findings}, later)
 
-    def assert_published(documents):
+    def assert_published(documents, indexed_documents):
         expected = {document["findingId"]: document for document in documents}
-        stored = workbench_api["list_stored_findings"](connection, limit=100, offset=0)
-        assert {document["findingId"]: document for document in stored["findings"]} == expected
-        assert stored["total"] == len(expected)
-        dashboard = workbench_api["dashboard"](
-            connection, {"view": "findings", "sort": "newest", "limit": 100, "offset": 0}
+        stored = connection.execute(
+            "SELECT id, details_json FROM findings WHERE details_json IS NOT NULL"
+        ).fetchall()
+        assert {row["id"]: json.loads(row["details_json"]) for row in stored} == expected
+        indexed = workbench_api["native_indexes"].list_global_findings(
+            connection,
+            argparse.Namespace(
+                limit=100, offset=0, query=None, target_id=None, severity=None, status=None
+            ),
         )
-        assert {item["id"] for item in dashboard["items"]} == set(expected)
-        assert dashboard["overview"]["findings"] == len(expected)
-        assert dashboard["total"] == len(expected)
-        return dashboard
+        assert {
+            item["findingId"]: (item["occurrenceId"], item["summary"])
+            for item in indexed["findings"]
+        } == {
+            document["findingId"]: (document["occurrenceId"], document["summary"])
+            for document in indexed_documents
+        }
+        assert indexed["nextOffset"] is None
 
     independent = finding("independent", "import", "Independently reviewed document")
     embedding = {"model": "synthetic-model", "vector": [0.25, 0.75]}
-    assert workbench_api["store_findings"](
-        connection,
-        [{"finding": independent, "embedding": embedding}],
-        timestamp,
-        "import-repository",
-    ) == {"findingIds": ["independent"]}
+    with connection:
+        upsert_finding(connection, independent, timestamp, "import-repository")
+        connection.execute(
+            "INSERT INTO finding_embeddings (finding_id, model, vector_json) VALUES (?, ?, ?)",
+            (independent["findingId"], embedding["model"], json.dumps(embedding["vector"])),
+        )
     original = dict(
         connection.execute("SELECT * FROM findings WHERE id = 'independent'").fetchone()
     )
@@ -381,8 +392,7 @@ def test_composition_occurrences_only_publish_through_parent_or_explicit_import(
     later_child = finding("independent", "child", "Different internal pass summary")
     index("child", [child_only, dropped, later_child])
 
-    dashboard = assert_published([independent])
-    assert dashboard["repositories"] == [{"id": "import-repository", "label": "import-repository"}]
+    assert_published([independent], [])
     assert (
         dict(connection.execute("SELECT * FROM findings WHERE id = 'independent'").fetchone())
         == original
@@ -404,12 +414,12 @@ def test_composition_occurrences_only_publish_through_parent_or_explicit_import(
 
     rerun = finding("ordinary-rerun", "rerun", "An ordinary linked rerun remains public")
     index("rerun", [rerun])
-    assert_published([independent, rerun])
+    assert_published([independent, rerun], [rerun])
     merged = finding("merged", "parent", "Published parent aggregate")
     index("parent", [merged])
     with connection:
         connection.execute("UPDATE scans SET status = 'complete' WHERE id = 'parent'")
-    assert_published([independent, rerun, merged])
+    assert_published([independent, rerun, merged], [rerun, merged])
     assert (
         connection.execute(
             "SELECT details_json FROM findings WHERE id = 'dropped-duplicate'"
@@ -418,13 +428,9 @@ def test_composition_occurrences_only_publish_through_parent_or_explicit_import(
     )
 
     explicitly_imported = {**child_only, "summary": "Explicitly published after review"}
-    assert workbench_api["store_findings"](
-        connection,
-        [{"finding": explicitly_imported, "embedding": embedding}],
-        later,
-        "scan-repository",
-    ) == {"findingIds": ["child-only"]}
-    assert_published([independent, rerun, merged, explicitly_imported])
+    with connection:
+        upsert_finding(connection, explicitly_imported, later, "scan-repository")
+    assert_published([independent, rerun, merged, explicitly_imported], [rerun, merged])
     assert (
         json.loads(
             connection.execute(

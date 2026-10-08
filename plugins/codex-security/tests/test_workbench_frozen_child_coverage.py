@@ -65,7 +65,8 @@ def test_failed_child_reread_retains_frozen_coverage(
     with closing(db.connect()) as connection, monkeypatch.context() as patch:
         if publication_failure:
             patch.setattr(results, "_write_prepared_scan_finalization", interrupt_publication)
-        db.fail_scan(
+        results.fail_scan(
+            db._WORKBENCH_DB_CONTEXT,
             connection,
             SimpleNamespace(
                 scan_id=parent["scanId"],
