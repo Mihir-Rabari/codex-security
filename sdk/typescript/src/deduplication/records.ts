@@ -1,6 +1,7 @@
 import { hash, randomUUID } from "node:crypto";
 import { z } from "incur";
 import { DeduplicationReviewError } from "../errors.js";
+import { validateJsonNumbers } from "../json-numbers.js";
 import type { Finding } from "../models.js";
 import { abortable } from "../targets.js";
 import type { CodexReview } from "./codex-review.js";
@@ -103,13 +104,18 @@ export async function deduplicateRecords(
   options.signal?.throwIfAborted();
   // Snapshot before yielding: a host cannot mutate evidence during the review.
   const data = deduplicateRecordsInputSchema.parse(structuredClone(input));
+  validateJsonNumbers(data, "Records input");
   const references = new Map<string, string>();
   const observations = new Map<string, Finding>();
   for (const entry of data.observations) {
     if (observations.has(entry.id))
       throw new Error(`Duplicate observation ID: ${entry.id}`);
     // Original finding IDs can repeat across scans; host IDs identify observations.
-    const findingId = `csf_${hash("sha256", entry.id).slice(0, 24)}`;
+    // Invalid UTF-8 separates lossless UTF-16 from ordinary IDs without changing their hashes.
+    const identity = entry.id.isWellFormed()
+      ? entry.id
+      : Buffer.concat([Buffer.from([0xff]), Buffer.from(entry.id, "utf16le")]);
+    const findingId = `csf_${hash("sha256", identity).slice(0, 24)}`;
     observations.set(entry.id, { ...entry.finding, findingId });
     references.set(findingId, entry.id);
   }

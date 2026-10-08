@@ -185,6 +185,7 @@ const allowedFiles = new Set([
     "github",
     "index",
     "import-scan",
+    "json-numbers",
     "knowledge-base",
     "linear",
     "models",

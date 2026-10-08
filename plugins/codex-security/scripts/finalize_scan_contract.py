@@ -23,6 +23,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any, TextIO
 from urllib.parse import quote, urlsplit
 
+# Some hosts load this script with Python's safe-path isolation enabled.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workbench.json_numbers import is_json_integer
+
 SCHEMA_VERSION = "1.0"
 PRODUCER_NAME = "codex-security-plugin"
 FINGERPRINT_ALGORITHM = "codex-security/v1"
@@ -951,9 +955,9 @@ def _validate_location(location: dict[str, Any], context: str) -> None:
     _require_safe_relative_path(_require_str(location, "path", context), f"{context}.path")
     start = location.get("startLine")
     end = location.get("endLine", start)
-    if not isinstance(start, int) or start < 1:
+    if not is_json_integer(start) or start < 1:
         raise ContractError(f"{context}.startLine: expected a positive integer")
-    if not isinstance(end, int) or end < start:
+    if not is_json_integer(end) or end < start:
         raise ContractError(f"{context}.endLine: expected an integer >= startLine")
     role = location.get("role")
     if role is not None and (not isinstance(role, str) or not role):
@@ -1785,7 +1789,7 @@ def _schema_type_matches(value: Any, expected: str) -> bool:
     return {
         "array": isinstance(value, list),
         "boolean": isinstance(value, bool),
-        "integer": isinstance(value, int) and not isinstance(value, bool),
+        "integer": is_json_integer(value),
         "number": isinstance(value, (int, float)) and not isinstance(value, bool),
         "object": isinstance(value, dict),
         "string": isinstance(value, str),
@@ -2351,12 +2355,7 @@ def _sarif_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
     for evidence in _merged_code_evidence(finding):
         path = evidence.get("path")
         start_line = evidence.get("startLine")
-        if (
-            not isinstance(path, str)
-            or not isinstance(start_line, int)
-            or isinstance(start_line, bool)
-            or start_line < 1
-        ):
+        if not isinstance(path, str) or not is_json_integer(start_line) or start_line < 1:
             continue
         try:
             path = _require_safe_relative_path(path, "SARIF evidence location")
@@ -2368,8 +2367,7 @@ def _sarif_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
                 "startLine": start_line,
                 "endLine": (
                     evidence["endLine"]
-                    if isinstance(evidence.get("endLine"), int)
-                    and not isinstance(evidence["endLine"], bool)
+                    if is_json_integer(evidence.get("endLine"))
                     and evidence["endLine"] >= start_line
                     else start_line
                 ),
@@ -2446,8 +2444,8 @@ def _sarif_location(location: dict[str, Any]) -> dict[str, Any]:
                 "uri": quote(location["path"], safe="/"),
             },
             "region": {
-                "startLine": location["startLine"],
-                "endLine": location.get("endLine", location["startLine"]),
+                "startLine": int(location["startLine"]),
+                "endLine": int(location.get("endLine", location["startLine"])),
             },
         }
     }
@@ -2758,8 +2756,8 @@ def build_csv_projection(findings: dict[str, Any], coverage: dict[str, Any]) -> 
                 "",
                 csv_cell(finding["remediation"]),
                 csv_cell(location["path"]),
-                location["startLine"],
-                location.get("endLine", location["startLine"]),
+                int(location["startLine"]),
+                int(location.get("endLine", location["startLine"])),
             )
         )
     return output.getvalue().encode("utf-8")

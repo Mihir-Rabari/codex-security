@@ -178,6 +178,29 @@ describe("findings import formats", () => {
     expect(csv[0]!.title).toBe("Reported CSV import issue");
   });
 
+  test("rejects unsupported JSON numbers before they can become null", async () => {
+    const document = await sourceDocument();
+    document.findings[0]!.extensions = {
+      nested: [null, "numeric-placeholder"],
+    };
+    const source = JSON.stringify(document);
+    for (const number of ["1e400", "9007199254740993"]) {
+      await expect(
+        parseImportedFindings(
+          source.replace('"numeric-placeholder"', number),
+          "json",
+          PLUGIN_ROOT,
+        ),
+      ).rejects.toThrow("JSON numbers are not supported");
+    }
+    const [finding] = await parseImportedFindings(
+      source.replace('"numeric-placeholder"', "1.5"),
+      "json",
+      PLUGIN_ROOT,
+    );
+    expect(finding!.extensions).toEqual({ nested: [null, 1.5] });
+  });
+
   test("binds separate source occurrences and retains source metadata without following report paths", async () => {
     const document = await sourceDocument();
     const finding = document.findings[0]!;
@@ -247,9 +270,22 @@ describe("findings import formats", () => {
         parseImportedFindings(JSON.stringify(payload), "json", PLUGIN_ROOT),
       ).rejects.toThrow("Findings JSON");
     }
-    await expect(
-      parseImportedFindings("{", "json", PLUGIN_ROOT),
-    ).rejects.toThrow("could not be parsed");
+    for (const source of ["{", '{"findings": [],}']) {
+      let parseError: Error | undefined;
+      try {
+        JSON.parse(source);
+      } catch (error) {
+        parseError = error as Error;
+      }
+      expect(parseError).toBeInstanceOf(SyntaxError);
+      await expect(
+        parseImportedFindings(source, "json", PLUGIN_ROOT),
+      ).rejects.toMatchObject({
+        name: "CodexSecurityError",
+        message: `Findings JSON could not be parsed. ${parseError!.message}`,
+        cause: expect.objectContaining({ message: parseError!.message }),
+      });
+    }
     await expect(
       parseImportedFindings(
         JSON.stringify({

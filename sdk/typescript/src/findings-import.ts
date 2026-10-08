@@ -4,7 +4,12 @@ import { isAbsolute, join, posix } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
 import { z } from "incur";
 import Papa from "papaparse";
-import { CodexSecurityError } from "./errors.js";
+import {
+  CodexSecurityError,
+  ContractValidationError,
+  errorMessage,
+} from "./errors.js";
+import { parseJsonNumbers } from "./json-numbers.js";
 import type { Finding, FindingsDocument } from "./models.js";
 
 export const CSV_TARGET_ID = "codex-security-csv-import";
@@ -120,11 +125,13 @@ export async function parseImportedFindings(
   try {
     // Exported findings files often start with a UTF-8 byte order mark, which
     // the CSV parser already skips.
-    payload = JSON.parse(source.replace(/^\uFEFF/u, ""));
+    payload = parseJsonNumbers(source.replace(/^\uFEFF/u, ""), "Findings JSON");
   } catch (error) {
-    throw new CodexSecurityError("Findings JSON could not be parsed.", {
-      cause: error,
-    });
+    if (error instanceof ContractValidationError) throw error;
+    throw new CodexSecurityError(
+      `Findings JSON could not be parsed. ${errorMessage(error)}`,
+      { cause: error },
+    );
   }
   if (
     payload === null ||

@@ -17,6 +17,9 @@ const { applyMigrations } = (await importSource(
   "src/workbench/migrations.ts",
 )) as typeof Migrations;
 const { parseJson, stringifyJson } = await importSource("src/helpers/json.ts");
+const { findPotentialDuplicates } = (await importSource(
+  "src/workbench/duplicates.ts",
+)) as typeof import("../src/workbench/duplicates.ts");
 const temporary = createTemporaryDirectories(true);
 after(() => temporary.cleanup());
 
@@ -42,19 +45,36 @@ function entry(id: string): Findings.EmbeddedFinding {
   };
 }
 
-for (const formatting of ["spaced", "reordered", "escaped"]) {
+for (const formatting of [
+  "spaced",
+  "reordered",
+  "escaped",
+  "signed-zero",
+  "large-exponent",
+]) {
   test(`unchanged service upserts retain local cache and document serialization: ${formatting}`, (t) => {
     const database = open(t);
     const original = entry("shared-finding");
+    original.finding.extensions = {
+      score: 0,
+      opaqueId:
+        formatting === "large-exponent" ? 9007199254740992n : 9007199254740993n,
+    };
     storeFindings(database, [original], "created");
     const body =
       formatting === "reordered"
         ? Object.fromEntries(Object.entries(original.finding).reverse())
         : original.finding;
-    const stored = stringifyJson(body, 2).replaceAll(
-      "λ",
-      formatting === "escaped" ? "\\u03bb" : "λ",
-    );
+    const stored = stringifyJson(body, 2)
+      .replaceAll("λ", formatting === "escaped" ? "\\u03bb" : "λ")
+      .replace(
+        '"score": 0',
+        formatting === "signed-zero" ? '"score": -0.0' : '"score": 0',
+      )
+      .replace(
+        '"opaqueId": 9007199254740992',
+        '"opaqueId": 9.007199254740992e15',
+      );
     database
       .prepare("UPDATE findings SET details_json = ? WHERE id = ?")
       .run(stored, original.finding.findingId);
@@ -107,6 +127,38 @@ for (const formatting of ["spaced", "reordered", "escaped"]) {
         )
         .get(original.finding.findingId),
       undefined,
+    );
+  });
+}
+
+for (const [name, before, after] of [
+  ["boolean", true, 1],
+  ["array order", [1, 2], [2, 1]],
+  ["large integer", 9007199254740992n, 9007199254740993n],
+] as const) {
+  test(`changed ${name} invalidates the local finding cache`, (t) => {
+    const database = open(t);
+    const original = entry("shared-finding");
+    original.finding.extensions = { value: before };
+    storeFindings(database, [original], "created");
+    database
+      .prepare(
+        "INSERT INTO local_finding_embeddings VALUES (?, 'local-model', '[1,0]', 'local-cache-key')",
+      )
+      .run(original.finding.findingId);
+    original.finding.extensions = { value: after };
+    storeFindings(database, [original], "updated");
+    assert.equal(
+      database
+        .prepare("SELECT COUNT(*) AS count FROM local_finding_embeddings")
+        .get()!.count,
+      0,
+    );
+    assert.deepEqual(
+      findPotentialDuplicates(database, original.finding.findingId, undefined, {
+        [original.finding.findingId]: "local-cache-key",
+      }),
+      { error: "finding_changed" },
     );
   });
 }

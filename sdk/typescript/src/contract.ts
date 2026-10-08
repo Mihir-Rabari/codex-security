@@ -13,6 +13,7 @@ import Ajv2020, { type ErrorObject } from "ajv/dist/2020.js";
 import { regexes } from "zod";
 import { ContractValidationError, abortReason } from "./errors.js";
 import { isRecord } from "./record.js";
+import { validateJsonNumber } from "./json-numbers.js";
 import type {
   ContractObject as JsonRecord,
   CoverageDocument,
@@ -950,16 +951,7 @@ function parseJson(path: string, bytes: Uint8Array): Record<string, unknown> {
 
 function validateParsedJson(value: unknown, context: string): void {
   if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      throw new ContractValidationError(
-        `${context}: non-finite JSON numbers are not supported.`,
-      );
-    }
-    if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
-      throw new ContractValidationError(
-        `${context}: unsafe integer-valued JSON numbers are not supported.`,
-      );
-    }
+    validateJsonNumber(value, context);
     return;
   }
   if (typeof value === "string") {

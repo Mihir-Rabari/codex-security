@@ -478,6 +478,7 @@ The extraction root is not enforced.
         self.write_sealed_scan()
         findings = self.read_json("findings.json")
         findings["findings"][0]["summary"] = "é" * 128
+        findings["findings"][0]["locations"][0].update(startLine=41.0, endLine=44.0)
         compact = (json.dumps(findings, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
             "utf-8"
         )
@@ -2152,6 +2153,96 @@ The extraction root is not enforced.
         self.assertRegex(finding["occurrenceId"], r"^occ_[a-f0-9]{24}$")
         self.assertEqual(finding["fingerprints"]["algorithm"], "codex-security/v1")
         self.assertNotEqual(finding["fingerprints"]["primary"], "codex-security/v0:sha256:example")
+
+    @pytest.mark.cross_platform
+    def test_recovery_preserves_integer_valued_line_numbers(self) -> None:
+        self.findings["findings"][0]["codeEvidence"] = [
+            {
+                "id": "source",
+                "label": "Source",
+                "path": "src/evidence.py",
+                "startLine": 41,
+                "endLine": 44,
+                "code": "extract()",
+                "explanation": "Source evidence.",
+            }
+        ]
+        self.findings["findings"][0]["rootCause"] = {
+            "summary": "Unchecked source.",
+            "evidenceRefs": ["source"],
+        }
+        for memory in (False, True):
+            for start, end in (("41", "44"), ("41.0", "44.0"), ("4.1e1", "4.4e1")):
+                with self.subTest(memory=memory, start=start):
+                    self.write_scan()
+                    text = (
+                        json.dumps(self.findings)
+                        .replace('"startLine": 41', f'"startLine": {start}')
+                        .replace('"endLine": 44', f'"endLine": {end}')
+                    )
+                    documents = (self.manifest, json.loads(text), self.coverage)
+                    original_documents = json.dumps(documents)
+                    (self.scan_dir / "findings.json").write_text(text, encoding="utf-8")
+                    original_bytes = self.scan_file_bytes(*CANONICAL_FILES)
+                    warnings: list[str] = []
+                    prepared = FINALIZER._prepare_scan_finalization(
+                        self.scan_dir,
+                        completion_warnings=warnings,
+                        draft_documents=documents if memory else None,
+                    )
+                    self.assertEqual(warnings, [])
+                    self.assertEqual(len(prepared[3]["findings"]), 1)
+                    self.assertEqual(prepared[4]["completeness"], "complete")
+                    self.assertEqual(self.scan_file_bytes(*CANONICAL_FILES), original_bytes)
+                    self.assertEqual(json.dumps(documents), original_documents)
+                    FINALIZER._write_prepared_scan_finalization(prepared)
+                    markdown = (self.scan_dir / "report.md").read_text(encoding="utf-8")
+                    self.assertIn("src/extract.py:41-44", markdown)
+                    self.assertIn("src/evidence.py:41-44", markdown)
+                    csv_row = next(
+                        csv.DictReader(
+                            io.StringIO(
+                                FINALIZER.build_csv_projection(prepared[3], prepared[4]).decode()
+                            )
+                        )
+                    )
+                    self.assertEqual((csv_row["start_line"], csv_row["end_line"]), ("41", "44"))
+                    sarif = self.read_json("exports/results.sarif")
+                    locations = sarif["runs"][0]["results"][0]["locations"]
+                    self.assertEqual(len(locations), 2)
+                    for location in locations:
+                        region = location["physicalLocation"]["region"]
+                        self.assertEqual(region, {"startLine": 41, "endLine": 44})
+                        self.assertIs(type(region["startLine"]), int)
+                        self.assertIs(type(region["endLine"]), int)
+
+    @pytest.mark.cross_platform
+    def test_integer_line_compatibility_keeps_invalid_values_rejected(self) -> None:
+        finding = self.findings["findings"][0]
+        finding["codeEvidence"] = [
+            {
+                "id": "source",
+                "label": "Source",
+                "path": "src/evidence.py",
+                "startLine": 41,
+                "endLine": 44,
+                "code": "extract()",
+                "explanation": "Source evidence.",
+            }
+        ]
+        for collection in ("locations", "codeEvidence"):
+            for field in ("startLine", "endLine"):
+                for value in (True, False, 0, -1, 41.5, float(1 << 53), float("inf"), float("nan")):
+                    with self.subTest(collection=collection, field=field, value=value):
+                        row = finding[collection][0]
+                        previous = row[field]
+                        row[field] = value
+                        self.write_scan()
+                        before = self.scan_file_bytes(*CANONICAL_FILES)
+                        with self.assertRaises(FINALIZER.ContractError):
+                            FINALIZER.finalize_scan(self.scan_dir)
+                        self.assertEqual(self.scan_file_bytes(*CANONICAL_FILES), before)
+                        row[field] = previous
 
     def test_recovery_normalizes_severity_change_condition_lists(self) -> None:
         self.findings["findings"][0]["severity"]["changeConditions"] = [

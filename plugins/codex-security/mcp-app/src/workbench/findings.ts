@@ -1,6 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import { isDeepStrictEqual } from "node:util";
-import { parseJson, stringifyJson } from "../helpers/json";
+import { equalFindingJson, parseJson, stringifyJson } from "../helpers/json";
 import { requireSqliteText } from "./database";
 import { transaction } from "./transaction";
 
@@ -72,7 +71,7 @@ export function storeFindings(
         const previous = stored.get(finding.findingId)?.details_json;
         if (
           typeof previous === "string" &&
-          isDeepStrictEqual(parseJson(previous), parseJson(details))
+          equalFindingJson(parseJson(previous), parseJson(details))
         )
           details = previous;
         const { changes } = upsert.run(

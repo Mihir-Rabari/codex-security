@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
-import { isDeepStrictEqual } from "node:util";
 import type { DatabaseSync } from "node:sqlite";
-import { parseJson } from "../helpers/json";
+import { equalFindingJson, parseJson } from "../helpers/json";
 import { transaction } from "./transaction";
 import { requireSqliteText } from "./database";
 
@@ -139,7 +138,7 @@ export function findPotentialDuplicates(
       if (
         typeof row.source_json === "string" &&
         typeof row.occurrence_json === "string" &&
-        isDeepStrictEqual(
+        equalFindingJson(
           parseJson(row.occurrence_json),
           findingDocuments.get(id),
         )
