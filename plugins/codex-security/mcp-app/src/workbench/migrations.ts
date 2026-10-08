@@ -139,6 +139,27 @@ function normalizeExecutionProfiles(database: DatabaseSync): void {
 }
 
 function normalizeHistory(database: DatabaseSync): void {
+  moveMigration(database, 51, 52, "bind original deep scan execution settings");
+  moveMigration(database, 48, 51, "bind original deep scan parent usage turn");
+  moveMigration(database, 47, 50, "freeze stopped scan checkpoint selections");
+  moveMigration(
+    database,
+    46,
+    49,
+    "persist selected deep scan finalization input",
+  );
+  moveMigration(
+    database,
+    45,
+    48,
+    "retain deep scan attempts and exact merge inputs",
+  );
+  moveMigration(
+    database,
+    44,
+    47,
+    "preserve original deep scan discovery context",
+  );
   const mirror = database
     .prepare(
       "SELECT version, name FROM schema_migrations WHERE version BETWEEN 29 AND 32 ORDER BY version",

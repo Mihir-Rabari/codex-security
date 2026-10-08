@@ -224,6 +224,14 @@ def move_pre_release_migration(
 
 def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:
     normalize_mirror_lineage_migrations(connection)
+    move_pre_release_migration(connection, 51, 52, "bind original deep scan execution settings")
+    move_pre_release_migration(connection, 48, 51, "bind original deep scan parent usage turn")
+    move_pre_release_migration(connection, 47, 50, "freeze stopped scan checkpoint selections")
+    move_pre_release_migration(connection, 46, 49, "persist selected deep scan finalization input")
+    move_pre_release_migration(
+        connection, 45, 48, "retain deep scan attempts and exact merge inputs"
+    )
+    move_pre_release_migration(connection, 44, 47, "preserve original deep scan discovery context")
     move_pre_release_migration(connection, 33, 40, "index finding identity and comparison history")
 
     move_pre_release_migration(connection, 25, 26, "persist scan completion warnings")
