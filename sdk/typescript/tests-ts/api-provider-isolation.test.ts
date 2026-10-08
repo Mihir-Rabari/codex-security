@@ -82,13 +82,21 @@ async function effectiveProvider(
         "utf8",
       ),
     );
+    const probeConfig = { ...config, ...parseToml(overrides.join("\n")) };
     const result = await nativeRequest(environment, cwd, [], "thread/start", {
       cwd,
       ephemeral: true,
       // This no-turn configuration check never executes model commands.
       sandbox: "danger-full-access",
       threadSource: "security_scan",
-      config: { ...config, ...parseToml(overrides.join("\n")) },
+      config: {
+        ...probeConfig,
+        // Provider-only probes do not need installed plugins or their MCP servers.
+        features: {
+          ...(probeConfig["features"] as JsonObject | undefined),
+          plugins: false,
+        },
+      },
     });
     return (config["model_providers"] as Record<string, unknown>)?.[
       result.modelProvider
