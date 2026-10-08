@@ -1078,7 +1078,15 @@ test.skipIf(process.platform === "win32")(
   async () => {
     const root = await temporaryDirectory();
     const prefix = join(root, "raw-");
-    const raw = Buffer.concat([Buffer.from(prefix), Buffer.from([255])]);
+    // APFS requires valid UTF-8 names; Linux also permits undecodable bytes.
+    const suffix =
+      process.platform === "darwin" ? Buffer.from("雪") : Buffer.from([255]);
+    const shellSuffix = Array.from(
+      suffix,
+      (byte) => `\\${byte.toString(8).padStart(3, "0")}`,
+    ).join("");
+    const expectedSuffix = process.platform === "darwin" ? "雪" : "\udcff";
+    const raw = Buffer.concat([Buffer.from(prefix), suffix]);
     const ordinary = join(root, "ordinary");
     const decoy = `${prefix}\ufffd`;
     for (const directory of [raw, ordinary, decoy]) {
@@ -1102,7 +1110,7 @@ test.skipIf(process.platform === "win32")(
         [
           "-c",
           String.raw`
-raw="$1$(printf '\377')"
+raw="$1$(printf '${shellSuffix}')"
 if [ "$3" = home ]; then
   CODEX_HOME="$raw"; export CODEX_HOME; cd "$2"; set -- "$4" --helper
 elif [ "$3" = cwd ]; then
@@ -1130,7 +1138,7 @@ exec "$@" config-preflight --profile security_scan --multi-agent-runtime-owner n
           ? payload.config_discovery?.["cwd"]
           : payload.user_config_path,
       ).toBe(
-        `${prefix}\udcff${mode === "cwd" ? "" : mode === "home" ? "/config.toml" : "/.codex/config.toml"}`,
+        `${prefix}${expectedSuffix}${mode === "cwd" ? "" : mode === "home" ? "/config.toml" : "/.codex/config.toml"}`,
       );
     }
   },
