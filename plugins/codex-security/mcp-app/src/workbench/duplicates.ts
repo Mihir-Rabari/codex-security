@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { DatabaseSync } from "node:sqlite";
 import { parseJson } from "../helpers/json";
 import { transaction } from "./transaction";
@@ -95,14 +96,61 @@ export function findPotentialDuplicates(
     // Stable sorting keeps insertion-time / finding-ID order for ties.
     ranked.sort((a, b) => b.similarity - a.similarity);
     const selected = [findingId, ...ranked.slice(0, 50).map(({ id }) => id)];
-    const [finding, ...potentialDuplicates] = database
+    const documents = database
       .prepare(
         `SELECT findings.details_json FROM json_each(?) AS selected
          JOIN findings ON findings.id = selected.value ORDER BY selected.key`,
       )
       .all(JSON.stringify(selected))
       .map((row) => parseJson(row.details_json as string));
-    return { finding, potentialDuplicates };
+    const [finding, ...potentialDuplicates] = documents;
+    if (expectedCacheKeys === undefined)
+      return { finding, potentialDuplicates };
+    const repositoryIds: Record<string, string[]> = Object.fromEntries(
+      selected.map((id) => [id, []]),
+    );
+    const sourceSnapshots = new Map<string, unknown>();
+    const findingDocuments = new Map(
+      selected.map((id, index) => [id, documents[index]]),
+    );
+    for (const row of database
+      .prepare(
+        `SELECT json_quote(repositories.finding_id) AS finding_id_json,
+                json_quote(repositories.repository_id) AS repository_id_json,
+                CASE WHEN scans.id IS NOT NULL THEN json_object(
+                  'repositoryId', scans.target_id,
+                  'revision', scans.target_revision,
+                  'snapshotDigest', scans.target_snapshot_digest
+                ) END AS source_json,
+                occurrence.details_json AS occurrence_json
+         FROM finding_repositories AS repositories
+         JOIN findings ON findings.id = repositories.finding_id
+         LEFT JOIN finding_occurrences AS occurrence
+           ON occurrence.id = json_extract(findings.details_json, '$.occurrenceId')
+           AND occurrence.finding_id = findings.id
+         LEFT JOIN scans ON scans.id = occurrence.scan_id
+         WHERE repositories.finding_id IN (SELECT value FROM json_each(?))
+         ORDER BY repositories.finding_id, repositories.repository_id`,
+      )
+      .all(JSON.stringify(selected))) {
+      const id: string = JSON.parse(row.finding_id_json as string);
+      repositoryIds[id]!.push(JSON.parse(row.repository_id_json as string));
+      if (
+        typeof row.source_json === "string" &&
+        typeof row.occurrence_json === "string" &&
+        isDeepStrictEqual(
+          parseJson(row.occurrence_json),
+          findingDocuments.get(id),
+        )
+      )
+        sourceSnapshots.set(id, JSON.parse(row.source_json));
+    }
+    return {
+      finding,
+      potentialDuplicates,
+      repositoryIds,
+      sourceSnapshots: Object.fromEntries(sourceSnapshots),
+    };
   });
 }
 

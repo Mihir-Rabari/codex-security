@@ -20,6 +20,7 @@ import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
 import { SqliteFindingsStore } from "../src/server/sqlite-store.js";
 import type { FindingEmbeddingBinding } from "../src/deduplication/local.js";
 import type { Finding } from "../src/models.js";
+import type { CodexReview } from "../src/deduplication/codex-review.js";
 import { screeningPairSlot } from "../src/deduplication/deduplication-reviewer.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -171,6 +172,68 @@ async function fixture(git = false) {
     reviewer,
   };
 }
+
+test("historical reviews carry the saved occurrence revision instead of the current checkout", async () => {
+  const f = await fixture(true);
+  const manifest = JSON.parse(
+    await readFile(join(f.first.scanDir, "scan-manifest.json"), "utf8"),
+  );
+  const revision = manifest.scan.target.revision;
+  await writeFile(
+    join(f.repository, "src", "extract.py"),
+    "# Changed synthetic source\n",
+  );
+  execFileSync("git", ["-C", f.repository, "add", "."]);
+  execFileSync("git", [
+    "-C",
+    f.repository,
+    "-c",
+    "user.name=Synthetic Fixture",
+    "-c",
+    "user.email=fixture@example.test",
+    "commit",
+    "-qm",
+    "Changed synthetic source",
+  ]);
+  expect(
+    execFileSync("git", ["-C", f.repository, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    }).trim(),
+  ).not.toBe(revision);
+  let calls = 0;
+  await deduplicateScanInternal(
+    f.first.scanId,
+    { embedding: f.embedding },
+    {
+      environment: f.environment,
+      reviewRunner: {
+        async run<T>(review: CodexReview<T>): Promise<T> {
+          calls++;
+          const context = JSON.parse(
+            review.prompt
+              .split("\n")
+              .find((line) => line.startsWith('{"approvedRepositoryId":'))!,
+          );
+          expect(context.findings).toHaveLength(2);
+          for (const finding of context.findings)
+            expect(finding.sourceSnapshot).toMatchObject({
+              repositoryId: context.approvedRepositoryId,
+              revision,
+            });
+          return review.validate({
+            decisions: {
+              "pair-1": {
+                decision: "DISTINCT",
+                rationale: "Different synthetic source controls",
+              },
+            },
+          });
+        },
+      },
+    },
+  );
+  expect(calls).toBe(1);
+});
 
 for (const source of ["PYTHON", "PATH", "linked PYTHON"] as const) {
   for (const resumed of [false, true]) {

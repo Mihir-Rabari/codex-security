@@ -28,6 +28,8 @@ import { rejecting } from "./support/errors.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import type { Finding } from "../src/models.js";
 import type { CodexReview } from "../src/deduplication/codex-review.js";
+import { comparisonEnvironment } from "../src/scan-comparison.js";
+import { reviewSettingsDigest } from "../src/deduplication/checkpointed-review.js";
 
 const temporaryDirectories = createTemporaryDirectories();
 afterEach(temporaryDirectories.cleanup);
@@ -349,6 +351,202 @@ test("saved-scan dedupe uses configured Codex models and efforts for both review
     ["screening", "synthetic-configured", "medium"],
     ["pair-review", "synthetic-configured", "medium"],
   ]);
+});
+
+test.each([
+  "stored-login",
+  "managed-defaults",
+  "environment-key",
+  "command-auth",
+])(
+  "saved-scan reviews select models from the effective %s provider environment",
+  async (selection) => {
+    const f = await fixture();
+    await mkdir(f.environment.CODEX_HOME);
+    const credentialHome = join(
+      f.environment.CODEX_SECURITY_STATE_DIR,
+      "codex-home",
+    );
+    await mkdir(credentialHome, { recursive: true });
+    await writeFile(
+      join(f.environment.CODEX_HOME, "config.toml"),
+      [
+        'model = "ambient-model"',
+        'model_reasoning_effort = "medium"',
+        ...(selection === "managed-defaults"
+          ? []
+          : [
+              'model_provider = "ambient-provider"',
+              "[model_providers.ambient-provider]",
+              'name = "Synthetic ambient provider"',
+              'wire_api = "responses"',
+              'base_url = "https://ambient.example.test/v1"',
+              'env_key = "SYNTHETIC_PROVIDER_KEY"',
+            ]),
+        ...(selection === "command-auth"
+          ? ['auth = { command = "synthetic-auth" }']
+          : []),
+      ].join("\n"),
+    );
+    await writeFile(
+      join(credentialHome, "config.toml"),
+      selection === "managed-defaults"
+        ? '[permissions.synthetic]\nextends = ":read-only"\n'
+        : 'model = "stored-model"\nmodel_reasoning_effort = "high"\n',
+    );
+    const anchor = f.document.findings[0]!;
+    await f.store.insert(
+      [
+        {
+          finding: {
+            ...anchor,
+            findingId: "csf_neighbor",
+            fingerprints: { ...anchor.fingerprints, primary: "neighbor" },
+          },
+          embedding: { model: EMBEDDING_MODEL, vector },
+        },
+      ],
+      f.targetId,
+    );
+    const environment = {
+      ...f.environment,
+      ...(selection === "environment-key"
+        ? { OPENAI_API_KEY: "synthetic-embedding-and-review-key" }
+        : {}),
+    };
+    const originalEnvironment = { ...environment };
+    const accountStatus = mock(async () => ({
+      authenticated: true,
+      details: "Synthetic signed-in account",
+    }));
+    const calls: string[][] = [];
+    let selectedEnvironment: NodeJS.ProcessEnv = environment;
+    const bindings: {
+      model: string;
+      effort: string;
+      settingsDigest: string;
+    }[] = [];
+    await deduplicateScanDirectoryInternal(
+      f.scanDir,
+      {
+        repository: f.repository,
+        embedding: f.embedding,
+        workflowId: `effective-${selection}`,
+      },
+      {
+        environment,
+        resolveReviewEnvironment: async (source, _accountStatus, signal) => {
+          selectedEnvironment = await comparisonEnvironment(
+            source,
+            accountStatus,
+            signal,
+            async () => credentialHome,
+          );
+          return selectedEnvironment as Record<string, string>;
+        },
+        runWorkbench: async (args, input) => {
+          const payload = input ? JSON.parse(input) : {};
+          if (payload.action === "save-review") bindings.push(payload.binding);
+          return runWorkbench(f.options, args, input);
+        },
+        reviewRunner: {
+          async run<T>(review: CodexReview<T>): Promise<T> {
+            calls.push([review.stage, review.model, review.effort]);
+            return review.validate(
+              review.stage === "screening"
+                ? {
+                    decisions: {
+                      "pair-1": {
+                        decision: "SAME",
+                        rationale: "Compare the complete originals",
+                      },
+                    },
+                  }
+                : { decision: "DISTINCT", rationale: "Independent controls" },
+            );
+          },
+        },
+      },
+    );
+    const settings =
+      selection === "stored-login"
+        ? ["stored-model", "high"]
+        : ["ambient-model", "medium"];
+    expect(calls).toEqual([
+      ["screening", ...settings],
+      ["pair-review", ...settings],
+    ]);
+    expect(bindings.map(({ model, effort }) => [model, effort])).toEqual([
+      settings,
+      settings,
+    ]);
+    const digest = await reviewSettingsDigest(selectedEnvironment, {
+      model: settings[0]!,
+      model_reasoning_effort: settings[1]!,
+    });
+    expect(bindings.every((binding) => binding.settingsDigest === digest)).toBe(
+      true,
+    );
+    expect(accountStatus).toHaveBeenCalledTimes(
+      ["stored-login", "managed-defaults"].includes(selection) ? 1 : 0,
+    );
+    expect(environment).toEqual(originalEnvironment);
+  },
+);
+
+test("all-repository reviews receive stored source associations without rewriting findings", async () => {
+  const f = await fixture();
+  const anchor = f.document.findings[0]!;
+  const neighbor = {
+    ...anchor,
+    findingId: "__proto__",
+    fingerprints: { ...anchor.fingerprints, primary: "other-repository" },
+  };
+  await f.store.insert(
+    [{ finding: neighbor, embedding: { model: EMBEDDING_MODEL, vector } }],
+    "repository-b",
+  );
+  const contexts: unknown[] = [];
+  const result = await deduplicateScanDirectoryInternal(
+    f.scanDir,
+    { repository: f.repository, embedding: f.embedding, allRepositories: true },
+    {
+      environment: f.environment,
+      reviewRunner: {
+        async run<T>(review: CodexReview<T>): Promise<T> {
+          const context = review.prompt
+            .split("\n")
+            .find((line) => line.startsWith('{"approvedRepositoryId":'))!;
+          contexts.push(JSON.parse(context));
+          return review.validate(
+            review.stage === "screening"
+              ? {
+                  decisions: {
+                    "pair-1": {
+                      decision: "SAME",
+                      rationale: "Review the supplied evidence independently",
+                    },
+                  },
+                }
+              : { decision: "DISTINCT", rationale: "Separate source controls" },
+          );
+        },
+      },
+    },
+  );
+  expect(contexts).toHaveLength(2);
+  for (const context of contexts)
+    expect(context).toEqual({
+      approvedRepositoryId: f.targetId,
+      findings: [
+        { findingId: anchor.findingId, repositoryIds: [f.targetId] },
+        { findingId: neighbor.findingId, repositoryIds: ["repository-b"] },
+      ],
+    });
+  expect(result.duplicateGroups).toEqual([]);
+  expect(
+    JSON.parse(await readFile(join(f.scanDir, "findings.json"), "utf8")),
+  ).toEqual(f.document);
 });
 
 test.each(["model", "dimensions", "cacheNamespace"] as const)(

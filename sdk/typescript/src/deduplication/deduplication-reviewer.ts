@@ -2,7 +2,11 @@ import { z } from "incur";
 import { requireFinding } from "./finding-schema.js";
 import type { Finding } from "../models.js";
 import type { CodexReviewRunner } from "./codex-review.js";
-import { pairReviewPrompt, screeningPrompt } from "./deduplication-prompts.js";
+import {
+  pairReviewPrompt,
+  groupingReviewPrompt,
+  screeningPrompt,
+} from "./deduplication-prompts.js";
 import { scanModelConfiguration, type JsonObject } from "../config.js";
 
 const rationale = z.string().refine((value) => value.trim().length > 0);
@@ -52,10 +56,11 @@ function requireMergedFinding(result: DuplicateDecision): void {
 
 export type ScreeningResult = z.infer<typeof screeningSchema>;
 export type DuplicateDecision = z.infer<typeof reviewSchema>;
+export type GroupingDecision = z.infer<typeof screeningDecisionSchema>;
 
 export interface DeduplicationReviewer {
   screen(findings: readonly Finding[]): Promise<ScreeningResult>;
-  reviewPair(findings: readonly Finding[]): Promise<DuplicateDecision>;
+  reviewPair(findings: readonly Finding[]): Promise<GroupingDecision>;
 }
 
 export function pairKey(ids: readonly string[]): string {
@@ -125,13 +130,16 @@ function screeningToolSchema(neighborCount: number): object {
   };
 }
 
-export class CodexDeduplicationReviewer implements DeduplicationReviewer {
+class CodexReviewer {
   constructor(
-    private readonly runner: Pick<CodexReviewRunner, "run">,
+    protected readonly runner: Pick<CodexReviewRunner, "run">,
     private readonly configuration: JsonObject = {},
+    protected readonly sourceContext: (
+      findings: readonly Finding[],
+    ) => string = () => "",
   ) {}
 
-  private settings(model: string, effort: string) {
+  protected settings(model: string, effort: string) {
     const selected = scanModelConfiguration({
       model,
       model_reasoning_effort: effort,
@@ -139,18 +147,23 @@ export class CodexDeduplicationReviewer implements DeduplicationReviewer {
     });
     return { model: selected.model, effort: selected.reasoningEffort };
   }
-
   async screen(findings: readonly Finding[]): Promise<ScreeningResult> {
     return await this.runner.run({
       stage: "screening",
       findingIds: findings.map((finding) => finding.findingId),
       ...this.settings("gpt-5.6-luna", "xhigh"),
-      prompt: screeningPrompt(findings),
+      prompt: `${this.sourceContext(findings)}${screeningPrompt(findings)}`,
       schema: screeningToolSchema(findings.length - 1),
       validate: (value) => validateScreening(value, findings),
     });
   }
+}
 
+/** Rich review contract used by host-provided records consumers. */
+export class CodexDeduplicationReviewer
+  extends CodexReviewer
+  implements DeduplicationReviewer
+{
   async reviewPair(findings: readonly Finding[]): Promise<DuplicateDecision> {
     return await this.runner.run({
       stage: "pair-review",
@@ -162,6 +175,26 @@ export class CodexDeduplicationReviewer implements DeduplicationReviewer {
         ...z.toJSONSchema(reviewSchema, { target: "openapi-3.0" }),
       },
       validate: (value) => validateReview(value, findings),
+    });
+  }
+}
+
+/** Saved-scan grouping stores original records and needs only a pair decision. */
+export class CodexGroupingReviewer
+  extends CodexReviewer
+  implements DeduplicationReviewer
+{
+  async reviewPair(findings: readonly Finding[]): Promise<GroupingDecision> {
+    return await this.runner.run({
+      stage: "pair-review",
+      findingIds: findings.map((finding) => finding.findingId),
+      ...this.settings("gpt-5.6-sol", "high"),
+      prompt: `${this.sourceContext(findings)}${groupingReviewPrompt(findings)}`,
+      schema: {
+        type: "object",
+        ...z.toJSONSchema(screeningDecisionSchema, { target: "openapi-3.0" }),
+      },
+      validate: (value) => screeningDecisionSchema.parse(value),
     });
   }
 }
