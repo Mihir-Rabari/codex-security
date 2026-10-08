@@ -729,15 +729,12 @@ export class CodexSecurity {
           session.modelProvider,
         ),
       };
-      for (const source of [
-        inputs.repository,
-        ...(knowledgeBase?.sources ?? []),
+      for (const root of [
+        (await gitMarkerRoot(inputs.repository, signal, "outermost")) ??
+          inputs.repository,
+        ...(knowledgeBase?.protectedRoots ?? []),
       ]) {
-        git = await inspectTrustedExecutable(
-          "git",
-          git.environment,
-          (await gitMarkerRoot(source, signal, "outermost")) ?? source,
-        );
+        git = await inspectTrustedExecutable("git", git.environment, root);
       }
       const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
       const workbenchOptions: WorkbenchCommandOptions = {

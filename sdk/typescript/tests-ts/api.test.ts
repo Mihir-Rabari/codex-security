@@ -1122,12 +1122,14 @@ describe("CodexSecurity finding validation", () => {
   );
 
   test.each([
-    [false, false],
-    [true, false],
-    [true, true],
-  ])(
-    "retains supplied knowledge context for workflow validation; changed=%p, snapshot=%p",
-    async (changed, snapshot) => {
+    ["unchanged", false],
+    ["modified", false],
+    ["modified", true],
+    ["renamed", true],
+    ["deleted", true],
+  ] as const)(
+    "retains supplied knowledge context for workflow validation; change=%s, snapshot=%p",
+    async (change, snapshot) => {
       const python = await resolvePluginPython();
       let modelCalls = 0;
       const normalizedPaths: string[] = [];
@@ -1177,16 +1179,37 @@ describe("CodexSecurity finding validation", () => {
       expect(fixture.captured.prompt).not.toContain(
         "Original synthetic policy.",
       );
-      if (changed) await writeFile(document, "Updated synthetic policy.");
+      const movedDocument = join(fixture.root, "moved-policy.md");
+      if (change === "modified")
+        await writeFile(document, "Updated synthetic policy.");
+      else if (change === "renamed") await rename(document, movedDocument);
+      else if (change === "deleted") await rm(document);
       const second = await client.validate(request);
-      expect(modelCalls).toBe(changed && !snapshot ? 2 : 1);
+      expect(modelCalls).toBe(change === "modified" && !snapshot ? 2 : 1);
       expect(second.report).toBe(
-        changed && !snapshot ? "Updated synthetic policy." : first.report,
+        change === "modified" && !snapshot
+          ? "Updated synthetic policy."
+          : first.report,
       );
+      if (change === "renamed" || change === "deleted") {
+        const fresh = await client.validate({
+          ...request,
+          finding: "Another synthetic candidate.",
+        });
+        expect(fresh.report).toBe(first.report);
+        expect(modelCalls).toBe(2);
+      }
       expect(normalizedPaths.every((path) => !existsSync(path))).toBe(true);
-      expect(await readFile(document, "utf8")).toBe(
-        changed ? "Updated synthetic policy." : first.report,
-      );
+      if (change === "deleted") expect(existsSync(document)).toBe(false);
+      else
+        expect(
+          await readFile(
+            change === "renamed" ? movedDocument : document,
+            "utf8",
+          ),
+        ).toBe(
+          change === "modified" ? "Updated synthetic policy." : first.report,
+        );
     },
   );
 
