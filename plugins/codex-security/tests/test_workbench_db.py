@@ -2252,7 +2252,14 @@ def test_workbench_rejects_working_tree_target_after_contents_change(tmp_path: P
 def test_workbench_warns_after_working_tree_changes(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
-    revision = initialize_git_repository(target)
+    initialize_git_repository(target)
+    (target / "README.md").write_text("committed source\n" * 50)
+    subprocess.run(["git", "add", "README.md"], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "Add source fixture"], cwd=target, check=True)
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=target, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    (target / "README.md").write_text("scanned working-tree source\n" * 50)
     (target / "new-file.txt").write_text("selected content\n")
     workspace_id = str(uuid.uuid4())
     create_saved_working_tree_workspace(state_dir, target, workspace_id, revision)
@@ -2270,6 +2277,7 @@ def test_workbench_warns_after_working_tree_changes(tmp_path: Path) -> None:
         scan_dir,
         scan_id,
         target,
+        relative_path="README.md",
         target_kind="git_diff",
         diff_base_revision=revision,
         diff_head_revision=revision,
@@ -2280,6 +2288,9 @@ def test_workbench_warns_after_working_tree_changes(tmp_path: Path) -> None:
     completed = scan_command(state_dir, "complete-scan", scan_id)
     assert completed["scan"]["progress"]["status"] == "complete"
     assert completed["scan"]["warnings"] == [WORKTREE_CHANGED_WARNING]
+    finding = completed["scan"]["findings"][0]
+    assert finding["locations"][0]["path"] == "README.md"
+    assert "sourceExcerpt" not in finding
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     assert manifest["scan"]["target"]["snapshotDigest"] == snapshot_digest
     assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == "complete"
@@ -2942,19 +2953,26 @@ def test_completed_finding_projects_writeup_and_poc_artifact_paths(
     ]
 
 
+@pytest.mark.parametrize("nested", [False, True])
 def test_workbench_populates_clean_git_scan_revision_with_large_source_excerpt(
     tmp_path: Path,
+    nested: bool,
 ) -> None:
     state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    initialize_git_repository(target)
+    repository = tmp_path / "target"
+    initialize_git_repository(repository)
+    target = repository
+    if nested:
+        (repository / "README.md").write_text("different root source\n" * 50)
+        target = repository / "nested"
+        target.mkdir()
     (target / "README.md").write_text(
         "\n".join(f"source line {line_number}" for line_number in range(1, 51))
         + "\n"
         + "x" * (1024 * 1024)
     )
-    subprocess.run(["git", "add", "README.md"], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "Add source fixture"], cwd=target, check=True)
+    subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-qm", "Add source fixture"], cwd=repository, check=True)
     revision = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=target,
@@ -3025,7 +3043,7 @@ def test_source_excerpt_breaks_lines_only_at_newlines(tmp_path: Path, separator:
     )
 
     excerpt = finding_source_excerpt(
-        {"target_revision": revision, "target_snapshot_digest": None},
+        {"target_revision": revision, "target_snapshot_digest": None, "diff_target_kind": None},
         target,
         [{"path": "README.md", "startLine": 5, "endLine": 5}],
     )
@@ -3047,7 +3065,7 @@ def test_source_excerpt_numbers_standard_line_endings(tmp_path: Path, line_endin
     )
 
     excerpt = finding_source_excerpt(
-        {"target_revision": revision, "target_snapshot_digest": None},
+        {"target_revision": revision, "target_snapshot_digest": None, "diff_target_kind": None},
         target,
         [{"path": "README.md", "startLine": 5, "endLine": 5}],
     )
@@ -3077,7 +3095,7 @@ def test_source_excerpt_preserves_final_lines(
     finding_source_excerpt = namespace["finding_source_excerpt"]
     target = tmp_path / "target"
     revision = commit_source_fixture(target, source)
-    scan = {"target_revision": revision, "target_snapshot_digest": None}
+    scan = {"target_revision": revision, "target_snapshot_digest": None, "diff_target_kind": None}
 
     excerpt = finding_source_excerpt(
         scan,

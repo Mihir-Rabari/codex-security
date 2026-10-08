@@ -7392,6 +7392,10 @@ test.each(["sdk", "rollout"] as const)(
 
 test.each([
   [
+    "keeps an earlier-millisecond UUIDv7 turn in inherited history",
+    ["019f9e4d-b3b9-7000-8000-000000000001"],
+  ],
+  [
     "keeps a same-millisecond lower UUIDv7 turn in inherited history",
     [lowerUuid7Turn],
   ],
@@ -7450,6 +7454,14 @@ test.each([
       : [];
   });
   expect(forwardedTurnIds).toEqual([higherUuid7Turn]);
+  const saved = await readScanLogs({
+    scanId: "scan-example",
+    threadId: childUuid7Thread,
+    codexHome: home,
+  });
+  const ownedEvents = [rollout[0]!, ...rollout.slice(-3)];
+  expect(forwardedEvents.map(({ event }) => event)).toEqual(ownedEvents);
+  expect(saved.events.map(({ event }) => event)).toEqual(ownedEvents);
 });
 
 test.each([undefined, 100, 1_000, 1_500])(
