@@ -1028,6 +1028,12 @@ History lives in `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`, or
 writable, and outside the target repository. Session logs may contain sensitive
 data even though scan recipes do not store credentials.
 
+Codex may compress saved session logs to `.jsonl.zst`. Reading those logs requires
+Node.js 22.15.0+ within 22.x, or Node.js 24.x or 26.x. On Node.js 22.13–22.14,
+compressed sessions are unavailable to `scans logs`, feedback attachments, and
+`scans resume`. Upgrade Node.js to read or resume these sessions. Plain `.jsonl`
+logs work on all supported runtimes.
+
 ### Resuming an interrupted Deep Scan
 
 ```bash
