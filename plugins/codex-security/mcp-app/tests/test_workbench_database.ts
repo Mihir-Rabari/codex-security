@@ -129,7 +129,7 @@ test("every released schema upgrades to the same current schema and remains idem
   const current = memory(t);
   applyMigrations(current);
   const expected = schema(current);
-  for (let version = 0; version <= 42; version++) {
+  for (const version of [0, ...migrations.map((item) => item.version)]) {
     const database = memory(t, version);
     applyMigrations(database);
     assert.deepEqual(
@@ -243,7 +243,7 @@ test(
         database
           .prepare("SELECT MAX(version) AS version FROM schema_migrations")
           .get()?.version,
-        Math.max(...migrations.map((item) => item.version)),
+        migrations.at(-1)!.version,
       );
     } finally {
       database.close();
