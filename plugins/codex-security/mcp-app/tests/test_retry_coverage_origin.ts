@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
-import { cp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  cp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { importSource } from "./import-module.ts";
-import { scanId, workerDraft } from "./scan-draft-fixture.ts";
+import { finding, scanId, workerDraft } from "./scan-draft-fixture.ts";
 import { draftFixture } from "./scan-draft-recovery-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
@@ -16,6 +24,7 @@ const {
   recordCodexSecurityWorkerScanDraft,
   recordCodexSecurityScanDraft,
   parsePersistedScanDraft,
+  parseScanDraft,
   readArchivedWorkerCheckpoints,
 } = await importSource(
   fileURLToPath(new URL("../src/artifact-scan-draft.ts", import.meta.url)),
@@ -924,93 +933,181 @@ for (const mode of ["idless", "explicit", "mixed"]) {
   }
 }
 
-for (const evidence of ["same", "changed", "none"] as const) {
-  for (const explicitId of [false, true]) {
-    test(`retry resubmitted surface keeps receipt-backed identity: evidence=${evidence}, explicit=${explicitId}`, async () => {
-      const f = await fixture();
-      try {
-        f.context.deepReducer.claimedWorkers[0].attempt = 2;
-        const surface = {
-          ...(explicitId ? { id: "authored-review" } : {}),
-          label: "Retained review",
-          disposition: "needs_follow_up",
-          receiptRefs: evidence === "none" ? [] : ["artifacts/review.txt"],
-        };
-        const inherited = workerDraft([], {
-          complete: false,
-          coverage: {
-            completeness: "partial",
-            surfaces: [surface],
-            explicitExclusions: [],
-            deferred: [
-              {
-                id: "pending-review",
-                reason: "Retained validation remains unresolved.",
-              },
-            ],
-          },
-        });
-        if (evidence !== "none") {
-          await mkdir(path.join(f.output, "artifacts"), { recursive: true });
-          await writeFile(
-            path.join(f.output, "artifacts/review.txt"),
-            "Original synthetic review.\n",
-          );
-        }
-        await writeFile(f.resultPath, JSON.stringify(inherited));
-        const archive = path.join(f.workerRoot, "attempts", "attempt-01");
-        await archiveDirectory(f.output, archive);
-        const archiveResult = path.join(archive, "result.json");
-        const before = await readFile(archiveResult);
-        await mkdir(f.output, { recursive: true });
-        if (evidence !== "none") {
-          await mkdir(path.join(f.output, "artifacts"), { recursive: true });
-          await writeFile(
-            path.join(f.output, "artifacts/review.txt"),
-            evidence === "changed"
-              ? "New independent review.\n"
-              : "Original synthetic review.\n",
-          );
-        }
-        await recordCodexSecurityWorkerScanDraft(
-          { root: f.output, repoRoot: f.root, scanId, layout: "worker" },
-          { ...inherited, complete: true },
-        );
-        const source = (await readDeepReductionSources(f.context))
-          .discoveries[0].coverage;
-        if (evidence !== "changed") {
-          assert.equal(
-            source.surfaces.length,
-            1,
-            JSON.stringify(source.surfaces),
-          );
-          assert.equal(source.surfaces[0].provenance.attempt, 1);
-        } else {
-          assert.equal(source.surfaces.length, explicitId ? 1 : 2);
-          assert.ok(
-            source.surfaces.some(
-              (row: { provenance: { attempt: number } }) =>
-                row.provenance.attempt === 2,
-            ),
-          );
-        }
-        assert.deepEqual(await readFile(archiveResult), before);
-        for (const row of source.surfaces)
-          for (const ref of row.receiptRefs)
-            assert.equal(
-              await readFile(
-                path.join(f.context.deepReducer.scanRoot, ref),
-                "utf8",
-              ),
-              ref.includes("/attempts/")
-                ? "Original synthetic review.\n"
-                : evidence === "changed"
-                  ? "New independent review.\n"
-                  : "Original synthetic review.\n",
+for (const receiptPath of [
+  "artifacts/review.txt",
+  "artifacts/./review.txt",
+  "artifacts//review.txt",
+]) {
+  for (const evidence of ["same", "changed", "none"] as const) {
+    for (const explicitId of [false, true]) {
+      test(`retry resubmitted surface keeps receipt-backed identity: evidence=${evidence}, explicit=${explicitId}`, async () => {
+        const f = await fixture();
+        try {
+          f.context.deepReducer.claimedWorkers[0].attempt = 2;
+          const surface = {
+            ...(explicitId ? { id: "authored-review" } : {}),
+            label: "Retained review",
+            disposition: "needs_follow_up",
+            receiptRefs: evidence === "none" ? [] : [receiptPath],
+          };
+          const inherited = workerDraft([], {
+            complete: false,
+            coverage: {
+              completeness: "partial",
+              surfaces: [surface],
+              explicitExclusions: [],
+              deferred: [
+                {
+                  id: "pending-review",
+                  reason: "Retained validation remains unresolved.",
+                },
+              ],
+            },
+          });
+          if (evidence !== "none") {
+            await mkdir(path.join(f.output, "artifacts"), { recursive: true });
+            await writeFile(
+              path.join(f.output, "artifacts/review.txt"),
+              "Original synthetic review.\n",
             );
-      } finally {
-        await rm(f.root, { recursive: true, force: true });
-      }
-    });
+          }
+          await writeFile(f.resultPath, JSON.stringify(inherited));
+          const archive = path.join(f.workerRoot, "attempts", "attempt-01");
+          await archiveDirectory(f.output, archive);
+          const archiveResult = path.join(archive, "result.json");
+          const before = await readFile(archiveResult);
+          await mkdir(f.output, { recursive: true });
+          if (evidence !== "none") {
+            await mkdir(path.join(f.output, "artifacts"), { recursive: true });
+            await writeFile(
+              path.join(f.output, "artifacts/review.txt"),
+              evidence === "changed"
+                ? "New independent review.\n"
+                : "Original synthetic review.\n",
+            );
+          }
+          await recordCodexSecurityWorkerScanDraft(
+            { root: f.output, repoRoot: f.root, scanId, layout: "worker" },
+            { ...inherited, complete: true },
+          );
+          const source = (await readDeepReductionSources(f.context))
+            .discoveries[0].coverage;
+          if (evidence !== "changed") {
+            assert.equal(
+              source.surfaces.length,
+              1,
+              JSON.stringify(source.surfaces),
+            );
+            assert.equal(source.surfaces[0].provenance.attempt, 1);
+          } else {
+            assert.equal(source.surfaces.length, explicitId ? 1 : 2);
+            assert.ok(
+              source.surfaces.some(
+                (row: { provenance: { attempt: number } }) =>
+                  row.provenance.attempt === 2,
+              ),
+            );
+          }
+          assert.deepEqual(await readFile(archiveResult), before);
+          for (const row of source.surfaces)
+            for (const ref of row.receiptRefs)
+              assert.equal(
+                await readFile(
+                  path.join(f.context.deepReducer.scanRoot, ref),
+                  "utf8",
+                ),
+                ref.includes("/attempts/")
+                  ? "Original synthetic review.\n"
+                  : evidence === "changed"
+                    ? "New independent review.\n"
+                    : "Original synthetic review.\n",
+              );
+        } finally {
+          await rm(f.root, { recursive: true, force: true });
+        }
+      });
+    }
+  }
+}
+
+for (const malformed of ["none", "json", "schema", "head-json"]) {
+  for (const complete of [false, true]) {
+    test(
+      "retry checkpoint retains a valid submission before archived " +
+        malformed +
+        ", complete=" +
+        complete,
+      async () => {
+        const f = await fixture();
+        try {
+          const archive = path.join(f.workerRoot, "attempts", "attempt-01");
+          await mkdir(path.join(archive, "checkpoints"), { recursive: true });
+          const broken =
+            malformed === "head-json"
+              ? path.join(archive, "checkpoint-head.json")
+              : path.join(archive, "checkpoints", "a".repeat(64) + ".json");
+          const bytes = malformed === "schema" ? "{}\n" : "{broken\n";
+          if (malformed !== "none") await writeFile(broken, bytes);
+          const context = {
+            root: f.output,
+            repoRoot: f.root,
+            scanId,
+            layout: "worker",
+          };
+          const input = workerDraft(
+            [finding("retained-submission", "src/example.ts")],
+            {
+              complete,
+              coverage: {
+                completeness: "partial",
+                surfaces: [
+                  {
+                    id: "new-review",
+                    label: "New review",
+                    disposition: "needs_follow_up",
+                    receiptRefs: [],
+                  },
+                ],
+                explicitExclusions: [],
+                deferred: [
+                  { id: "new-task", reason: "New proof remains pending." },
+                ],
+              },
+            },
+          );
+          const expected = parseScanDraft(input);
+          if (malformed === "none")
+            await recordCodexSecurityWorkerScanDraft(context, input);
+          else {
+            await assert.rejects(
+              recordCodexSecurityWorkerScanDraft(context, input),
+            );
+            assert.equal(await readFile(broken, "utf8"), bytes);
+          }
+          const checkpoints = path.join(f.output, "checkpoints");
+          const names = await readdir(checkpoints);
+          assert.equal(names.length, 1);
+          assert.deepEqual(
+            JSON.parse(
+              await readFile(path.join(checkpoints, names[0]), "utf8"),
+            ),
+            expected,
+          );
+          if (malformed !== "none") await rm(broken);
+          await recordCodexSecurityWorkerScanDraft(
+            context,
+            workerDraft([], { complete: true }),
+          );
+          const result = JSON.parse(await readFile(f.resultPath, "utf8"));
+          assert.deepEqual(result.findings, expected.findings);
+          assert.deepEqual(
+            result.coverage.deferred,
+            expected.coverage.deferred,
+          );
+        } finally {
+          await rm(f.root, { recursive: true, force: true });
+        }
+      },
+    );
   }
 }

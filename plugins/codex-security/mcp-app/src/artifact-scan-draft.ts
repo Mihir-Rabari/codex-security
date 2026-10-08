@@ -321,6 +321,8 @@ export async function recordCodexSecurityWorkerScanDraft(
           ),
         }
       : parsed;
+  if (!resolvedDeferred(scoped.coverage).length)
+    await saveScanDraftCheckpoint(context, scoped, false);
   const archived = await readArchivedWorkerCheckpoints(context);
   const archivePrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/attempts/`;
   const receiptDigests = new Map<string, string>();
@@ -337,7 +339,12 @@ export async function recordCodexSecurityWorkerScanDraft(
             archivedRef
               ? { ...context, root: join(dirname(context.root), "attempts") }
               : context,
-            (archivedRef ? ref.slice(archivePrefix.length) : ref).split("/"),
+            (archivedRef ? ref.slice(archivePrefix.length) : ref)
+              .split("/")
+              .filter(
+                (component, index) =>
+                  component !== "." && (component !== "" || index === 0),
+              ),
             "Saved discovery receipt",
           );
           receiptDigests.set(
