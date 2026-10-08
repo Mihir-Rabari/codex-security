@@ -110,9 +110,9 @@ afterEach(cleanup);
 // Temporary Windows diagnostics identify the active test when the shard stalls.
 const test = process.platform === "win32" ? traceApiTests(bunTest) : bunTest;
 
-function traceApiTests<T extends (...args: never[]) => unknown>(
-  registration: T,
-): T {
+type TestRegistration = (...args: never[]) => unknown;
+
+function traceApiTests<T extends TestRegistration>(registration: T): T {
   return new Proxy(registration, {
     apply(target, receiver, args) {
       const callbackIndex = args.findIndex(
@@ -133,7 +133,13 @@ function traceApiTests<T extends (...args: never[]) => unknown>(
       const value = Reflect.get(target, property, receiver);
       if (property !== "each" && property !== "skipIf") return value;
       return (...args: unknown[]) =>
-        traceApiTests(Reflect.apply(value, target, args));
+        traceApiTests(
+          Reflect.apply(
+            value as (...args: unknown[]) => TestRegistration,
+            target,
+            args,
+          ),
+        );
     },
   });
 }
