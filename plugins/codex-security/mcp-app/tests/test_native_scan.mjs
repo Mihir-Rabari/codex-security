@@ -25,7 +25,7 @@ const bundle = await build({
   bundle: true,
   stdin: {
     contents: `export * from ${JSON.stringify(fileURLToPath(new URL("../src/native-scan.ts", import.meta.url)))};
-      export { prepareAmbientRuntime, prepareExecutionSource, createExecutionCodex, prepareDiscoveryExecution, prepareMergeExecution } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/execution-preparation.ts", import.meta.url)))};
+      export { prepareAmbientExecution, prepareAmbientRuntime, prepareExecutionSource, createExecutionCodex, prepareDiscoveryExecution, prepareMergeExecution } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/execution-preparation.ts", import.meta.url)))};
       export { resolveDeepScanConfig } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/deep-config.ts", import.meta.url)))};
       export { createPermissionCheckedCodex } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/permission-profile.ts", import.meta.url)))};
       export { scanRuntimeCodexConfig, scanPreflightCodexConfig } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/api.ts", import.meta.url)))};`,
@@ -72,10 +72,35 @@ const {
   prepareMergeExecution,
   scanRuntimeCodexConfig,
   createPermissionCheckedCodex,
+  prepareAmbientExecution,
   prepareAmbientRuntime,
   prepareExecutionSource,
   resolveDeepScanConfig,
 } = module.exports;
+
+async function prepareNativeExecution(input) {
+  const prepared = await prepareNativeScan(input);
+  const ambient = await prepareAmbientExecution(
+    prepared.client.dependencies.ambientExecution,
+  );
+  prepared.client.config = {
+    ...prepared.client.config,
+    codexOverrides: ambient.configuration,
+  };
+  prepared.client.dependencies = {
+    ...prepared.client.dependencies,
+    environment: ambient.environment,
+    ambientExecution: ambient,
+  };
+  prepared.options = {
+    ...prepared.options,
+    auth: ambient.auth,
+    ...(ambient.preserveProviderEnvironment
+      ? { preserveProviderEnvironment: true }
+      : {}),
+  };
+  return prepared;
+}
 
 const fixtureRepository = await realpath(
   await mkdtemp(join(tmpdir(), "native-scan-repository-")),
@@ -315,7 +340,7 @@ else {
               );
           }
           await writeFile(capture, "");
-          const prepared = await prepareNativeScan({
+          const prepared = await prepareNativeExecution({
             ...input(),
             recipe,
             parentSandbox: {
@@ -547,7 +572,7 @@ test(
         [undefined, 3],
         [3, undefined],
       ]) {
-        const prepared = await prepareNativeScan({
+        const prepared = await prepareNativeExecution({
           ...input(),
           scan: { ...input().scan, targetPath: target, scanDir: output },
           parentSandbox: {
@@ -700,13 +725,13 @@ test("native preparation protects enclosing repositories for fresh and resumed c
         delete process.env.CODEX_CLI_PATH;
         process.env.PATH = searchPath;
         await assert.rejects(
-          prepareNativeScan(request),
+          prepareNativeExecution(request),
           /outside the scan target/,
         );
       }
       process.env.CODEX_CLI_PATH = executable;
       await assert.rejects(
-        prepareNativeScan(request),
+        prepareNativeExecution(request),
         /outside the scan target/,
       );
 
@@ -719,14 +744,14 @@ test("native preparation protects enclosing repositories for fresh and resumed c
             .join(delimiter);
           process.env.CODEX_CLI_PATH = executable;
           await assert.rejects(
-            prepareNativeScan(request),
+            prepareNativeExecution(request),
             /outside the scan target/,
           );
           for (const configured of [undefined, "  ", "codex"]) {
             if (configured === undefined) delete process.env.CODEX_CLI_PATH;
             else process.env.CODEX_CLI_PATH = configured;
             const originalPath = process.env.PATH;
-            const prepared = await prepareNativeScan(request);
+            const prepared = await prepareNativeExecution(request);
             const environment = prepared.client.dependencies.environment;
             assert.equal(environment.CODEX_CLI_PATH, installation.executable);
             assert.equal(environment.PATH, installation.bin);
@@ -740,7 +765,7 @@ test("native preparation protects enclosing repositories for fresh and resumed c
         delimiter,
       );
       const originalPath = process.env.PATH;
-      const prepared = await prepareNativeScan(request);
+      const prepared = await prepareNativeExecution(request);
       const environment = prepared.client.dependencies.environment;
       assert.equal(
         await realpath(environment.CODEX_CLI_PATH),
@@ -802,13 +827,13 @@ test("native preparation excludes scan output and knowledge sources from executa
       for (const directory of [scanDir, knowledgeRoot]) {
         process.env.CODEX_CLI_PATH = join(directory, name);
         await assert.rejects(
-          prepareNativeScan(request),
+          prepareNativeExecution(request),
           /outside the scan target/,
         );
       }
       delete process.env.CODEX_CLI_PATH;
       process.env.PATH = [scanDir, knowledgeRoot, external].join(delimiter);
-      const prepared = await prepareNativeScan(request);
+      const prepared = await prepareNativeExecution(request);
       const environment = prepared.client.dependencies.environment;
       assert.equal(environment.CODEX_CLI_PATH, join(external, name));
       assert.equal(environment.PATH, external);
@@ -1132,7 +1157,7 @@ test("native scans preserve selected Codex homes and saved settings", async () =
       if (override === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = override;
       for (const saved of [false, true]) {
-        const prepared = await prepareNativeScan({
+        const prepared = await prepareNativeExecution({
           ...input(),
           pluginRoot,
           recipe: {
@@ -1207,7 +1232,7 @@ test("native API-key preparation creates a missing default Codex home", async ()
       "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
     ])
       delete process.env[key];
-    const prepared = await prepareNativeScan({
+    const prepared = await prepareNativeExecution({
       ...input(),
       pluginRoot,
       recipe: { auth: "api-key" },
@@ -1312,7 +1337,7 @@ if (process.argv.includes("app-server")) {
         );
         process.env.CODEX_HOME = home;
         await assert.rejects(stat(home), { code: "ENOENT" });
-        const prepared = await prepareNativeScan({
+        const prepared = await prepareNativeExecution({
           ...input(),
           pluginRoot,
           recipe: {
@@ -1485,7 +1510,7 @@ if (process.argv.includes("app-server")) {
           delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
         else process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH = override;
         for (const resumed of [false, true]) {
-          const prepared = await prepareNativeScan({
+          const prepared = await prepareNativeExecution({
             ...input(),
             pluginRoot,
             model: "synthetic-current",
@@ -1642,7 +1667,7 @@ test("native launches snapshot safety identifiers and prefer saved recipes", asy
     ].map(([ambient, recipe, expected], index) => {
       if (ambient === undefined) delete process.env.CODEX_SAFETY_IDENTIFIER;
       else process.env.CODEX_SAFETY_IDENTIFIER = ambient;
-      return prepareNativeScan({
+      return prepareNativeExecution({
         ...input(`parent-${index}`),
         scan: {
           ...input(`parent-${index}`).scan,
@@ -1791,7 +1816,7 @@ if (process.argv.includes("app-server")) {
                 role === "discovery" ? "daybreak_red" : "daybreak_blue",
             },
           ].map(async (recipe) => ({
-            native: await prepareNativeScan({
+            native: await prepareNativeExecution({
               ...input(),
               scan: { ...input().scan, targetPath: target },
               recipe,
@@ -2037,7 +2062,7 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
           { auth: forcedLogin ? "auto" : "api-key", config },
         ]) {
           await rm(join(root, "login.json"), { force: true });
-          const prepared = await prepareNativeScan({
+          const prepared = await prepareNativeExecution({
             ...input(),
             recipe,
             model: "current-model",
@@ -2149,7 +2174,7 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
       }
       process.env.OPENAI_API_KEY = "synthetic-competing-key";
       await rm(join(root, "auth.json"));
-      const prepared = await prepareNativeScan(input());
+      const prepared = await prepareNativeExecution(input());
       const executionConfig = {
         model: "native-config-model",
         mcp_servers: {
@@ -2220,7 +2245,7 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
           undefined,
           { auth: "auto", config: accountConfig },
         ]) {
-          const prepared = await prepareNativeScan({ ...input(), recipe });
+          const prepared = await prepareNativeExecution({ ...input(), recipe });
           const login = JSON.parse(
             await readFile(join(root, "login.json"), "utf8"),
           );
@@ -2274,7 +2299,10 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
         for (const recipe of [undefined, { auth: "auto", config }]) {
           await rm(join(root, "login.json"), { force: true });
           if (provider?.env_key || provider?.auth) {
-            const prepared = await prepareNativeScan({ ...input(), recipe });
+            const prepared = await prepareNativeExecution({
+              ...input(),
+              recipe,
+            });
             assert.equal(prepared.options.preserveProviderEnvironment, true);
             assert.equal(
               prepared.client.dependencies.environment.OPENAI_API_KEY,
@@ -2284,10 +2312,13 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
               code: "ENOENT",
             });
           } else {
-            await assert.rejects(prepareNativeScan({ ...input(), recipe }), {
-              name: "CodexSecurityError",
-              message: "Could not access the selected keyring",
-            });
+            await assert.rejects(
+              prepareNativeExecution({ ...input(), recipe }),
+              {
+                name: "CodexSecurityError",
+                message: "Could not access the selected keyring",
+              },
+            );
             const login = JSON.parse(
               await readFile(join(root, "login.json"), "utf8"),
             );
@@ -2320,7 +2351,7 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
         },
       ]) {
         await rm(join(root, "login.json"), { force: true });
-        const prepared = await prepareNativeScan({ ...input(), recipe });
+        const prepared = await prepareNativeExecution({ ...input(), recipe });
         assert.equal(prepared.options.preserveProviderEnvironment, undefined);
         assert.equal(prepared.options.auth, "chatgpt");
         assert.equal(
@@ -2334,7 +2365,7 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
         assert.equal(process.env.OPENAI_API_KEY, "synthetic-competing-key");
       }
       await rm(join(root, "login.json"));
-      const forced = await prepareNativeScan({
+      const forced = await prepareNativeExecution({
         ...input(),
         recipe: { auth: "auto", config: { forced_login_method: "chatgpt" } },
       });
@@ -2403,7 +2434,7 @@ test("native saved scans retain settings, auth environment, permissions and iden
         postScanPrompt: "Publish once.",
       },
     };
-    const { client, options } = await prepareNativeScan(request);
+    const { client, options } = await prepareNativeExecution(request);
     assert.equal(client.config.pluginPath, request.pluginRoot);
     assert.equal(client.config.codexOverrides.model, "active-model");
     assert.equal(client.config.codexOverrides.model_reasoning_effort, "ultra");
@@ -2436,7 +2467,7 @@ test("native saved scans retain settings, auth environment, permissions and iden
       ["chatgpt", "openai"],
       ["api-key", "openrouter"],
     ]) {
-      const selected = await prepareNativeScan({
+      const selected = await prepareNativeExecution({
         ...request,
         recipe: {
           ...request.recipe,
@@ -2482,14 +2513,14 @@ test("native saved scans retain settings, auth environment, permissions and iden
     const documents = join(root, "ambient-documents");
     await mkdir(documents);
     process.env.CODEX_SECURITY_KNOWLEDGE_BASE = documents;
-    const savedWithoutDocuments = await prepareNativeScan(request);
+    const savedWithoutDocuments = await prepareNativeExecution(request);
     assert.equal(savedWithoutDocuments.options.knowledgeBasePaths, undefined);
     assert.equal(
       savedWithoutDocuments.client.dependencies.environment
         .CODEX_SECURITY_KNOWLEDGE_BASE,
       undefined,
     );
-    const freshWithDocuments = await prepareNativeScan({
+    const freshWithDocuments = await prepareNativeExecution({
       ...request,
       recipe: undefined,
     });
@@ -2499,7 +2530,7 @@ test("native saved scans retain settings, auth environment, permissions and iden
     delete process.env.CODEX_SECURITY_KNOWLEDGE_BASE;
 
     assert.equal(options.postScanPrompt, "Publish once.");
-    const withoutContext = await prepareNativeScan({
+    const withoutContext = await prepareNativeExecution({
       ...request,
       scan: { ...request.scan, userContext: null },
     });
@@ -2509,7 +2540,7 @@ test("native saved scans retain settings, auth environment, permissions and iden
       [10, 3, 10],
       [3, undefined, 3],
     ]) {
-      const savedPermissions = await prepareNativeScan({
+      const savedPermissions = await prepareNativeExecution({
         ...request,
         parentSandbox: {
           ...request.parentSandbox,
@@ -2540,7 +2571,7 @@ test("native saved scans retain settings, auth environment, permissions and iden
         savedPermissions.options.inheritedPermissions,
       );
     }
-    const restricted = await prepareNativeScan({
+    const restricted = await prepareNativeExecution({
       ...request,
       recipe: {
         ...request.recipe,
@@ -2594,7 +2625,7 @@ test("native saved scans retain settings, auth environment, permissions and iden
       undefined,
       { deepScan: { workers: 3, subagents: 2 } },
     ]) {
-      const restored = await prepareNativeScan({
+      const restored = await prepareNativeExecution({
         ...request,
         recipe,
         savedDeepScanSettings,
@@ -2805,13 +2836,13 @@ else {
           };
           if (samePath && savedLiteral !== currentLiteral) {
             await assert.rejects(
-              prepareNativeScan(request),
+              prepareNativeExecution(request),
               /literal.*glob|glob.*literal/u,
             );
             await assert.rejects(readFile(capture), { code: "ENOENT" });
             continue;
           }
-          const prepared = await prepareNativeScan(request);
+          const prepared = await prepareNativeExecution(request);
           const ambient = prepared.client.dependencies.ambientExecution;
           const runtime = await prepareAmbientRuntime(ambient);
           try {

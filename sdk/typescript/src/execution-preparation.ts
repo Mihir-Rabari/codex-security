@@ -169,6 +169,7 @@ export interface PreparedRuntime {
 export type ScanPermissions = { filesystem: JsonObject; network: JsonObject };
 
 export interface PreparedExecution {
+  readonly auth?: ScanAuthMode;
   readonly policy: ExecutionPolicy;
   readonly source: ExecutionSource;
   inheritedPermissions?: ScanPermissions;

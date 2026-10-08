@@ -849,7 +849,6 @@ describe("CodexSecurity orchestration", () => {
               environment,
               command: { command: process.execPath },
               configuration: {},
-              preserveProviderEnvironment: false,
               auth: "api-key",
               pluginRoot: PLUGIN_ROOT,
             },

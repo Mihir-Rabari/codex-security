@@ -31,7 +31,7 @@ import {
   createExecutionCodex,
   lockExecutionConfiguration,
   prepareAmbientRuntime,
-  type AmbientExecution,
+  prepareAmbientExecution,
   type ExecutionSource,
   prepareDiscoveryExecution,
   prepareMergeExecution,
@@ -462,7 +462,7 @@ interface CodexSecurityRuntimeOptions {
 }
 
 interface ClientDependencies {
-  ambientExecution?: AmbientExecution;
+  ambientExecution?: Parameters<typeof prepareAmbientExecution>[0];
   inheritedPermissions?: ScanPermissions;
   workerNumber?: (threadId: string) => number;
   createCodex?(options: CodexOptions): CodexClientLike;
@@ -1603,6 +1603,13 @@ export class CodexSecurity {
         approvalPolicy,
         python,
       } = session;
+      if (this.#dependencies.ambientExecution !== undefined)
+        options = {
+          ...options,
+          auth: session.auth,
+          preserveProviderEnvironment:
+            session.source.preserveProviderEnvironment,
+        };
       releaseCredentialHome = session.releaseCredentialHome;
       if (knowledgeBase !== null) {
         const profiles = session.sessionConfig["permissions"] as JsonObject;
@@ -3254,14 +3261,36 @@ export class CodexSecurity {
       throwIfAborted(signal);
     };
     try {
+      const ambient =
+        this.#dependencies.ambientExecution === undefined
+          ? undefined
+          : await prepareAmbientExecution(
+              this.#dependencies.ambientExecution,
+              signal,
+            );
+      if (ambient !== undefined)
+        options = {
+          ...options,
+          auth: ambient.auth,
+          preserveProviderEnvironment: ambient.preserveProviderEnvironment,
+        };
+      const sourceEnvironment =
+        ambient?.environment ?? this.#dependencies.environment;
       const requestedConfig = resolveCommandAuthConfig(
-        await mergedCodexConfig(this.config),
-        configuredCodexHome(this.#dependencies.environment),
+        await mergedCodexConfig(
+          ambient === undefined
+            ? this.config
+            : {
+                ...this.config,
+                codexOverrides: ambient.configuration,
+              },
+        ),
+        configuredCodexHome(sourceEnvironment),
       );
       const source = prepareExecutionSource({
         command: this.#codexCommand(),
         configuration: requestedConfig,
-        environment: this.#dependencies.environment,
+        environment: sourceEnvironment,
         auth: options.auth,
         preserveProviderEnvironment: options.preserveProviderEnvironment,
       });
@@ -3448,6 +3477,7 @@ export class CodexSecurity {
       }
       return {
         policy: "ordinary",
+        auth: options.auth,
         source,
         runtime,
         runtimeConfig,
@@ -3945,7 +3975,13 @@ export class CodexSecurity {
     validateLocation: (path: string) => void,
   ): Promise<PreparedRuntime> {
     if (this.#dependencies.ambientExecution !== undefined)
-      return prepareAmbientRuntime(this.#dependencies.ambientExecution, signal);
+      return prepareAmbientRuntime(
+        {
+          ...source,
+          pluginRoot: this.#dependencies.ambientExecution.pluginRoot,
+        },
+        signal,
+      );
     if (this.#dependencies.prepareRuntime !== undefined) {
       return await this.#dependencies.prepareRuntime(this.config, signal);
     }

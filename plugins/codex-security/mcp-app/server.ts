@@ -2391,12 +2391,17 @@ async function finalizeNativeStoppedScan(
   else await nativeScans.cancel(scanId, message);
   const current = await runWorkbench(["get-scan", "--scan-id", scanId]);
   const scan = isJsonObject(current.scan) ? current.scan : undefined;
-  const release = await acquireScanExecution(
-    await workbenchStateDirectory(),
-    scan!.scanDir as string,
-    PLUGIN_ROOT,
-    true,
-  );
+  // Ordinary model turns can call this tool while holding their execution lock.
+  // Deep execution polls the saved stop and drains before releasing ownership.
+  const release =
+    scan?.mode === "deep"
+      ? await acquireScanExecution(
+          await workbenchStateDirectory(),
+          scan.scanDir as string,
+          PLUGIN_ROOT,
+          true,
+        )
+      : undefined;
   try {
     return await runWorkbench([
       "preserve-scan-results",
@@ -2412,7 +2417,7 @@ async function finalizeNativeStoppedScan(
       ),
     ]);
   } finally {
-    release();
+    release?.();
   }
 }
 

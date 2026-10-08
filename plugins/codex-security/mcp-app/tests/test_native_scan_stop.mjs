@@ -86,6 +86,7 @@ for (const entry of [
     const scan = {
       scanId: "synthetic-parent",
       scanDir: "/synthetic/scan",
+      mode: "deep",
       handoffClaimToken: "synthetic-claim",
       progress: { status: entry === "completed" ? "complete" : "running" },
       reportAvailable: false,
@@ -200,6 +201,7 @@ for (const [operation, owner] of ["cancel", "fail"].flatMap((operation) =>
     const scan = () => ({
       scanId,
       scanDir: "/synthetic/scan",
+      mode: "deep",
       handoffClaimToken: claimToken,
       findings: [...lateFindings],
     });
@@ -347,6 +349,7 @@ for (const status of ["canceled", "failed"]) {
     const scan = {
       scanId: "synthetic-parent",
       scanDir: "/synthetic/scan",
+      mode: "deep",
       handoffClaimToken: "synthetic-claim",
       progress: { status },
       failureMessage: status === "failed" ? "Synthetic scan failure." : null,
@@ -418,6 +421,7 @@ for (const completed of [false, true]) {
     const scan = {
       scanId: "synthetic-parent",
       scanDir: "/synthetic/scan",
+      mode: "deep",
       handoffClaimToken: "synthetic-claim",
       progress: { status: completed ? "complete" : "running" },
     };
@@ -466,6 +470,7 @@ for (const lostAcknowledgment of [false, true]) {
     const scan = {
       scanId: "synthetic-parent",
       scanDir: "/synthetic/scan",
+      mode: "deep",
       handoffClaimToken: "synthetic-claim",
       progress: { status: "running" },
       findings: [],
@@ -539,6 +544,7 @@ for (const status of ["failed", "complete", "running"]) {
     const scan = {
       scanId: "synthetic-parent",
       scanDir: "/synthetic/scan",
+      mode: "deep",
       handoffClaimToken: "synthetic-claim",
       progress: { status },
       failureMessage: status === "failed" ? "Synthetic original failure" : null,
@@ -584,5 +590,41 @@ for (const status of ["failed", "complete", "running"]) {
     assert.equal(aborts, status === "running" ? 1 : 0);
     assert.equal(waits, status === "running" ? 0 : 1);
     assert.equal(publications, status === "complete" ? 0 : 1);
+  });
+}
+
+for (const mode of ["standard", "diff"]) {
+  test(`SDK-owned ${mode} failure returns while its model caller holds execution`, async () => {
+    const scan = {
+      scanId: "synthetic-sdk-scan",
+      scanDir: "/synthetic/scan",
+      mode,
+      handoffClaimToken: "synthetic-claim",
+      progress: { status: "failed" },
+    };
+    let published = false;
+    const server = serverFor({
+      async workbench([command]) {
+        if (command === "preserve-scan-results") published = true;
+        else assert.ok(["fail-scan", "get-scan"].includes(command));
+        return {
+          scan,
+          workspace: { setup: { submitted: true }, results: scan },
+        };
+      },
+      async cancel() {},
+      async acquire() {
+        assert.fail(
+          "The awaiting model caller still holds this SDK execution lock.",
+        );
+      },
+    });
+    const result = await server.tools.get("fail_codex_security_scan")({
+      scanId: scan.scanId,
+      message: "Synthetic model-reported failure",
+      handoffClaimToken: scan.handoffClaimToken,
+    });
+    assert.equal(result.structuredContent.scan.progress.status, "failed");
+    assert.equal(published, true);
   });
 }

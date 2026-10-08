@@ -981,38 +981,103 @@ test("a reused client's sealed read uses its installed plugin after the source i
   expect(h.launches).toHaveLength(3);
 });
 
-test("a sealed resume does not construct a model client or launch new work", async () => {
-  const h = await fixture();
-  h.stopAfterSealing();
-  await using first = h.makeClient();
-  await expect(
-    first.run(h.repository, { ...h.options, knowledgeBasePaths: undefined }),
-  ).rejects.toBeInstanceOf(ScanTransportClosedError);
-  const parentId = [...h.records].find(
-    ([, record]) => record.mode === "deep",
-  )![0];
-  const findings = JSON.parse(
-    await readFile(join(h.outputDir, "findings.json"), "utf8"),
-  );
-  const priorFinding = {
-    findingId: "prior-open-issue",
-    title: "Earlier issue",
-    status: "open",
-    confirmedInLatestScan: false,
-  };
-  h.setRepositoryFindings([priorFinding]);
-  h.forbidCodex();
-  await using resumed = h.makeClient();
-  const restored = await resumed.run(h.repository, {
-    ...h.options,
-    signal: undefined,
-    knowledgeBasePaths: undefined,
-    resumeScanId: parentId,
-  });
-  expect(restored.findings).toEqual(findings);
-  expect(restored.repositoryFindings).toMatchObject([priorFinding]);
-  expect(h.launches).toHaveLength(3);
-});
+test.each(["sdk", "native"] as const)(
+  "a sealed %s resume does not construct a model client or launch new work",
+  async (surface) => {
+    const h = await fixture(undefined, surface === "native");
+    h.stopAfterSealing();
+    await using first = h.makeClient();
+    await expect(
+      first.run(h.repository, { ...h.options, knowledgeBasePaths: undefined }),
+    ).rejects.toBeInstanceOf(ScanTransportClosedError);
+    const parentId = [...h.records].find(
+      ([, record]) => record.mode === "deep",
+    )![0];
+    const findings = JSON.parse(
+      await readFile(join(h.outputDir, "findings.json"), "utf8"),
+    );
+    const priorFinding = {
+      findingId: "prior-open-issue",
+      title: "Earlier issue",
+      status: "open",
+      confirmedInLatestScan: false,
+    };
+    h.setRepositoryFindings([priorFinding]);
+    h.forbidCodex();
+    if (surface === "sdk") {
+      await using resumed = h.makeClient();
+      const restored = await resumed.run(h.repository, {
+        ...h.options,
+        signal: undefined,
+        knowledgeBasePaths: undefined,
+        resumeScanId: parentId,
+      });
+      expect(restored.findings).toEqual(findings);
+      expect(restored.repositoryFindings).toMatchObject([priorFinding]);
+    } else {
+      const keys = [
+        "CODEX_HOME",
+        "CODEX_CLI_PATH",
+        "CODEX_API_KEY",
+        "OPENAI_API_KEY",
+        "CODEX_SECURITY_CONFIG_PATH",
+        "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+      ];
+      const original = keys.map((key) => [key, process.env[key]] as const);
+      try {
+        for (const key of keys) delete process.env[key];
+        Object.assign(process.env, {
+          CODEX_HOME: h.home,
+          CODEX_CLI_PATH: process.execPath,
+          OPENAI_API_KEY: "synthetic-unusable-key",
+        });
+        const parent = h.records.get(parentId)!;
+        const saved = await runWorkbench(
+          { ...parent.options, signal: undefined },
+          ["get-scan", "--scan-id", parentId],
+        );
+        const { prepareNativeScan } = await import(
+          new URL(
+            "../../../plugins/codex-security/mcp-app/src/native-scan.ts",
+            import.meta.url,
+          ).href
+        );
+        const prepared = await prepareNativeScan({
+          scan: saved["scan"],
+          recipe: parent.recipe,
+          threadId: "native-owner",
+          pluginRoot,
+          pythonPath: Bun.which("python3")!,
+          stateDirectory: join(h.root, "state"),
+          parentSandbox: { filesystemDenies: [] },
+        });
+        const resumed = prepared.client;
+        try {
+          const restored = await resumed.run(h.repository, {
+            ...prepared.options,
+            onWarning() {},
+          });
+          expect(restored.findings).toEqual(findings);
+          const completed = await runWorkbench(
+            { ...parent.options, signal: undefined },
+            ["get-scan", "--scan-id", parentId],
+          );
+          expect((completed["scan"] as JsonObject)["progress"]).toMatchObject({
+            status: "complete",
+          });
+        } finally {
+          await resumed.close();
+        }
+      } finally {
+        for (const [key, value] of original) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+      }
+    }
+    expect(h.launches).toHaveLength(3);
+  },
+);
 
 test("zero-work Deep Scan preserves a zero receipt across interrupted sealing", async () => {
   const h = await fixture();

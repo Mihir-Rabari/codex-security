@@ -993,7 +993,6 @@ with sqlite3.connect(sys.argv[1]) as connection:
                 command: { command: "synthetic-unused-codex" },
                 configuration: {},
                 environment: f.environment,
-                preserveProviderEnvironment: false,
                 pluginRoot: PLUGIN_ROOT,
               },
             }

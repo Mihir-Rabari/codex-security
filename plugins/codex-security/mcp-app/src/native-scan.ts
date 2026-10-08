@@ -23,10 +23,7 @@ import {
   snapshotNativeEnvironment,
 } from "./native-executable.js";
 import type { NativeParentSandbox } from "./native-permissions.js";
-import {
-  prepareAmbientExecution,
-  nativeScanConfiguration,
-} from "../../../../sdk/typescript/src/execution-preparation.js";
+import { nativeScanConfiguration } from "../../../../sdk/typescript/src/execution-preparation.js";
 export { nativeScanConfiguration } from "../../../../sdk/typescript/src/execution-preparation.js";
 import type { ScanResults } from "./types.js";
 
@@ -247,19 +244,13 @@ export async function prepareNativeScan(
     options.cyberAccessProgram = security[
       "cyber_access_program"
     ] as ScanOptions["cyberAccessProgram"];
-  const ambientExecution = await prepareAmbientExecution(
-    {
-      environment,
-      command: { command: codex.executable },
-      configuration: config,
-      auth: options.auth,
-      pluginRoot: input.pluginRoot,
-    },
-    signal,
-  );
-  options.auth = ambientExecution.auth;
-  const selectedEnvironment = ambientExecution.environment;
-  const configuredProvider = ambientExecution.preserveProviderEnvironment;
+  const ambientExecution = {
+    environment,
+    command: { command: codex.executable },
+    configuration: config,
+    auth: options.auth,
+    pluginRoot: input.pluginRoot,
+  };
   const client = new CodexSecurity(
     {
       pluginPath: input.pluginRoot,
@@ -267,7 +258,7 @@ export async function prepareNativeScan(
       codexOverrides: ambientExecution.configuration,
     },
     {
-      environment: selectedEnvironment,
+      environment,
       inheritedPermissions,
       ambientExecution,
     },
@@ -279,7 +270,6 @@ export async function prepareNativeScan(
       ...options,
       ...deep.settings,
       inheritedPermissions,
-      ...(configuredProvider ? { preserveProviderEnvironment: true } : {}),
       target:
         recipe?.target?.kind === "paths"
           ? recipe.target.paths
