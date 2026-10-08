@@ -30,11 +30,26 @@ export function spawnWindowsProcess(
 ) {
   const wide = (value: string) =>
     Buffer.from(value, "utf16le").toString("base64");
+  const inherited = options.env ?? process.env;
+  const env: NodeJS.ProcessEnv = Object.create(null);
+  for (const name in inherited) env[name] = inherited[name];
+  // Windows keeps the first lexicographic spelling of a duplicated env key.
+  const optionNames = Object.keys(env)
+    .filter((name) => name.toUpperCase() === "NODE_OPTIONS")
+    .sort();
+  const optionName = optionNames[0];
+  const nodeOptions = optionName === undefined ? undefined : env[optionName];
+  for (const name of optionNames) delete env[name];
+  // Target preloads must run in its cwd, without affecting the private shim.
+  const targetEnvironment =
+    nodeOptions === undefined
+      ? environment
+      : { [optionName!]: nodeOptions, ...environment };
   const payload = {
     binary,
     executable: wide(executable),
     args: args.map(wide),
-    environment: Object.entries(environment).map(([name, value]) => ({
+    environment: Object.entries(targetEnvironment).map(([name, value]) => ({
       name: wide(name),
       value: wide(value),
     })),
@@ -42,12 +57,15 @@ export function spawnWindowsProcess(
   };
   const child = spawn(process.execPath, ["--input-type=commonjs", "-e", shim], {
     ...options,
+    env,
     cwd: undefined,
     stdio: [...options.stdio, "ipc"],
   });
+  const cancelled = () => child.killed || options.signal?.aborted === true;
   child.once("spawn", () => {
+    if (cancelled()) return;
     child.send(payload, (error) => {
-      if (error) child.emit("error", error);
+      if (error && !cancelled()) child.emit("error", error);
     });
   });
   child.on("message", (message: unknown) => {

@@ -72,6 +72,54 @@ export async function processProof(
     assert.deepEqual(await once(moduleChild, "close"), [0, null]);
     assert.equal(Buffer.concat(moduleOutput).toString("utf8"), moduleOptions);
 
+    files.writeFile(
+      widePath(join(root, "hook.cjs")),
+      Buffer.from("process.env.INVENTORY_PRELOAD = 'cjs';"),
+    );
+    files.writeFile(
+      widePath(join(root, "preload.mjs")),
+      Buffer.from("process.env.INVENTORY_PRELOAD = 'esm';"),
+    );
+    for (const [key, nodeOptions, expected, override] of [
+      ["NODE_OPTIONS", "--require ./hook.cjs", "cjs", undefined],
+      ["Node_Options", "--import=./preload.mjs", "esm", undefined],
+      ["NODE_OPTIONS", "--require ./absent.cjs", "cjs", "--require ./hook.cjs"],
+    ] as const) {
+      const env = Object.fromEntries(
+        Object.entries(process.env).filter(
+          ([name]) => name.toUpperCase() !== "NODE_OPTIONS",
+        ),
+      );
+      if (key === "NODE_OPTIONS" && override === undefined)
+        env["node_options"] = "--require ./absent.cjs";
+      env[key] = nodeOptions;
+      const snapshot = { ...env };
+      const preloaded = spawnWindowsProcess(
+        binaryPath,
+        process.execPath,
+        [
+          "-e",
+          "process.stdout.write(JSON.stringify({options:process.env.NODE_OPTIONS,preloaded:process.env.INVENTORY_PRELOAD}));",
+        ],
+        { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] },
+        override === undefined ? {} : { Node_Options: override },
+      );
+      const output: Buffer[] = [],
+        errors: Buffer[] = [];
+      preloaded.stdout!.on("data", (data: Buffer) => output.push(data));
+      preloaded.stderr!.on("data", (data: Buffer) => errors.push(data));
+      assert.deepEqual(
+        await once(preloaded, "close"),
+        [0, null],
+        Buffer.concat(errors).toString(),
+      );
+      assert.deepEqual(JSON.parse(Buffer.concat(output).toString()), {
+        options: override ?? nodeOptions,
+        preloaded: expected,
+      });
+      assert.deepEqual(env, snapshot);
+    }
+
     for (let attempt = 0; attempt < 3; attempt++) {
       const quick = spawnWindowsProcess(
         binaryPath,
@@ -119,6 +167,26 @@ export async function processProof(
       ["ENOENT"],
     );
 
+    for (const mode of ["abort", "kill"] as const) {
+      const controller = new AbortController();
+      const cancelled = spawnWindowsProcess(binaryPath, process.execPath, [], {
+        stdio: ["ignore", "pipe", "pipe"],
+        ...(mode === "abort" ? { signal: controller.signal } : {}),
+      });
+      const errors: NodeJS.ErrnoException[] = [];
+      cancelled.on("error", (error) => errors.push(error));
+      const closed = new Promise<void>((resolve) =>
+        cancelled.once("close", () => resolve()),
+      );
+      if (mode === "abort") controller.abort();
+      else assert.equal(cancelled.kill(), true);
+      await closed;
+      assert.deepEqual(
+        errors.map((error) => error.code),
+        mode === "abort" ? ["ABORT_ERR"] : [],
+      );
+    }
+
     // Readiness proves the real child is running; closing the shim must close inherited pipes.
     const hanging = spawnWindowsProcess(
       binaryPath,
@@ -144,8 +212,10 @@ export async function processProof(
       wideArgumentsAndCwd: true,
       inheritedSettingsAndBinaryStreams: true,
       inheritedModuleModeForTarget: true,
+      targetPreloadsAndOverrides: true,
       exitAndSpawnErrors: true,
       failedShimReportsOnce: true,
+      earlyCancellationReportsOnce: true,
       killingShimClosesChildStreams: true,
     };
   } finally {

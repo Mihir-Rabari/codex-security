@@ -39,6 +39,8 @@ Four additional operations preserve Windows strings at the Node boundary. `windo
 
 Windows process arguments and working directories can also contain unpaired UTF-16 units. `windows-process.mts` runs a private Node subprocess shim that passes those values as bytes to `runWindowsProcess`; ordinary invocations still use Node directly. The native call inherits stdin, stdout, stderr, and the shim's environment. The shim joins a kill-on-close Job Object before starting the child and retains its handle until process exit. Descendants inherit membership, so terminating the shim also closes the child's streams. Startup errors return through Node IPC, separately from command stderr and exit status. The Windows proof checks raw arguments and working directories, binary stream forwarding, environment inheritance, exit status, startup errors, and termination cleanup. The file adapter's `readChunks` callback supports bounded reads and closes the handle when a consumer stops or throws.
 
+Target `NODE_OPTIONS` values travel through the same environment override payload instead of running during the private shim's startup. This preserves relative preloads in the target's working directory. Early cancellation skips the IPC handoff and its cancellation-induced transport errors.
+
 Build on Windows after compiling the TypeScript tools, then run:
 
 ```sh
