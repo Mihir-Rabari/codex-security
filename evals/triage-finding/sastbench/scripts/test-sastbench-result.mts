@@ -14,6 +14,7 @@ function triageResult(verdict: string, inputId = "sastbench-000000") {
         input_id: inputId,
         source_type: "scanner_ticket",
         verdict,
+        evidence: ['Literal ```code``` fence, "quoted" and \\ escaped text'],
       },
     ],
   };
@@ -37,6 +38,38 @@ assert.throws(
     ),
   { message: "Could not find a parseable triage-finding/v0 JSON result" },
 );
+const inlineSecond = triageResult("confirmed");
+inlineSecond.findings[0].evidence = [];
+for (const output of [
+  JSON.stringify(triageResult("confirmed")),
+  JSON.stringify(triageResult("confirmed"), null, 2),
+  '```json "invalid ``` ```json ' +
+    JSON.stringify(inlineSecond) +
+    "```\n```json\n" +
+    JSON.stringify(triageResult("not_actionable")) +
+    "\n```",
+  fenced.replaceAll("\n", "\r\n"),
+  'Prose {"other": true}\n' + fenced.replaceAll("```", "   ```"),
+  '```json\n"invalid\n```\n' + fenced,
+  'Prose {"other": true} ```json ' +
+    JSON.stringify(triageResult("confirmed")) +
+    "``` trailing prose",
+]) {
+  assert.equal(
+    parseCaseOutcome(output, "sastbench-000000").verdict,
+    "confirmed",
+  );
+  const result = addSastBenchMetrics(
+    extensionContext({
+      caseId: "sastbench-000000",
+      expectedGroundTruth: "true_positive",
+      output,
+    }),
+  ).result;
+  assert.equal(result.metadata.sastbench.status, "ok");
+  assert.equal(result.namedScores.strict_tp, 1);
+  assert.equal(result.namedScores.strict_fn, 0);
+}
 assert.throws(
   () =>
     parseCaseOutcome(

@@ -83,7 +83,7 @@ assertPasses(
   outputFor({
     inputId: "GHSA-example-000-vulnerable",
     verdict: "confirmed",
-  }),
+  }).replace('"evidence": []', '"evidence": ["Inline ``` fence in source."]'),
   {
     vars: {
       case_id: "ghsa-example-vulnerable",
