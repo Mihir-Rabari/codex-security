@@ -52,6 +52,26 @@ export async function processProof(
     assert.equal(result.setting, "inherited");
     assert.equal(result.rawSetting, "raw-\udfff");
 
+    const moduleOptions = "--input-type=module";
+    const moduleChild = spawnWindowsProcess(
+      binaryPath,
+      process.execPath,
+      [
+        "-e",
+        "import process from 'node:process'; process.stdout.write(process.env.NODE_OPTIONS);",
+      ],
+      {
+        cwd,
+        env: { ...process.env, NODE_OPTIONS: moduleOptions },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    const moduleOutput: Buffer[] = [];
+    moduleChild.stdout!.on("data", (data: Buffer) => moduleOutput.push(data));
+    moduleChild.stderr!.resume();
+    assert.deepEqual(await once(moduleChild, "close"), [0, null]);
+    assert.equal(Buffer.concat(moduleOutput).toString("utf8"), moduleOptions);
+
     for (let attempt = 0; attempt < 3; attempt++) {
       const quick = spawnWindowsProcess(
         binaryPath,
@@ -79,6 +99,26 @@ export async function processProof(
     assert.equal(errors.length, 1);
     assert(errors[0]!.message.length > 0);
 
+    const originalExecutable = process.execPath;
+    let missingShim: ReturnType<typeof spawnWindowsProcess>;
+    try {
+      process.execPath = join(root, "absent-node.exe");
+      missingShim = spawnWindowsProcess(binaryPath, originalExecutable, [], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } finally {
+      process.execPath = originalExecutable;
+    }
+    const shimErrors: NodeJS.ErrnoException[] = [];
+    missingShim.on("error", (error) => shimErrors.push(error));
+    await new Promise<void>((resolve) =>
+      missingShim.once("close", () => resolve()),
+    );
+    assert.deepEqual(
+      shimErrors.map((error) => error.code),
+      ["ENOENT"],
+    );
+
     // Readiness proves the real child is running; closing the shim must close inherited pipes.
     const hanging = spawnWindowsProcess(
       binaryPath,
@@ -103,7 +143,9 @@ export async function processProof(
     return {
       wideArgumentsAndCwd: true,
       inheritedSettingsAndBinaryStreams: true,
+      inheritedModuleModeForTarget: true,
       exitAndSpawnErrors: true,
+      failedShimReportsOnce: true,
       killingShimClosesChildStreams: true,
     };
   } finally {

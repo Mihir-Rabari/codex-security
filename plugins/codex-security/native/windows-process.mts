@@ -40,13 +40,15 @@ export function spawnWindowsProcess(
     })),
     ...(typeof options.cwd === "string" ? { cwd: wide(options.cwd) } : {}),
   };
-  const child = spawn(process.execPath, ["-e", shim], {
+  const child = spawn(process.execPath, ["--input-type=commonjs", "-e", shim], {
     ...options,
     cwd: undefined,
     stdio: [...options.stdio, "ipc"],
   });
-  child.send(payload, (error) => {
-    if (error) child.emit("error", error);
+  child.once("spawn", () => {
+    child.send(payload, (error) => {
+      if (error) child.emit("error", error);
+    });
   });
   child.on("message", (message: unknown) => {
     const report = message as {
