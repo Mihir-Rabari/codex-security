@@ -1617,7 +1617,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           launches.length = 0;
           await Promise.all(
             executors.map((executor, index) => {
-              // Each concurrent launch snapshots its own scan environment.
               process.env.CODEX_SECURITY_CONFIG_PATH =
                 workerConfigurations[index].path;
               process.env.CODEX_SECURITY_KNOWLEDGE_BASE =
@@ -2073,7 +2072,6 @@ async function testWorkerCyberAccessSettings() {
         launches.length = 0;
         await Promise.all(
           cases.map((testCase) => {
-            // Each scan captures its own config before its asynchronous launch.
             process.env.CODEX_SECURITY_CONFIG_PATH = testCase.configPath;
             return testCase.executor!.run(
               workerRequest(promptPath, fixture.root, { kind, resumeThreadId }),
