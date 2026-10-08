@@ -2460,9 +2460,11 @@ async function executeWorkbenchWithStateSelection(
       const primary = await executeWorkbench(pythonCommand, [
         "resolve-scan-root",
       ]);
-      if (!(await workbenchStoreExists(dirname(primary.scanRoot as string)))) {
+      if (
+        !(await workbenchStoreMayExist(dirname(primary.scanRoot as string)))
+      ) {
         const fallback = join(await scanRoot(), "workbench-state");
-        if (await workbenchStoreExists(fallback)) {
+        if (await workbenchStoreMayExist(fallback)) {
           fallbackWorkbenchStateDir = Promise.resolve(fallback);
           return await executeWorkbench(pythonCommand, args, fallback, input);
         }
@@ -2498,12 +2500,14 @@ async function executeWorkbenchWithStateSelection(
   });
 }
 
-async function workbenchStoreExists(stateDir: string): Promise<boolean> {
+async function workbenchStoreMayExist(stateDir: string): Promise<boolean> {
   try {
     await fs.stat(join(stateDir, "workbench.sqlite3"));
     return true;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return false;
+    if (code === "EACCES" || code === "EPERM") return true;
     throw error;
   }
 }

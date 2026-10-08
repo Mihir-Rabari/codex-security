@@ -163,6 +163,54 @@ async function testWorkbenchStateFallback() {
         }
       }
 
+      const inaccessibleHome = path.join(fixtureRoot, "inaccessible-home");
+      const inaccessibleState = path.join(
+        inaccessibleHome,
+        "state",
+        "plugins",
+        "codex-security",
+      );
+      const inaccessibleScanRoot = path.join(fixtureRoot, "inaccessible-scans");
+      await mkdir(inaccessibleState, { recursive: true });
+      await chmod(inaccessibleState, 0o000);
+      const inaccessibleServer = startServer(serverBundlePath, {
+        CODEX_HOME: inaccessibleHome,
+        CODEX_SECURITY_SCAN_ROOT: inaccessibleScanRoot,
+        CODEX_SECURITY_STATE_DIR: undefined,
+        PYTHON: realPython,
+      });
+      try {
+        await assert.rejects(
+          stat(path.join(inaccessibleState, "workbench.sqlite3")),
+          { code: "EACCES" },
+        );
+        await initialize(inaccessibleServer, 1);
+        assertNoError(
+          await startPromptOnlyScan(inaccessibleServer, 2, targetPath),
+        );
+        assert.equal(
+          (
+            await stat(
+              path.join(
+                inaccessibleScanRoot,
+                "workbench-state",
+                "workbench.sqlite3",
+              ),
+            )
+          ).isFile(),
+          true,
+        );
+        assert.equal(
+          inaccessibleServer
+            .stderrEvents()
+            .filter((event) => event.event === "state_fallback_pinned").length,
+          1,
+        );
+      } finally {
+        await inaccessibleServer.stop();
+        await chmod(inaccessibleState, 0o700);
+      }
+
       const readFirstHome = path.join(fixtureRoot, "read-first-home");
       const readFirstDefaultState = path.join(
         readFirstHome,
